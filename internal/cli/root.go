@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/ops"
+	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 	"github.com/mimajiushi/godot-ai-cli/internal/update"
 	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
@@ -77,17 +78,20 @@ func Execute() int {
 	return 0
 }
 
-// versionTemplate renders -v/--version with the supported Godot range so
-// users can immediately tell whether their editor is compatible.
+// versionTemplate renders -v/--version with the supported Godot range and
+// the bundled plugin version (which upstream godot-ai release the vendored
+// editor plugin was forked from) so users can immediately tell whether
+// their editor is compatible.
 func versionTemplate() string {
 	return fmt.Sprintf(`godot-ai-cli version {{.Version}}
   release source:      https://github.com/%s/%s
   protocol version:    %d
   supported Godot:     %s+ (%s+ recommended)
+  bundled plugin:      godot-ai v%s (forked, strict version match required)
   plugin command coverage: %d ops
 `, version.RepoOwner, version.RepoName, version.ProtocolVersion,
 		version.SupportedGodotMin, version.SupportedGodotRecommended,
-		len(ops.All()))
+		pluginmeta.PluginVersion(), len(ops.All()))
 }
 
 // newVersionCommand provides the explicit `version` subcommand mirroring
@@ -95,7 +99,7 @@ func versionTemplate() string {
 func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print the CLI version and supported Godot versions",
+		Short: "Print the CLI version, supported Godot versions, and bundled plugin version",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			tpl := versionTemplate()

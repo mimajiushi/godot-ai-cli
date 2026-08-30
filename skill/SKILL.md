@@ -1,0 +1,60 @@
+---
+name: godot-ai-skill
+description: |
+  Drive a live Godot editor (4.5+, 4.7+ recommended) from the shell via the godot-ai-cli single binary — no MCP. Covers: installing/updating the CLI from GitHub Releases, launching a project headed or --headless (one `launch` call installs the bundled godot_ai plugin, starts the local daemon, and opens the editor), ~147 editor ops as JSON-printing subcommands (scene/node/script/signal/UI/theme/animation/material/resource/tilemap/particles/camera), running in-editor GDScript test suites, driving the running game with synthetic input, and editor/game screenshots. Use this skill whenever the user asks to operate, automate, or script the Godot editor, build or edit a Godot scene, create nodes/UI/animations, run Godot tests, screenshot the editor, or mentions godot-ai-cli / the godot_ai plugin — including Chinese phrases such as 操作Godot编辑器、控制Godot、建场景、搭界面、跑测试、驱动运行中的游戏、编辑器截图验证. Do NOT use for setting up the upstream Python/MCP godot-ai server, for general Godot engine Q&A, or for offline file edits that need no live editor.
+---
+
+# godot-ai-cli
+
+Drive a live Godot editor through the `godot-ai-cli` binary. One `launch` installs the bundled `godot_ai` plugin into the project, starts the local daemon (HTTP 8000 / plugin WebSocket 9500 by default), opens the editor, and waits for the plugin handshake; afterwards every editor operation is a subcommand printing one English JSON object.
+
+## Inputs to collect
+
+- Project directory containing `project.godot` (required by `launch`; ask when ambiguous).
+- Headed vs `--headless`: headless is for CI-style JSON operations only — the viewport renders nothing, so screenshots fail structured (see Failure handling). Anything visual needs a windowed editor.
+- Godot binary path only when auto-detection finds nothing or the wrong one (`--godot` flag or `GODOT_BIN` env).
+- Custom ports only when 8000/9500 are occupied (see Failure handling).
+
+## Procedure
+
+1. CLI present? Run `godot-ai-cli -v`. If missing, install with the bundled script for the current platform: `bash scripts/install.sh` (linux/darwin/Git-Bash) or `powershell -ExecutionPolicy Bypass -File scripts/install.ps1` (Windows). The script resolves the latest GitHub release of `mimajiushi/godot-ai-cli`, downloads `godot-ai-cli-<ver>-<os>-<arch>.zip` plus the release checksums, verifies SHA256, installs, and prints the verified version. When the repo has no published release yet it says so and exits — then build from source instead (`go build -o godot-ai-cli.exe ./cmd/godot-ai-cli` in a clone; needs Go). Overwriting an existing install is the documented behavior; the version check after install is what proves success.
+2. Godot present? Run `godot-ai-cli godot detect` — it probes `GODOT_BIN`, PATH, and the conventional per-OS install dirs, the same sources launch resolves from (launch adds the `--godot` flag on top). Empty `candidates` → have the user install Godot 4.7+ or supply `--godot`. Below 4.5, launch fails with `GODOT_UNSUPPORTED`; 4.5–4.6 works — warn the user that 4.7+ is recommended; 5.x launches with an untested-major warning in the payload.
+3. Launch: `godot-ai-cli launch --project <dir>` and wait for `{"status":"ready",...}`. Add `--headless` for CI, `--wait 90` on slow machines, `--http-port N --ws-port M` when defaults are taken. Re-running launch while a session is live reuses the connected editor instead of opening a second one.
+4. Operate via the domain subcommands. The full catalog with every flag, timeout, and write gate is in references/commands.md — or ask the binary: `godot-ai-cli commands` (text), `godot-ai-cli commands --json --domain node`, `godot-ai-cli <domain> <op> -h`. Node paths are scene-root-absolute (`/Root/Child`, `""` = the scene root) — the conventions section of references/commands.md has the details. Use `call <plugin_command> --params '<json>'` for anything without a typed subcommand, and `batch execute --file ops.json` to run several plugin commands atomically (rollback on first error). Canonical end-to-end recipes are in references/workflows.md.
+5. Verify after each mutation batch, not once at the end: `scene get-hierarchy` for structure, `node get-properties --path <p>` for values, `logs read --source plugin|game|editor` for errors, `editor state` for readiness and play state. Screenshot checkpoints (`editor screenshot`) require the windowed editor.
+6. Stop when done: `godot-ai-cli stop` (no `--http-port` needed — launch recorded the ports; pass it only to stop a daemon other than the last launched). stop asks connected editors to quit, shuts the daemon down, and — when launch had overridden the plugin ports in the user's global EditorSettings — restores them byte-identically; the payload then carries `settings_restored: true`.
+
+## Output contract
+
+- Success: one JSON object on stdout, exit 0. `launch` ends with `{"status":"ready","session_id":...,"godot_version":...,"warnings":[...]}` — surface non-empty `warnings` to the user.
+- Failure: `{"status":"error","error":{"code","message","data"}}` on stdout, exit 1. Route recovery on `error.code` and `error.data.sub_code`; honor `error.data.retryable` before blind retries.
+- `--pretty` (placed before the subcommand) indents JSON when showing output to humans.
+- A task is finished only when: mutations were read back via verify ops, a running game was stopped (`project stop`), editor + daemon were stopped (`stop`), and custom-port overrides are confirmed gone (`settings_restored` in the stop payload, or `status` showing `ports_override_active: false`).
+
+## Failure handling
+
+Route on `error.code`; the full taxonomy with per-code recovery lives in references/troubleshooting.md. The load-bearing cases:
+
+- `FOREIGN_SERVER` at launch: port 8000/9500 is held by another process — commonly the upstream Python godot-ai server. Do not kill it. Re-launch on free ports, e.g. `--http-port 18000 --ws-port 19500`. launch records the ports (last-daemon.json in the user cache dir), so later commands — including `stop` — find the daemon WITHOUT repeating `--http-port`; the explicit flag still wins when given, and resolution falls back to port 8000 when the recorded port is dead. (Ops only take `--http-port`; the WS port is chosen once at launch and carried by the daemon.)
+- `SETTINGS_OVERRIDE_ACTIVE`: a previous custom-port session's overrides are still live in the shared global EditorSettings. Run `stop --http-port <active_http_port>` (named in `error.data`) first, then re-launch.
+- `DAEMON_MISMATCH`: the running daemon's WS port or plugin version differs from the request — stop it or match its ports.
+- `EDITOR_NOT_READY`: read `data.sub_code`. `EDITOR_IMPORTING` — retryable, the daemon already held the write ~8s; retry once. `EDITOR_PLAYING` — run `project stop` first. `EDITOR_NO_SCENE` — `scene open` first. `EDITOR_GAME_NOT_RUNNING` — `project run` first. `EDITOR_VIEWPORT_EMPTY` — headless viewport; not retryable, relaunch windowed.
+- `PLUGIN_DISCONNECTED` / `TRANSPORT_TIMEOUT`: transient transport faults; retry once, then inspect `status`.
+- `LAUNCH_TIMEOUT`: the editor is usually still starting — check `status` for a session before retrying with a larger `--wait`.
+- `test run` reports mass phantom failures with a `scene_warning` field: scene-dependent suites assume the project's main scene is the edited scene — `scene open` it first, then re-run (see references/workflows.md).
+
+## Windows (win32) platform notes
+
+- The Windows binary is `godot-ai-cli.exe`; `scripts/install.ps1` installs to `%LOCALAPPDATA%\Programs\godot-ai-cli` and appends that directory to the user PATH via `[Environment]::SetEnvironmentVariable(..., 'User')`. New terminals inherit it; the current shell does not — invoke the full path until a new shell is opened.
+- Under Git Bash prefer forward slashes inside flag values (`--project C:/games/rpg`, `--godot D:/tools/godot.exe`).
+- Git Bash (MSYS) rewrites flag values that start with `/`: `--parent-path /Root/Child` arrives as `C:/Program Files/Git/Root/Child` and fails with `NODE_NOT_FOUND`. Either prefix the command with `MSYS_NO_PATHCONV=1` (e.g. `MSYS_NO_PATHCONV=1 godot-ai-cli node create --parent-path /Level1 ...`) or use the `""`/relative forms (`--parent-path ""` targets the scene root). PowerShell and cmd.exe are unaffected.
+- JSON quoting: PowerShell accepts `--params '{"a":1}'` with single quotes; cmd.exe needs double quotes with inner ones escaped. For larger payloads (`batch execute`, `ui build-layout`, `game input-sequence`) write the JSON to a file and use `--file`/file-reading flags instead of fighting quoting.
+- `scripts/install.sh` also runs under Git Bash; when `sha256sum` is absent it falls back to `certutil -hashfile` (and to `shasum -a 256` on macOS).
+
+## Reference routing
+
+| Need | Read |
+|---|---|
+| Flags, timeout, write gate, or plugin command for any of the 147 ops | references/commands.md |
+| End-to-end recipes: build a scene, UI + theme, animation, run test suites, game run + input, windowed screenshot loop, headless CI | references/workflows.md |
+| Error-code taxonomy, port conflicts, EditorSettings backup/restore, headless caveats | references/troubleshooting.md |

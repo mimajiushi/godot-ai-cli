@@ -1,0 +1,15 @@
+# Binaries
+godot-ai-cli
+godot-ai-cli.exe
+*.old
+/dist/
+
+# Go
+*.test
+*.out
+/vendor/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+desktop.ini

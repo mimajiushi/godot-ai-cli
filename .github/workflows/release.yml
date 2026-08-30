@@ -1,0 +1,154 @@
+# Release: on a vX.Y.Z tag push, build the six platform binaries with the
+# version stamped via ldflags, package them into the naming contract that
+# internal/update consumes (godot-ai-cli-<ver>-<goos>-<goarch>.zip +
+# godot-ai-cli-<ver>-checksums.txt), add the godot-ai-skill.zip bundle, and
+# publish a GitHub release with auto-generated notes.
+#
+# `workflow_dispatch` is a dry-run: same build and packaging, but artifacts
+# are only uploaded to the workflow run — no release is created.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp (x.y.z) — dry-run only, no release is created"
+        required: false
+        default: "0.1.0"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # The repo's internal/version.Version is ldflags-injected (default
+  # "0.1.0-dev"), so the only version gate is the tag shape; the build below
+  # stamps the real version into the binary.
+  validate:
+    name: validate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      is_tag: ${{ steps.ver.outputs.is_tag }}
+    steps:
+      - name: Resolve and validate the semver version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="$GITHUB_REF_NAME"
+            # Strict semver tags only: vX.Y.Z or vX.Y.Z-<prerelease>.
+            if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag '$tag' is not v<semver> (vX.Y.Z or vX.Y.Z-<prerelease>)"
+              exit 1
+            fi
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "is_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            ver="${{ inputs.version }}"
+            if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::version input '$ver' is not <semver> (x.y.z or x.y.z-<prerelease>)"
+              exit 1
+            fi
+            echo "version=$ver" >> "$GITHUB_OUTPUT"
+            echo "is_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [windows, linux, darwin]
+        goarch: [amd64, arm64]
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build (version stamped via ldflags)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          bin="godot-ai-cli"
+          [ "$GOOS" = "windows" ] && bin="godot-ai-cli.exe"
+          mkdir -p out
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/mimajiushi/godot-ai-cli/internal/version.Version=$VERSION" \
+            -o "out/$bin" ./cmd/godot-ai-cli
+
+      # The zip MUST contain only godot-ai-cli[.exe] at its root — this is
+      # the contract internal/update.ExtractBinary relies on.
+      - name: Package zip (update-asset contract)
+        run: |
+          set -euo pipefail
+          bin="godot-ai-cli"
+          [ "${{ matrix.goos }}" = "windows" ] && bin="godot-ai-cli.exe"
+          zip -j "godot-ai-cli-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "out/$bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: godot-ai-cli-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: godot-ai-cli-*.zip
+          retention-days: 7
+
+  release:
+    name: package + publish
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      # skill/ is the bundled agent-skill snapshot (see script/sync-skill.sh).
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: godot-ai-cli-*
+          path: dist
+          merge-multiple: true
+
+      # `<sha256>  <filename>` lines — the exact format
+      # internal/update.verifyChecksum parses.
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum godot-ai-cli-*.zip > "godot-ai-cli-${VERSION}-checksums.txt"
+
+      # The agent skill ships alongside the binaries: SKILL.md, scripts/,
+      # references/ — everything under skill/ except OS junk.
+      - name: Package the agent skill
+        run: |
+          set -euo pipefail
+          test -f skill/SKILL.md
+          cd skill
+          zip -r "../dist/godot-ai-skill.zip" . -x "*.DS_Store" -x "*Thumbs.db" -x "*desktop.ini"
+
+      - name: Upload dry-run artifacts
+        if: needs.validate.outputs.is_tag == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-${{ env.VERSION }}
+          path: dist/
+          retention-days: 7
+
+      - name: Create GitHub release
+        if: needs.validate.outputs.is_tag == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          # vX.Y.Z-<anything> publishes as a prerelease.
+          prerelease: ${{ contains(github.ref_name, '-') }}

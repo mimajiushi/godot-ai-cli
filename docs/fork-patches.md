@@ -30,17 +30,26 @@ running godot-ai-cli daemon is adopted exactly like an upstream compatible
 server. The gate is a function call so the analyzer does not flag the kept,
 dormant spawn sequence below as unreachable.
 
-## 3. `mcp_dock.gd` — three UI changes
+## 3. `mcp_dock.gd` — UI changes and client-config gating
 
 - **Self-update removed** (~line 777): `_update_manager = null`. Plugin
   updates ship with the godot-ai-cli release instead of an in-editor
   self-updater; the update banner stays hidden and every other
   `_update_manager` reference is already null-guarded upstream.
-- **MCP client-configuration UI hidden** (~lines 841, 850, 3568): the
+- **MCP client-configuration UI hidden** (~lines 846, 855, 3593): the
   clients refresh button, the "Clients & Tools" button and the
   drift-reconfigure banner never show — client configuration is a CLI/skill
   concern in the fork.
-- **Dev-mode toggle and Setup section hidden** (~lines 943, 1608): both only
+- **Remaining MCP client-config paths gated off** (~lines 591, 2168, 2497,
+  3096, 3272): `_dispatch_client_action` early-returns before any
+  `ClientConfigurator.configure`/`remove` worker can spawn (defense in
+  depth); `_on_open_clients_window` is a no-op; the "Configure an AI
+  client ->" CTA is force-hidden; and both background probe paths —
+  `_perform_initial_client_status_refresh` and the focus-in refresh via
+  `_should_refresh_client_statuses_on_focus_in` — skip their per-client
+  CLI probes. With `plugin.gd` not registering the wire commands (§4),
+  every in-editor route into client configuration is closed.
+- **Dev-mode toggle and Setup section hidden** (~lines 948, 1613): both only
   expose Python dev-server / uv controls, which are meaningless without a
   Python backend (`ForkConfig.external_daemon_mode()`).
 

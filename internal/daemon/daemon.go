@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -36,6 +37,10 @@ const (
 	// maxExecuteTimeoutSec caps caller-provided timeouts (test runs can
 	// legitimately take minutes; beyond this the call is a bug).
 	maxExecuteTimeoutSec = 600.0
+
+	// maxMutationBodyBytes caps the request body of the POST mutation
+	// endpoints. Bodies are small JSON envelopes; 8 MiB is generous headroom.
+	maxMutationBodyBytes = 8 << 20
 )
 
 // Config configures one daemon instance.
@@ -219,7 +224,10 @@ func (d *Daemon) writePIDFile() error {
 // handleShutdown gracefully stops the daemon. The response goes out first;
 // the actual shutdown runs after a short delay so this very request is not
 // killed mid-write.
-func (d *Daemon) handleShutdown(w http.ResponseWriter, _ *http.Request) {
+func (d *Daemon) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if !requireJSONContentType(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "shutting_down"})
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -305,6 +313,10 @@ type activateRequest struct {
 
 // handleActivate switches the active session.
 func (d *Daemon) handleActivate(w http.ResponseWriter, r *http.Request) {
+	if !requireJSONContentType(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxMutationBodyBytes)
 	var req activateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
 		writeJSON(w, http.StatusBadRequest, (&bridge.CommandError{
@@ -341,6 +353,10 @@ type executeRequest struct {
 // a JSON body — agents read the body; transport-level HTTP codes are not
 // part of the contract.
 func (d *Daemon) handleExecute(w http.ResponseWriter, r *http.Request) {
+	if !requireJSONContentType(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxMutationBodyBytes)
 	var req executeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Command == "" {
 		writeJSON(w, http.StatusOK, (&bridge.CommandError{
@@ -374,6 +390,24 @@ func (d *Daemon) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "data": data})
+}
+
+// requireJSONContentType guards the loopback mutation endpoints against
+// browser CSRF: cross-origin forms/fetch can only send CORS-safelisted
+// content types (text/plain & friends) without a preflight this server
+// never answers, so requiring application/json rejects those requests
+// outright. A charset suffix on application/json is accepted.
+func requireJSONContentType(w http.ResponseWriter, r *http.Request) bool {
+	ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || ct != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, (&bridge.CommandError{
+			Code:    "UNSUPPORTED_CONTENT_TYPE",
+			Message: "Content-Type must be application/json",
+			Data:    map[string]any{"retryable": false},
+		}).ToJSON())
+		return false
+	}
+	return true
 }
 
 // writeJSON serializes v as the response body.

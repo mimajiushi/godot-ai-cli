@@ -534,6 +534,13 @@ func ExtractBinary(zipData []byte, goos string) ([]byte, error) {
 	return nil, &Error{Code: CodeArchiveInvalid, Message: fmt.Sprintf("the release asset does not contain %s", want)}
 }
 
+// writeFile and rename are the os.WriteFile / os.Rename seams the Windows
+// replace path uses; tests swap them to inject mid-swap failures.
+var (
+	writeFile = os.WriteFile
+	rename    = os.Rename
+)
+
 // ReplaceExecutable swaps the binary at target for data.
 //
 // Windows cannot overwrite a running executable, but it CAN rename one:
@@ -553,12 +560,18 @@ func ReplaceExecutable(goos, target string, data []byte) error {
 		if err := os.Remove(old); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("remove the stale backup %s: %v", old, err)}
 		}
-		if err := os.Rename(target, old); err != nil {
+		if err := rename(target, old); err != nil {
 			return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("move %s aside: %v", target, err)}
 		}
-		if err := os.WriteFile(target, data, 0o755); err != nil {
-			// Roll back so the install is never left without a binary.
-			_ = os.Rename(old, target)
+		if err := writeFile(target, data, 0o755); err != nil {
+			// Roll back so the install is never left without a binary. When
+			// even the rollback fails, the message must say exactly where
+			// the previous binary survives for manual recovery.
+			if rbErr := rename(old, target); rbErr != nil {
+				return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf(
+					"write the new binary to %s: %v; rolling back also failed: %v — the previous binary survives at %s",
+					target, err, rbErr, old)}
+			}
 			return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("write the new binary to %s: %v", target, err)}
 		}
 		return nil

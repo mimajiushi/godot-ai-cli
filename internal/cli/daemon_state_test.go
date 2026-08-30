@@ -298,15 +298,23 @@ func TestStopKeepsRecordOfOtherDaemon(t *testing.T) {
 }
 
 // TestServeWritesLastDaemon: a directly-run serve records its bound ports
-// (ephemeral here) so one-shot commands can find it.
+// (free ports reserved here — the CLI command rejects 0, ephemeral binding
+// is a daemon.Start-only test facility) so one-shot commands can find it.
 func TestServeWritesLastDaemon(t *testing.T) {
 	stubCacheDir(t)
+
+	httpLn := listenFree(t)
+	httpPort := httpLn.Addr().(*net.TCPAddr).Port
+	_ = httpLn.Close()
+	wsLn := listenFree(t)
+	wsPort := wsLn.Addr().(*net.TCPAddr).Port
+	_ = wsLn.Close()
 
 	cmd := NewRootCommand()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"serve", "--http-port", "0", "--ws-port", "0"})
+	cmd.SetArgs([]string{"serve", "--http-port", itoa(httpPort), "--ws-port", itoa(wsPort)})
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Execute() }()

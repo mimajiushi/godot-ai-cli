@@ -134,7 +134,8 @@ func TestCommandsDomainFilter(t *testing.T) {
 	}
 }
 
-// TestCommandsUnknownDomain: a bogus domain is an error, not an empty list.
+// TestCommandsUnknownDomain: a bogus domain is an error carrying the
+// USAGE_ERROR envelope on stdout, not an empty list or bare text.
 func TestCommandsUnknownDomain(t *testing.T) {
 	cmd := NewRootCommand()
 	var buf bytes.Buffer
@@ -143,6 +144,58 @@ func TestCommandsUnknownDomain(t *testing.T) {
 	cmd.SetArgs([]string{"commands", "--domain", "nope"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("unknown domain accepted")
+	}
+	var envelope struct {
+		Status string `json:"status"`
+		Error  struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &envelope); err != nil {
+		t.Fatalf("stdout is not the JSON envelope: %v\n%s", err, buf.String())
+	}
+	if envelope.Status != "error" || envelope.Error.Code != "USAGE_ERROR" {
+		t.Errorf("envelope = %s", buf.String())
+	}
+	if !strings.Contains(envelope.Error.Message, `"nope"`) {
+		t.Errorf("envelope message does not name the bogus domain: %s", envelope.Error.Message)
+	}
+}
+
+// TestLaunchMissingProjectPrintsUsageEnvelope: a cobra-level failure
+// (required --project flag missing) still honors the JSON envelope
+// contract — execute wraps it as USAGE_ERROR on stdout and exits 1.
+func TestLaunchMissingProjectPrintsUsageEnvelope(t *testing.T) {
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"launch"})
+
+	// Capture the shared stderr writer so the test stays silent.
+	oldStderr := stderr
+	stderr = &bytes.Buffer{}
+	t.Cleanup(func() { stderr = oldStderr })
+
+	if code := execute(cmd); code != 1 {
+		t.Fatalf("execute exit code = %d, want 1", code)
+	}
+	var envelope struct {
+		Status string `json:"status"`
+		Error  struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &envelope); err != nil {
+		t.Fatalf("stdout is not the JSON envelope: %v\n%s", err, buf.String())
+	}
+	if envelope.Status != "error" || envelope.Error.Code != "USAGE_ERROR" {
+		t.Errorf("envelope = %s", buf.String())
+	}
+	if !strings.Contains(envelope.Error.Message, "project") {
+		t.Errorf("envelope message does not mention the missing flag: %s", envelope.Error.Message)
 	}
 }
 

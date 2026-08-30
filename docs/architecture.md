@@ -28,6 +28,14 @@ upstream Python server) and the CLI surface `GET /godot-ai/cli/health`,
 `POST /godot-ai/cli/activate`, `POST /godot-ai/cli/execute`,
 `POST /godot-ai/cli/shutdown` (`internal/daemon/daemon.go`).
 
+Browser CSRF hardening: everything binds loopback only, and on top of that
+the POST mutation endpoints require `Content-Type: application/json`
+(rejected with 415 otherwise) and cap bodies at 8 MiB — cross-origin
+"simple requests" from a browser cannot satisfy that content type without a
+preflight the daemon never answers. The WebSocket bridge rejects upgrade
+requests whose `Origin` header names a non-loopback host with 403; the
+plugin sends no `Origin` header at all, which stays accepted.
+
 ## Wire envelope
 
 JSON frames (`internal/bridge/envelope.go`), mirrored from the upstream

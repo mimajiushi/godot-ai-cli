@@ -233,6 +233,11 @@ func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 		if err := json.Unmarshal([]byte(raw), &params); err != nil {
 			return nil, fmt.Errorf("--params is not a valid JSON object: %v", err)
 		}
+		// Unmarshalling "null" zeroes the map to nil; re-initialize it so
+		// the writes below (batch --file, non-zero defaults) never panic.
+		if params == nil {
+			params = map[string]any{}
+		}
 	}
 	if op.Domain == "batch" && op.Name == "execute" {
 		if file, _ := cmd.Flags().GetString("file"); file != "" {

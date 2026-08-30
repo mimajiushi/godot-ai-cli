@@ -35,6 +35,10 @@ real headless editor.
   discoverable through `godot-ai-cli commands [--json]`.
 - **No telemetry, ever.** Nothing in the CLI, daemon or plugin may phone
   home; the upstream plugin's telemetry is stripped, not just disabled.
+- **Plugin upgrades never delete files.** `plugin/install.go` only
+  overwrites; a file a newer plugin version dropped stays behind in
+  upgraded projects (a stale `.gd` with a colliding `class_name` can break
+  them) — a known, accepted limitation.
 
 ## Fork-patch policy
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,6 +150,58 @@ func TestSessionsEmpty(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Errorf("sessions = %v, want empty", sessions)
+	}
+}
+
+// postRaw performs a POST with an explicit Content-Type and decodes the
+// JSON response.
+func postRaw(t *testing.T, url, contentType, body string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build POST %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, decodeBody(t, resp)
+}
+
+// TestMutationEndpointsRejectNonJSONContentType pins the browser-CSRF
+// guard: cross-origin simple requests (text/plain & friends) get a 415
+// envelope on every POST endpoint, and the daemon survives untouched.
+func TestMutationEndpointsRejectNonJSONContentType(t *testing.T) {
+	d := startDaemon(t)
+	for _, path := range []string{
+		"/godot-ai/cli/execute",
+		"/godot-ai/cli/activate",
+		"/godot-ai/cli/shutdown",
+	} {
+		code, body := postRaw(t, baseURL(d)+path, "text/plain", "{}")
+		if code != http.StatusUnsupportedMediaType {
+			t.Errorf("POST %s text/plain: status = %d, want 415", path, code)
+		}
+		if errObj := errorBody(t, body); errObj["code"] != "UNSUPPORTED_CONTENT_TYPE" {
+			t.Errorf("POST %s text/plain: code = %v, want UNSUPPORTED_CONTENT_TYPE", path, errObj["code"])
+		}
+	}
+
+	// A charset suffix on application/json stays accepted.
+	code, body := postRaw(t, baseURL(d)+"/godot-ai/cli/execute",
+		"application/json; charset=utf-8", `{"command":"get_editor_state"}`)
+	if code != http.StatusOK {
+		t.Fatalf("execute with charset suffix: status = %d, want 200", code)
+	}
+	if errObj := errorBody(t, body); errObj["code"] != "PLUGIN_DISCONNECTED" {
+		t.Errorf("code = %v, want PLUGIN_DISCONNECTED (no editor connected)", errObj["code"])
+	}
+
+	// The rejected shutdown must not have torn the daemon down.
+	if code, _ := getJSON(t, baseURL(d)+"/godot-ai/cli/health"); code != http.StatusOK {
+		t.Error("daemon died despite the rejected shutdown request")
 	}
 }
 

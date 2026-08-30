@@ -71,7 +71,13 @@ func decodeBody(resp *http.Response) (map[string]any, error) {
 	}
 	var out map[string]any
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode daemon response %q: %w", raw, err)
+		// A garbage/huge body (wrong server on the port, proxy page, ...)
+		// must not flood the CLI's own error output — cap the echo.
+		preview := string(raw)
+		if len(preview) > 512 {
+			preview = preview[:512] + "…(truncated)"
+		}
+		return nil, fmt.Errorf("decode daemon response %q: %w", preview, err)
 	}
 	return out, nil
 }

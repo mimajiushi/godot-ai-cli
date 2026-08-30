@@ -250,13 +250,22 @@ Examples:
 	return cmd
 }
 
-// errExit is a bare error whose message is the machine-readable code;
-// Execute prints it to stderr and exits 1 while stdout stays clean JSON.
+// errExit marks a failure whose JSON payload was already printed to stdout
+// (e.g. the daemon's own error envelope); execute exits 1 without emitting
+// a second envelope.
 type exitError string
 
 func (e exitError) Error() string { return string(e) }
 
-func errExit(code string) error { return exitError(code) }
+func errExit(code string) error { return &reportedError{err: exitError(code)} }
+
+// reportedError marks an error whose JSON payload was already printed to
+// stdout by the failing subcommand; execute must not emit a second
+// (USAGE_ERROR) envelope for it.
+type reportedError struct{ err error }
+
+func (e *reportedError) Error() string { return e.err.Error() }
+func (e *reportedError) Unwrap() error { return e.err }
 
 // aliveEditorPIDs returns the subset of pids still running.
 func aliveEditorPIDs(pids []int) []int {

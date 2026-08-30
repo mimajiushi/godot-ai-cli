@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -153,6 +155,45 @@ func TestCollectParamsWrapOp(t *testing.T) {
 	nested, ok := params["params"].(map[string]any)
 	if !ok || nested["key"] != "Space" {
 		t.Errorf("nested params = %v", params)
+	}
+}
+
+// TestCollectParamsNullParams: --params 'null' unmarshals to a nil map;
+// collectParams must re-initialize it so the later writes (batch --file,
+// non-zero flag defaults) cannot panic.
+func TestCollectParamsNullParams(t *testing.T) {
+	// batch execute --params null --file: the commands write lands cleanly.
+	op, cmd := leafFor(t, "batch", "execute")
+	file := filepath.Join(t.TempDir(), "cmds.json")
+	if err := os.WriteFile(file, []byte(`[{"command":"editor_state"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("params", "null"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("file", file); err != nil {
+		t.Fatal(err)
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands, ok := params["commands"].([]any)
+	if !ok || len(commands) != 1 {
+		t.Errorf("commands = %v", params["commands"])
+	}
+
+	// scene get-hierarchy --params null: the non-zero depth default lands.
+	op, cmd = leafFor(t, "scene", "get-hierarchy")
+	if err := cmd.Flags().Set("params", "null"); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["depth"] != 10 {
+		t.Errorf("depth = %v, want the non-zero default 10", params["depth"])
 	}
 }
 

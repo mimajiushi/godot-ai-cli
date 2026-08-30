@@ -262,6 +262,40 @@ func TestReplaceExecutableUnix(t *testing.T) {
 	}
 }
 
+// TestReplaceExecutableWindowsRollbackFailure: when the new-binary write
+// fails AND the rollback rename also fails, the error must state that the
+// previous binary survives at <exe>.old — that path is the only recovery.
+func TestReplaceExecutableWindowsRollbackFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "godot-ai-cli.exe")
+	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject: the write of the new binary fails, and so does the rename
+	// that would roll the install back.
+	origWrite, origRename := writeFile, rename
+	writeFile = func(string, []byte, os.FileMode) error { return errors.New("injected write failure") }
+	rename = func(oldpath, newpath string) error {
+		if strings.HasSuffix(oldpath, ".old") {
+			return errors.New("injected rollback failure")
+		}
+		return origRename(oldpath, newpath)
+	}
+	t.Cleanup(func() { writeFile, rename = origWrite, origRename })
+
+	err := ReplaceExecutable("windows", target, []byte("new-binary"))
+	assertCode(t, err, CodeReplaceFailed)
+	if !strings.Contains(err.Error(), target+".old") {
+		t.Errorf("error does not name the surviving backup %s.old: %v", target, err)
+	}
+	if !strings.Contains(err.Error(), "survives") {
+		t.Errorf("error does not state the binary survives: %v", err)
+	}
+	// The injected rollback failure left the old binary at <exe>.old.
+	assertFileContent(t, target+".old", "old-binary")
+}
+
 // TestReplaceExecutableMissingTarget refuses to create a binary where no
 // install exists (a mistyped --from must not drop a stray executable).
 func TestReplaceExecutableMissingTarget(t *testing.T) {

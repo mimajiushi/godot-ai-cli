@@ -39,6 +39,10 @@ func addonDir(projectDir string) string {
 // deletes the target directory itself (it may be a junction/symlink in dev
 // setups) and never deletes extra user files inside it.
 //
+// Known limitation: because nothing is ever deleted, an upgrade does not
+// remove files that a newer plugin version dropped — a stale .gd with a
+// colliding class_name could break an upgraded project.
+//
 // Files are written in installPlan order — plugin.cfg LAST. Invariant:
 // InstalledVersion keys off plugin.cfg, so a kill mid-extract must never
 // leave a version-matching descriptor without the full file tree behind it.

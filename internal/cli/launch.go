@@ -19,8 +19,9 @@ import (
 	"github.com/mimajiushi/godot-ai-cli/plugin"
 )
 
-// jsonError prints a protocol-shaped error to stdout and returns a bare
-// error so Execute still exits 1 without cobra usage spam.
+// jsonError prints a protocol-shaped error to stdout and returns a
+// reportedError so execute still exits 1 without double-printing the
+// envelope or cobra usage spam.
 func jsonError(cmd *cobra.Command, code, message string, data map[string]any) error {
 	if data == nil {
 		data = map[string]any{}
@@ -29,7 +30,7 @@ func jsonError(cmd *cobra.Command, code, message string, data map[string]any) er
 		"status": "error",
 		"error":  map[string]any{"code": code, "message": message, "data": data},
 	}, false)
-	return exitError(code)
+	return &reportedError{err: exitError(code)}
 }
 
 // newLaunchCommand implements the zero-manual-step startup:

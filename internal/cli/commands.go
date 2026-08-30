@@ -62,8 +62,9 @@ Examples:
 			if domainFilter != "" {
 				list = filterDomain(list, domainFilter)
 				if len(list) == 0 {
-					return fmt.Errorf("unknown domain %q (valid: %s)",
-						domainFilter, strings.Join(ops.SortedDomainsWithOps(), ", "))
+					return jsonError(cmd, "USAGE_ERROR",
+						fmt.Sprintf("unknown domain %q (valid: %s)",
+							domainFilter, strings.Join(ops.SortedDomainsWithOps(), ", ")), nil)
 				}
 			}
 			if jsonOut {

@@ -588,6 +588,11 @@ func _notification(what: int) -> void:
 
 
 func _should_refresh_client_statuses_on_focus_in() -> bool:
+	## godot-ai-cli fork patch: the focus-in sweep spawns per-client CLI
+	## probes, which are pointless in the fork — client configuration is a
+	## CLI/skill concern, so the dock never auto-refreshes client statuses.
+	if ForkConfig.mcp_client_config_disabled():
+		return false
 	## Focus-in is part of Godot/editor window activation. Keep automatic refresh,
 	## but only through the async/cooldown-protected path; never run a blocking
 	## client-status sweep directly from this notification.
@@ -2160,6 +2165,11 @@ func _on_remove_client(client_id: String) -> void:
 ##   - The dot turns amber and the row label gets a "Configuring…" /
 ##     "Removing…" suffix so the user can see the click was registered.
 func _dispatch_client_action(client_id: String, action: String) -> void:
+	## godot-ai-cli fork patch: defense in depth — Configure/Remove write
+	## user-global MCP client configs and prewarm uvx; the fork handles
+	## client configuration via the CLI/skill, so never dispatch the worker.
+	if ForkConfig.mcp_client_config_disabled():
+		return
 	if _is_self_update_in_progress():
 		## Same gate as the refresh worker — the install window overwrites
 		## plugin scripts on disk, and a worker mid-call into them would
@@ -2484,6 +2494,10 @@ func _on_configure_all_clients() -> void:
 
 
 func _on_open_clients_window() -> void:
+	## godot-ai-cli fork patch: the window's content is MCP client
+	## configuration, which the fork leaves to the CLI/skill — never open it.
+	if ForkConfig.mcp_client_config_disabled():
+		return
 	if _clients_window == null:
 		return
 	## Re-sweep before the user has time to act on stale dot colors. The request
@@ -3079,7 +3093,13 @@ func _refresh_clients_summary() -> void:
 			and not _server_blocks_client_health()
 		)
 	if _client_empty_cta_btn != null:
-		_client_empty_cta_btn.visible = configured == 0 and _client_status_refresh_has_completed()
+		## godot-ai-cli fork patch: the CTA opens client configuration, which
+		## the fork handles via the CLI/skill — the button never shows.
+		_client_empty_cta_btn.visible = (
+			not ForkConfig.mcp_client_config_disabled()
+			and configured == 0
+			and _client_status_refresh_has_completed()
+		)
 	_refresh_drift_banner(mismatched_ids)
 	_update_status()
 
@@ -3248,6 +3268,11 @@ func _perform_initial_client_status_refresh() -> void:
 	##
 	## No-op outside the tree — GDScript tests instantiate via `new()`.
 	if not is_inside_tree():
+		return
+	## godot-ai-cli fork patch: skip the initial client-status sweep — its
+	## per-client CLI probes are pointless when the fork never configures
+	## clients from the dock (configuration is a CLI/skill concern).
+	if ForkConfig.mcp_client_config_disabled():
 		return
 	if _client_rows.is_empty():
 		return

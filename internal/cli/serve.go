@@ -22,6 +22,12 @@ func newServeCommand() *cobra.Command {
 		Short: "Run the godot-ai backend (HTTP + plugin WebSocket) in the foreground",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Port 0 binds an ephemeral port: valid for daemon.Start in
+			// tests, useless here — the plugin could never find the daemon.
+			if httpPort == 0 || wsPort == 0 {
+				return jsonError(cmd, "INVALID_PARAMS",
+					"--http-port and --ws-port must be non-zero (port 0 binds an ephemeral port the plugin can never find)", nil)
+			}
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 

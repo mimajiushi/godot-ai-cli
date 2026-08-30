@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -71,7 +72,28 @@ removes the record when it stops that daemon.`,
 
 // Execute runs the root command and maps the outcome to a process exit code.
 func Execute() int {
-	if err := NewRootCommand().Execute(); err != nil {
+	return execute(NewRootCommand())
+}
+
+// execute runs cmd and maps the outcome to a process exit code. A failure
+// the subcommand did not already report as a JSON envelope (cobra-level
+// usage errors: unknown flag, bad args count, missing required flag, ...)
+// gets the standard USAGE_ERROR envelope on stdout per the output contract
+// (troubleshooting.md / CONTRIBUTING.md); the human-readable Error line
+// goes to stderr either way.
+func execute(cmd *cobra.Command) int {
+	if err := cmd.Execute(); err != nil {
+		var reported *reportedError
+		if !errors.As(err, &reported) {
+			_ = printJSON(cmd.OutOrStdout(), map[string]any{
+				"status": "error",
+				"error": map[string]any{
+					"code":    "USAGE_ERROR",
+					"message": err.Error(),
+					"data":    map[string]any{},
+				},
+			}, false)
+		}
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}

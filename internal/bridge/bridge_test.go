@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -55,6 +56,50 @@ func dialRaw(t *testing.T, addr string) *websocket.Conn {
 	}
 	t.Cleanup(func() { _ = conn.CloseNow() })
 	return conn
+}
+
+// dialWithOrigin opens a bare WebSocket client connection carrying the
+// given Origin header ("" sends none, like the native plugin).
+func dialWithOrigin(ctx context.Context, addr, origin string) (*websocket.Conn, *http.Response, error) {
+	opts := &websocket.DialOptions{}
+	if origin != "" {
+		opts.HTTPHeader = http.Header{"Origin": []string{origin}}
+	}
+	return websocket.Dial(ctx, "ws://"+addr, opts)
+}
+
+// TestUpgradeOriginPolicy pins the CSRF hardening on the WS handshake: no
+// Origin header (the plugin) and loopback Origins upgrade fine; any other
+// Origin is rejected with 403 before the upgrade.
+func TestUpgradeOriginPolicy(t *testing.T) {
+	s := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// No Origin header — the native plugin's shape.
+	conn, _, err := dialWithOrigin(ctx, s.Addr(), "")
+	if err != nil {
+		t.Fatalf("dial without Origin: %v", err)
+	}
+	_ = conn.CloseNow()
+
+	// Loopback Origins (any port, both host spellings) stay accepted.
+	for _, origin := range []string{"http://127.0.0.1:3000", "http://localhost:8080", "http://[::1]:9000"} {
+		conn, _, err := dialWithOrigin(ctx, s.Addr(), origin)
+		if err != nil {
+			t.Fatalf("dial with loopback Origin %q: %v", origin, err)
+		}
+		_ = conn.CloseNow()
+	}
+
+	// A cross-site Origin is rejected with 403 before any upgrade.
+	_, resp, err := dialWithOrigin(ctx, s.Addr(), "https://evil.example")
+	if err == nil {
+		t.Fatal("dial with non-loopback Origin succeeded, want 403")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("rejection status = %v, want 403", resp)
+	}
 }
 
 func TestHandshakeAcceptAndAckVersion(t *testing.T) {

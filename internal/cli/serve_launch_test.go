@@ -45,6 +45,30 @@ func TestServeStartFailurePrintsError(t *testing.T) {
 	}
 }
 
+// TestServeRejectsPortZero: port 0 binds an ephemeral port the plugin can
+// never find, so the CLI command rejects it up front (daemon.Start keeps
+// 0-for-tests behavior).
+func TestServeRejectsPortZero(t *testing.T) {
+	for _, args := range [][]string{
+		{"serve", "--http-port", "0", "--ws-port", "9500"},
+		{"serve", "--http-port", "8000", "--ws-port", "0"},
+	} {
+		cmd := NewRootCommand()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Errorf("serve %v succeeded, want a rejection", args)
+			continue
+		}
+		if !strings.Contains(buf.String(), "INVALID_PARAMS") ||
+			!strings.Contains(buf.String(), "non-zero") {
+			t.Errorf("serve %v: output missing the INVALID_PARAMS envelope:\n%s", args, buf.String())
+		}
+	}
+}
+
 // TestWaitForSessionMalformedPayload: a daemon answering with a wrongly
 // shaped sessions payload must produce an error, never a panic.
 func TestWaitForSessionMalformedPayload(t *testing.T) {

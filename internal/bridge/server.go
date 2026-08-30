@@ -11,7 +11,9 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -281,9 +283,19 @@ func (s *Server) CustomTools(sessionID string) (tools []any, ok bool) {
 // handleUpgrade accepts the WebSocket upgrade and hands the connection to
 // the per-connection lifecycle.
 func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+	// CSRF hardening: browsers always send an Origin header on WebSocket
+	// handshakes, so a browser page on any site could otherwise drive our
+	// loopback bridge. The GDScript plugin is a native client and sends NO
+	// Origin header, so: absent Origin is accepted, a loopback Origin host
+	// (any port) is accepted, everything else is rejected before upgrading.
+	if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+		slog.Warn("bridge: rejecting websocket upgrade with non-loopback origin", "origin", origin)
+		http.Error(w, "websocket upgrades from non-loopback origins are rejected", http.StatusForbidden)
+		return
+	}
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Loopback-only listener; no Origin check needed (native plugin
-		// clients carry no Origin header).
+		// Loopback-only listener plus the Origin pre-check above; native
+		// plugin clients carry no Origin header.
 		InsecureSkipVerify: true,
 		// No compression: the plugin never negotiates it.
 		CompressionMode: websocket.CompressionDisabled,
@@ -303,6 +315,21 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	defer s.wg.Done()
 	s.handleConn(c)
+}
+
+// isLoopbackOrigin reports whether an Origin header value names a loopback
+// host (127.0.0.1 / localhost / [::1], any port and either http/https
+// scheme). Malformed values are not loopback.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }
 
 // handleConn runs the lifecycle of one plugin connection. It is invoked

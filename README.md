@@ -78,8 +78,8 @@ agent / shell
     │  godot-ai-cli <subcommand>  →  one JSON object on stdout
     ▼
 ┌──────────────┐   HTTP 127.0.0.1:8000    ┌─────────────────────────┐
-│     CLI      │ ───────────────────────▶ │  daemon (`serve`, the    │
-└──────────────┘                          │  backend `launch` spawns)│
+│     CLI      │ ───────────────────────▶ │  daemon (`serve`, the   │
+└──────────────┘                          │ backend `launch` spawns)│
                                           └───────────┬─────────────┘
                                                       │ WebSocket 127.0.0.1:9500
                                                       ▼

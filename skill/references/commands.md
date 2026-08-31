@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --json` (v0.1.0-dev, 147 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --json` (147 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --json --pretty

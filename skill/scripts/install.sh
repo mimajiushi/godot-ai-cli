@@ -37,7 +37,7 @@ info "platform: ${GOOS}/${GOARCH}"
 
 # 2. 查询最新 release；仓库尚未发布任何 release 时 GitHub 返回 404，明确告知并退出
 release_json="$(curl -fsSL -H "Accept: application/vnd.github+json" "$API_URL")" \
-  || die "no release published yet for ${REPO} (or GitHub unreachable).
+  || die "could not query the releases of ${REPO} (network unreachable, no release yet, or GitHub API rate limit exceeded — unauthenticated limit is 60 req/h/IP).
        Build from source instead: git clone https://github.com/${REPO} && cd godot-ai-cli && go build ./cmd/godot-ai-cli"
 # 列表为 JSON 数组，取第一个非草稿条目的 tag_name。只用 awk（POSIX 必有），
 # 不探测 python3 —— Windows 应用商店占位 stub 会让探测假阳性。
@@ -82,20 +82,27 @@ fi
 info "SHA256 verified"
 
 # 6. 解包并安装（覆盖已有安装是安装器的既定行为）
+# 回退链：unzip →（windows 上优先 powershell）→ python3 → powershell。
+# python3 分支必须做能力探测：Windows 应用商店的 python3 占位 stub 能被
+# command -v 找到却一运行就失败（exit 49 且无输出），曾导致链路静默中断。
+python3_works() { python3 -c 'import zipfile' >/dev/null 2>&1; }
 if command -v unzip >/dev/null 2>&1; then
   unzip -q -o "$tmpdir/$asset" -d "$tmpdir/extract"
-elif command -v python3 >/dev/null 2>&1; then
-  python3 -m zipfile -e "$tmpdir/$asset" "$tmpdir/extract"
 elif [ "$GOOS" = "windows" ] && command -v powershell >/dev/null 2>&1; then
   powershell -NoProfile -Command "Expand-Archive -Force -LiteralPath '$(cygpath -w "$tmpdir/$asset")' -DestinationPath '$(cygpath -w "$tmpdir/extract")'"
+elif command -v python3 >/dev/null 2>&1 && python3_works; then
+  python3 -m zipfile -e "$tmpdir/$asset" "$tmpdir/extract"
+elif [ "$GOOS" != "windows" ] && command -v powershell >/dev/null 2>&1; then
+  powershell -NoProfile -Command "Expand-Archive -Force '$tmpdir/$asset' -DestinationPath '$tmpdir/extract'"
 else
-  die "no unzip tool available (tried unzip, python3, powershell Expand-Archive)"
+  die "no unzip tool available (tried unzip, powershell Expand-Archive, python3)"
 fi
 
 bin_name="godot-ai-cli"
 [ "$GOOS" = "windows" ] && bin_name="godot-ai-cli.exe"
 src="$tmpdir/extract/$bin_name"
-[ -f "$src" ] || src="$(find "$tmpdir/extract" -name "$bin_name" -type f | head -1)"
+# -print -quit 而非 | head -1：避免 pipefail 下 SIGPIPE(exit 141) 误杀脚本
+[ -f "$src" ] || src="$(find "$tmpdir/extract" -name "$bin_name" -type f -print -quit)"
 [ -n "$src" ] && [ -f "$src" ] || die "archive did not contain ${bin_name}"
 
 mkdir -p "$INSTALL_DIR"

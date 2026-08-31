@@ -73,26 +73,26 @@ agent / shell
     │  godot-ai-cli <subcommand>  →  stdout 输出一个 JSON 对象
     ▼
 ┌──────────────┐   HTTP 127.0.0.1:8000    ┌─────────────────────────┐
-│     CLI      │ ───────────────────────▶ │  daemon（`serve`，即     │
-└──────────────┘                          │  `launch` 拉起的后端）    │
+│     CLI      │ ───────────────────────▶ │  daemon（`serve`，即    │
+└──────────────┘                          │  `launch` 拉起的后端）  │
                                           └───────────┬─────────────┘
                                                       │ WebSocket 127.0.0.1:9500
                                                       ▼
                                           ┌─────────────────────────┐
-                                          │ godot_ai 编辑器插件      │ ──▶ 运行中的 Godot 编辑器
+                                          │ godot_ai 编辑器插件     │ ──▶ 运行中的 Godot 编辑器
                                           └─────────────────────────┘
 ```
 
 一条 `godot-ai-cli launch` 即可完成：把内置插件装进工程、拉起 daemon、打开编辑器、
 等待插件握手。此后每个子命令都是发给 daemon 的一次轻量 HTTP 调用，daemon 再经
-WebSocket 桥转发给编辑器内的插件。全部通信仅限本机回环。拓扑、线协议信封与门控
+WebSocket 桥转发给编辑器内的插件。全部通信仅限本机回环。拓扑、报文信封与门控
 规则详见 [docs/architecture.md](docs/architecture.md)。
 
 ## 命令面
 
-26 个域共 147 个编辑器操作（scene、node、script、signal、UI、theme、animation、
-material、resource、tilemap、粒子、相机、音频、输入、游戏、测试、截图等）。
-直接问二进制要实时目录：
+26 个域共 147 个编辑器操作（scene、node、script、signal、ui、theme、animation、
+material、resource、tilemap、particle、camera、audio、input、game、test、
+截图等）。直接问二进制要实时清单：
 
 ```bash
 godot-ai-cli commands                    # 文本清单
@@ -100,7 +100,7 @@ godot-ai-cli commands --json --domain node
 godot-ai-cli <domain> <op> -h            # 每个操作的参数、超时、写门控
 ```
 
-带文字约定的同一份目录在
+带文字约定的同一份清单在
 [skill/references/commands.md](skill/references/commands.md)。
 没有具名子命令的操作可以走 `godot-ai-cli call <plugin_command>
 --params '<json>'`；`batch execute --file ops.json` 可以原子执行多条插件命令。

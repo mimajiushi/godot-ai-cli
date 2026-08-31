@@ -17,7 +17,7 @@ import (
 
 // TestCompareVersions pins the semver precedence rules the update flow
 // relies on: leading v stripped, numeric triple first, a pre-release older
-// than the same stable triple (this is what makes the build-in "0.1.0-dev"
+// than the same stable triple (this is what makes the build-in "0.0.0-dev"
 // older than any published stable), and §11 pre-release identifier rules.
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {

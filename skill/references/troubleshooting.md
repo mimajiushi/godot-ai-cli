@@ -28,6 +28,19 @@ Emitted by `launch` itself, before any editor op is possible.
 | `DAEMON_UNREACHABLE` / `DAEMON_START_FAILED` | Daemon could not start or be probed | Check port availability, stale PID file, firewall on localhost. |
 | `LAUNCH_LOCK_FAILED` | A concurrent launch/stop holds the global launch lock | Wait for the other invocation to finish; the lock protects shared EditorSettings. |
 
+## Update-phase codes
+
+Emitted by `update`. None of them modify the install — checksum/download failures always abort before any file is touched.
+
+| Code | Meaning | Recovery |
+|---|---|---|
+| `UPDATE_CHECK_FAILED` | Releases query failed: no release yet, rate limit (60 req/h/IP unauthenticated), or network down (`data.url`) | Retry later; the updater tracks both stable and prerelease tags. |
+| `UPDATE_ASSET_NOT_FOUND` | No asset for this OS/arch in the latest release (`data.goos`/`data.goarch`) | Download manually from the release page or build from source. |
+| `UPDATE_DOWNLOAD_FAILED` | Asset or checksums download failed | Retry on a stable network. |
+| `UPDATE_CHECKSUM_INVALID` / `UPDATE_CHECKSUM_MISMATCH` | Checksums file unusable, or the asset hash differs — install provably untouched | Treat as a supply-chain warning; re-download; report if persistent. |
+| `UPDATE_ARCHIVE_INVALID` | The zip holds no matching binary | Report the broken release asset. |
+| `UPDATE_REPLACE_FAILED` | Could not swap the executable (message names the `.old` fallback path when rollback also failed) | Check file permissions; recover the binary from `<exe>.old` if present. |
+
 ## Runtime op codes
 
 ### EDITOR_NOT_READY — always read `data.sub_code`

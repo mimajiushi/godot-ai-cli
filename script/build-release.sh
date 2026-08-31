@@ -31,8 +31,14 @@ TARGETS="windows/amd64 windows/arm64 linux/amd64 linux/arm64 darwin/amd64 darwin
 }
 
 PY="$(command -v python || command -v python3 || true)"
+# The Windows Store python3 placeholder stub passes `command -v` but dies on
+# any real invocation — verify the interpreter actually works before relying
+# on it for the zip fallback.
+if [ -n "$PY" ] && ! "$PY" -c 'import zipfile' >/dev/null 2>&1; then
+  PY=""
+fi
 command -v zip >/dev/null 2>&1 || [ -n "$PY" ] || {
-  echo "build-release: ERROR: need either zip or python/python3 for packaging" >&2
+  echo "build-release: ERROR: need either zip or a working python/python3 for packaging" >&2
   exit 1
 }
 

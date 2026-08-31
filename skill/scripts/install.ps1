@@ -28,6 +28,8 @@ switch ($arch) {
 Info "platform: windows/$goarch"
 
 # 2. 查询最新 release（GitHub API 要求 User-Agent 头；列表端点，取第一个非草稿条目）
+# PS 5.1 + 旧 .NET 默认不启用 TLS 1.2，访问 api.github.com 会握手失败
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 try {
     $releases = Invoke-RestMethod -Uri $ApiUrl -Headers @{ 'User-Agent' = 'godot-ai-cli-install'; 'Accept' = 'application/vnd.github+json' }
 } catch {

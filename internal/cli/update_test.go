@@ -43,10 +43,11 @@ func runUpdateCmd(t *testing.T, args ...string) (map[string]any, error) {
 	return out, err
 }
 
-// TestUpdateCommandAlreadyUpToDate: the release is older than the build-in
-// dev version → the up-to-date payload.
+// TestUpdateCommandAlreadyUpToDate: the release equals the build-in dev
+// version (0.0.0-dev is the floor, so equality is the only up-to-date
+// case) → the up-to-date payload.
 func TestUpdateCommandAlreadyUpToDate(t *testing.T) {
-	server := fakegithub.New(t, "v0.0.1", nil)
+	server := fakegithub.New(t, "v0.0.0-dev", nil)
 	setUpdateAPIBase(t, server.URL)
 
 	out, err := runUpdateCmd(t)
@@ -59,7 +60,7 @@ func TestUpdateCommandAlreadyUpToDate(t *testing.T) {
 	if out["message"] != "godot-ai-cli is already up to date" {
 		t.Errorf("message = %v", out["message"])
 	}
-	if out["current_version"] == "" || out["latest_version"] != "0.0.1" {
+	if out["current_version"] == "" || out["latest_version"] != "0.0.0-dev" {
 		t.Errorf("versions = %v/%v", out["current_version"], out["latest_version"])
 	}
 }

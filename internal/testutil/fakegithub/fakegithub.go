@@ -14,27 +14,37 @@ import (
 	"testing"
 )
 
-// New starts a server that answers <base>/repos/<owner>/<repo>/releases/latest
-// with a release carrying one asset per files entry; each asset downloads
-// from <base>/download/<name>. A nil files map still yields a valid release
-// payload with an empty asset list.
+// New starts a server that answers <base>/repos/<owner>/<repo>/releases
+// (the list endpoint the updater queries) with a single non-draft release
+// carrying one asset per files entry; each asset downloads from
+// <base>/download/<name>. A nil files map still yields a valid release
+// payload with an empty asset list. The legacy /releases/latest path is
+// answered too, in case other tests rely on it.
 func New(t *testing.T, tag string, files map[string][]byte) *httptest.Server {
 	t.Helper()
 	var server *httptest.Server
+	release := func() map[string]any {
+		assets := make([]map[string]any, 0, len(files))
+		for name := range files {
+			assets = append(assets, map[string]any{
+				"name":                 name,
+				"browser_download_url": server.URL + "/download/" + name,
+			})
+		}
+		return map[string]any{
+			"tag_name": tag,
+			"html_url": server.URL + "/releases/tag/" + tag,
+			"draft":    false,
+			"assets":   assets,
+		}
+	}
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/releases/latest") {
-			assets := make([]map[string]any, 0, len(files))
-			for name := range files {
-				assets = append(assets, map[string]any{
-					"name":                 name,
-					"browser_download_url": server.URL + "/download/" + name,
-				})
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"tag_name": tag,
-				"html_url": server.URL + "/releases/tag/" + tag,
-				"assets":   assets,
-			})
+			_ = json.NewEncoder(w).Encode(release())
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/releases") {
+			_ = json.NewEncoder(w).Encode([]map[string]any{release()})
 			return
 		}
 		if data, ok := files[strings.TrimPrefix(r.URL.Path, "/download/")]; ok {

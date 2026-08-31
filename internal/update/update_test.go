@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -76,6 +77,35 @@ func TestFetchLatestRelease(t *testing.T) {
 		}
 		if len(rel.Assets) != 1 || rel.Assets[0].Name != "godot-ai-cli-0.2.0-windows-amd64.zip" {
 			t.Errorf("assets = %+v", rel.Assets)
+		}
+	})
+
+	t.Run("draft releases are skipped", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"tag_name": "v0.3.0-beta.1", "draft": true, "assets": []any{}},
+				{"tag_name": "v0.2.0", "draft": false, "assets": []any{}},
+			})
+		}))
+		defer server.Close()
+		rel, err := FetchLatestRelease(context.Background(), server.Client(), server.URL, "o", "r")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rel.TagName != "v0.2.0" {
+			t.Errorf("draft was not skipped, got %q", rel.TagName)
+		}
+	})
+
+	t.Run("empty list means no release published yet", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("[]"))
+		}))
+		defer server.Close()
+		_, err := FetchLatestRelease(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeCheckFailed)
+		if err == nil || !strings.Contains(err.Error(), "no release has been published yet") {
+			t.Errorf("expected the no-release message, got %v", err)
 		}
 	})
 
@@ -346,12 +376,12 @@ func TestRunUpToDate(t *testing.T) {
 	}
 }
 
-// TestRunDevBuildIsOlderThanStable: the build-in "0.1.0-dev" must see the
+// TestRunDevBuildIsOlderThanStable: the build-in "0.0.0-dev" must see the
 // v0.1.0 stable release as an update.
 func TestRunDevBuildIsOlderThanStable(t *testing.T) {
 	server := fakegithub.New(t, "v0.1.0", nil)
 	result, err := Run(context.Background(), Options{
-		CurrentVersion: "0.1.0-dev",
+		CurrentVersion: "0.0.0-dev",
 		BaseURL:        server.URL,
 		HTTPClient:     server.Client(),
 		IsTerminal:     false,

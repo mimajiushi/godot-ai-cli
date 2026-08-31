@@ -55,6 +55,7 @@ func (e *Error) Error() string { return e.Message }
 type Release struct {
 	TagName string  `json:"tag_name"`
 	HTMLURL string  `json:"html_url"`
+	Draft   bool    `json:"draft"`
 	Assets  []Asset `json:"assets"`
 }
 
@@ -227,9 +228,14 @@ func resolveTarget(opts Options) (string, error) {
 	return exe, nil
 }
 
-// FetchLatestRelease GETs <base>/repos/<owner>/<repo>/releases/latest.
+// FetchLatestRelease GETs <base>/repos/<owner>/<repo>/releases?per_page=10
+// and picks the newest non-draft entry. The list endpoint is used instead
+// of /releases/latest because GitHub's "latest" EXCLUDES pre-releases —
+// with only a beta published, /latest answers 404 even though a release
+// exists. Pre-releases are deliberately included: the project ships beta
+// tags and `update` must find them.
 func FetchLatestRelease(ctx context.Context, client *http.Client, baseURL, owner, repo string) (Release, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest",
+	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=10",
 		strings.TrimSuffix(baseURL, "/"), owner, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -240,18 +246,11 @@ func FetchLatestRelease(ctx context.Context, client *http.Client, baseURL, owner
 	if err != nil {
 		return Release{}, &Error{
 			Code:    CodeCheckFailed,
-			Message: fmt.Sprintf("query the latest release: %v", err),
+			Message: fmt.Sprintf("query the releases list: %v", err),
 			Data:    map[string]any{"url": url},
 		}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return Release{}, &Error{
-			Code:    CodeCheckFailed,
-			Message: "no release has been published yet (GitHub API answered 404)",
-			Data:    map[string]any{"url": url},
-		}
-	}
 	if resp.StatusCode != http.StatusOK {
 		return Release{}, &Error{
 			Code:    CodeCheckFailed,
@@ -259,22 +258,25 @@ func FetchLatestRelease(ctx context.Context, client *http.Client, baseURL, owner
 			Data:    map[string]any{"url": url},
 		}
 	}
-	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	var rels []Release
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
 		return Release{}, &Error{
 			Code:    CodeCheckFailed,
-			Message: fmt.Sprintf("decode the release payload: %v", err),
+			Message: fmt.Sprintf("decode the releases payload: %v", err),
 			Data:    map[string]any{"url": url},
 		}
 	}
-	if rel.TagName == "" {
-		return Release{}, &Error{
-			Code:    CodeCheckFailed,
-			Message: "the release payload carries no tag_name",
-			Data:    map[string]any{"url": url},
+	for _, rel := range rels {
+		if rel.Draft || rel.TagName == "" {
+			continue
 		}
+		return rel, nil
 	}
-	return rel, nil
+	return Release{}, &Error{
+		Code:    CodeCheckFailed,
+		Message: "no release has been published yet (the releases list is empty)",
+		Data:    map[string]any{"url": url},
+	}
 }
 
 // semver is a parsed semantic version; pre holds the pre-release string.
@@ -317,7 +319,7 @@ func parseSemver(s string) (semver, error) {
 // CompareVersions returns -1/0/+1 for a <==/> b under semver precedence:
 // the numeric major.minor.patch triple decides first; on a tie a version
 // WITH a pre-release is older than the same triple without one (so the
-// build-in "0.1.0-dev" and any other -dev/pre-release build is older than
+// build-in "0.0.0-dev" and any other -dev/pre-release build is older than
 // the corresponding stable release); two pre-releases compare per semver
 // §11 (numeric identifiers rank below alphanumeric, fewer identifiers
 // below more).

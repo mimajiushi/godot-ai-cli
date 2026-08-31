@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   # The repo's internal/version.Version is ldflags-injected (default
-  # "0.1.0-dev"), so the only version gate is the tag shape; the build below
+  # "0.0.0-dev"), so the only version gate is the tag shape; the build below
   # stamps the real version into the binary.
   validate:
     name: validate version

@@ -7,7 +7,10 @@ package version
 
 var (
 	// Version is the CLI version string (semver). Overridden by goreleaser-style ldflags.
-	Version = "0.1.0-dev"
+	// The build-in default is 0.0.0-dev so an unstamped dev build compares OLDER
+	// than any published release — including pre-releases (semver §11 ranks
+	// 0.1.0-dev above 0.1.0-beta.1, which would wrongly suppress the update offer).
+	Version = "0.0.0-dev"
 	// RepoOwner is the GitHub account that hosts the release repository.
 	RepoOwner = "mimajiushi"
 	// RepoName is the GitHub repository that publishes release assets.

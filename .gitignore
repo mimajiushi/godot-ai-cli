@@ -1,6 +1,7 @@
-# Binaries
-godot-ai-cli
-godot-ai-cli.exe
+# Binaries (root-anchored: a bare `godot-ai-cli` would also ignore the
+# cmd/godot-ai-cli/ source directory — that bug broke the first CI run)
+/godot-ai-cli
+/godot-ai-cli.exe
 *.old
 /dist/
 

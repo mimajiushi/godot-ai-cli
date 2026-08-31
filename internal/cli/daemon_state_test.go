@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,26 @@ import (
 
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 )
+
+// syncBuffer is a goroutine-safe output buffer for tests that run a
+// command in a background goroutine while polling its output — a plain
+// bytes.Buffer races in that pattern (flagged by -race in CI).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // stubCacheDir points the last-daemon record at a throwaway dir and
 // restores the real resolver afterwards. Tests using it must NOT run in
@@ -311,7 +332,7 @@ func TestServeWritesLastDaemon(t *testing.T) {
 	_ = wsLn.Close()
 
 	cmd := NewRootCommand()
-	var buf bytes.Buffer
+	var buf syncBuffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetArgs([]string{"serve", "--http-port", itoa(httpPort), "--ws-port", itoa(wsPort)})

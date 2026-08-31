@@ -1,0 +1,5 @@
+# Keep LF line endings on checkout everywhere: gofmt rejects CRLF, and the
+# Windows runner's default core.autocrlf=true would otherwise flag every
+# Go source as unformatted in CI.
+*.go text eol=lf
+*.sh text eol=lf

@@ -13,7 +13,7 @@ import (
 // restore, not expanded as a group reference.
 func TestRestoreDollarSignValueByteIdentical(t *testing.T) {
 	root := withEditorConfig(t)
-	withCacheDir(t)
+	withCacheDir(t, root)
 	path := settingsFile(t, root, testVersion47)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -47,8 +47,8 @@ func TestRestoreDollarSignValueByteIdentical(t *testing.T) {
 // TestBackupEditorPIDsRoundTrip covers Record/Add/BackupEditorPIDs,
 // including dedup and the no-backup no-op.
 func TestBackupEditorPIDsRoundTrip(t *testing.T) {
-	withEditorConfig(t)
-	withCacheDir(t)
+	root := withEditorConfig(t)
+	withCacheDir(t, root)
 
 	if _, err := godot.CaptureLaunchBackup(testVersion47, 18099, "C:/proj"); err != nil {
 		t.Fatal(err)
@@ -76,8 +76,8 @@ func TestBackupEditorPIDsRoundTrip(t *testing.T) {
 // TestFindOtherLaunchBackup pins the cross-launch guard: a backup for a
 // different port is reported, the caller's own port is not.
 func TestFindOtherLaunchBackup(t *testing.T) {
-	withEditorConfig(t)
-	withCacheDir(t)
+	root := withEditorConfig(t)
+	withCacheDir(t, root)
 
 	if _, err := godot.CaptureLaunchBackup(testVersion47, 18099, "C:/proj"); err != nil {
 		t.Fatal(err)

@@ -11,14 +11,24 @@ import (
 )
 
 // withCacheDir redirects os.UserCacheDir into a temp dir for one test.
-func withCacheDir(t *testing.T) {
+//
+// darwin trap: both os.UserCacheDir and the production editorConfigDir
+// resolve through $HOME on macOS, so a test that also redirects the editor
+// config via withEditorConfig MUST pass that same root here — otherwise the
+// second HOME assignment wins and the two sides read/write different trees
+// (this combination only fails on macOS; Windows/Linux use distinct envs).
+func withCacheDir(t *testing.T, darwinSharedHome ...string) {
 	t.Helper()
 	dir := t.TempDir()
 	switch runtime.GOOS {
 	case "windows":
 		t.Setenv("LOCALAPPDATA", dir)
 	case "darwin":
-		t.Setenv("HOME", dir)
+		home := dir
+		if len(darwinSharedHome) > 0 {
+			home = darwinSharedHome[0]
+		}
+		t.Setenv("HOME", home)
 	default:
 		t.Setenv("XDG_CACHE_HOME", dir)
 		t.Setenv("HOME", dir)
@@ -43,8 +53,8 @@ func readBackup(t *testing.T, httpPort int) godot.SettingsBackup {
 }
 
 func TestCaptureBackupVirginKeys(t *testing.T) {
-	withEditorConfig(t)
-	withCacheDir(t)
+	root := withEditorConfig(t)
+	withCacheDir(t, root)
 
 	created, err := godot.CaptureLaunchBackup(testVersion47, 18099, "C:/proj")
 	if err != nil || !created {
@@ -71,7 +81,7 @@ func TestCaptureBackupVirginKeys(t *testing.T) {
 
 func TestCaptureBackupRecordsExistingValues(t *testing.T) {
 	root := withEditorConfig(t)
-	withCacheDir(t)
+	withCacheDir(t, root)
 
 	path := settingsFile(t, root, testVersion47)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -105,7 +115,7 @@ func TestCaptureBackupRecordsExistingValues(t *testing.T) {
 
 func TestCaptureBackupKeepsOriginal(t *testing.T) {
 	root := withEditorConfig(t)
-	withCacheDir(t)
+	withCacheDir(t, root)
 	path := settingsFile(t, root, testVersion47)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -140,7 +150,7 @@ func TestCaptureBackupKeepsOriginal(t *testing.T) {
 
 func TestRestoreRoundTripByteIdentical(t *testing.T) {
 	root := withEditorConfig(t)
-	withCacheDir(t)
+	withCacheDir(t, root)
 	path := settingsFile(t, root, testVersion47)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -191,7 +201,7 @@ godot_ai/managed_server_ws_token = "deadbeef"
 
 func TestRestoreRemovesKeysThatWereAbsent(t *testing.T) {
 	root := withEditorConfig(t)
-	withCacheDir(t)
+	withCacheDir(t, root)
 	path := settingsFile(t, root, testVersion47)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -221,8 +231,8 @@ func TestRestoreRemovesKeysThatWereAbsent(t *testing.T) {
 }
 
 func TestRestoreDeletesFileWeCreated(t *testing.T) {
-	withEditorConfig(t) // no settings file exists
-	withCacheDir(t)
+	root := withEditorConfig(t) // no settings file exists
+	withCacheDir(t, root)
 
 	if _, err := godot.CaptureLaunchBackup(testVersion47, 18099, "C:/proj"); err != nil {
 		t.Fatal(err)

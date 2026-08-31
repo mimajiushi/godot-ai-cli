@@ -1,5 +1,7 @@
 # godot-ai-cli
 
+**English** | [简体中文](README.zh-CN.md)
+
 [![CI](https://github.com/mimajiushi/godot-ai-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/mimajiushi/godot-ai-cli/actions/workflows/ci.yml)
 [![Release](https://github.com/mimajiushi/godot-ai-cli/actions/workflows/release.yml/badge.svg)](https://github.com/mimajiushi/godot-ai-cli/actions/workflows/release.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/mimajiushi/godot-ai-cli)](go.mod)
@@ -65,7 +67,8 @@ godot-ai-cli test run
 ```
 
 Every command and subcommand supports `-h` / `--help`. `godot-ai-cli -v` prints
-the CLI version together with the supported Godot range. `godot-ai-cli update`
+the CLI version together with the supported Godot range and the bundled plugin
+(godot-ai) version. `godot-ai-cli update`
 checks GitHub Releases and offers to update in place.
 
 ## How it works

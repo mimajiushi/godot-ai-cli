@@ -1,4 +1,4 @@
-﻿# godot-ai-cli 安装脚本（Windows PowerShell 5.1+ / PowerShell 7+）
+# godot-ai-cli 安装脚本（Windows PowerShell 5.1+ / PowerShell 7+）
 # 流程：识别架构 → 查询 GitHub 最新 release → 下载 zip + checksums → 校验 SHA256
 #       → 安装到 %LOCALAPPDATA%\Programs\godot-ai-cli → 追加用户 PATH → 用 -v 验证
 # 资产命名约定与 install.sh / CLI 内置 update 命令一致：
@@ -11,7 +11,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Repo = 'mimajiushi/godot-ai-cli'
-$ApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+# 注意：用列表端点而非 /releases/latest —— GitHub 的 latest 排除 prerelease，
+# beta-only 阶段会 404；取列表中第一个非草稿条目
+$ApiUrl = "https://api.github.com/repos/$Repo/releases?per_page=10"
 
 function Die([string]$Message) { Write-Host "install.ps1: ERROR: $Message" -ForegroundColor Red; exit 1 }
 function Info([string]$Message) { Write-Host "install.ps1: $Message" }
@@ -25,17 +27,18 @@ switch ($arch) {
 }
 Info "platform: windows/$goarch"
 
-# 2. 查询最新 release（GitHub API 要求 User-Agent 头）
+# 2. 查询最新 release（GitHub API 要求 User-Agent 头；列表端点，取第一个非草稿条目）
 try {
-    $release = Invoke-RestMethod -Uri $ApiUrl -Headers @{ 'User-Agent' = 'godot-ai-cli-install'; 'Accept' = 'application/vnd.github+json' }
+    $releases = Invoke-RestMethod -Uri $ApiUrl -Headers @{ 'User-Agent' = 'godot-ai-cli-install'; 'Accept' = 'application/vnd.github+json' }
 } catch {
     Die @"
 no release published yet for $Repo (or GitHub unreachable): $($_.Exception.Message)
 Build from source instead: git clone https://github.com/$Repo && cd godot-ai-cli && go build ./cmd/godot-ai-cli
 "@
 }
-$tag = $release.tag_name
-if (-not $tag) { Die 'could not parse tag_name from the latest release payload' }
+$release = $releases | Where-Object { -not $_.draft } | Select-Object -First 1
+$tag = if ($release) { $release.tag_name } else { $null }
+if (-not $tag) { Die 'could not find a non-draft release in the releases list payload' }
 $ver = $tag.TrimStart('v')  # 资产命名使用去掉前导 v 的版本号
 Info "latest release: $tag"
 

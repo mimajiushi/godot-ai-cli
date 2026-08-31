@@ -9,7 +9,9 @@ set -euo pipefail
 
 REPO="mimajiushi/godot-ai-cli"
 INSTALL_DIR="${GODOT_AI_CLI_INSTALL_DIR:-$HOME/.local/bin}"
-API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+# 注意：用列表端点而非 /releases/latest —— GitHub 的 latest 排除 prerelease，
+# beta-only 阶段会 404；取列表中第一个非草稿条目
+API_URL="https://api.github.com/repos/${REPO}/releases?per_page=10"
 
 die() { echo "install.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "install.sh: $*"; }
@@ -37,8 +39,14 @@ info "platform: ${GOOS}/${GOARCH}"
 release_json="$(curl -fsSL -H "Accept: application/vnd.github+json" "$API_URL")" \
   || die "no release published yet for ${REPO} (or GitHub unreachable).
        Build from source instead: git clone https://github.com/${REPO} && cd godot-ai-cli && go build ./cmd/godot-ai-cli"
-tag="$(printf '%s' "$release_json" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*: *"//; s/"//')"
-[ -n "$tag" ] || die "could not parse tag_name from the latest release payload"
+# 列表为 JSON 数组，取第一个非草稿条目的 tag_name。只用 awk（POSIX 必有），
+# 不探测 python3 —— Windows 应用商店占位 stub 会让探测假阳性。
+# 依赖 GitHub release 对象内 tag_name 先于 draft 出现的字段序。
+tag="$(printf '%s' "$release_json" | awk '
+  /"tag_name":/ { t=$0; sub(/.*"tag_name": *"/, "", t); sub(/".*/, "", t) }
+  /"draft":/    { if (t != "" && $0 !~ /true/) { print t; exit } t="" }
+')"
+[ -n "$tag" ] || die "could not find a non-draft release in the releases list payload"
 ver="${tag#v}"  # 资产命名使用去掉前导 v 的版本号
 info "latest release: ${tag}"
 

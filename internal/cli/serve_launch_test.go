@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,27 +79,112 @@ func TestWaitForSessionMalformedPayload(t *testing.T) {
 	defer server.Close()
 	port := testServerPort(t, server)
 
-	_, err := waitForSession(context.Background(), port, 2*time.Second)
+	_, err := waitForSession(context.Background(), port, "/any/project", 2*time.Second)
 	if err == nil {
 		t.Fatal("waitForSession accepted a malformed session entry, want an error")
 	}
 }
 
 // TestWaitForSessionReturnsSession is the happy path: one listed session
-// is returned immediately.
+// for the requested project is returned immediately.
 func TestWaitForSessionReturnsSession(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"sessions":[{"session_id":"s1","editor_pid":4321,"active":true}]}`))
+		_, _ = w.Write([]byte(`{"sessions":[{"session_id":"s1","editor_pid":4321,"active":true,"project_path":"/any/project/"}]}`))
 	}))
 	defer server.Close()
 	port := testServerPort(t, server)
 
-	session, err := waitForSession(context.Background(), port, 2*time.Second)
+	session, err := waitForSession(context.Background(), port, "/any/project", 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if session["session_id"] != "s1" {
 		t.Errorf("session = %v", session)
+	}
+}
+
+// TestWaitForSessionIgnoresOtherProjects: with several projects sharing one
+// daemon, a session belonging to a DIFFERENT project must never satisfy the
+// wait — otherwise launch reports ready while its own editor never
+// connected (the multi-project launch bug).
+func TestWaitForSessionIgnoresOtherProjects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"sessions":[{"session_id":"other@1","active":true,"project_path":"/other/project/"}]}`))
+	}))
+	defer server.Close()
+	port := testServerPort(t, server)
+
+	_, err := waitForSession(context.Background(), port, "/my/project", 600*time.Millisecond)
+	if err == nil {
+		t.Fatal("waitForSession returned on another project's session, want a timeout")
+	}
+}
+
+// TestWaitForSessionPrefersOwnProject: with a foreign session active, the
+// wait must still return OUR project's (inactive) session.
+func TestWaitForSessionPrefersOwnProject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"sessions":[` +
+			`{"session_id":"other@1","active":true,"project_path":"/other/project/"},` +
+			`{"session_id":"mine@2","active":false,"project_path":"/my/project/"}` +
+			`]}`))
+	}))
+	defer server.Close()
+	port := testServerPort(t, server)
+
+	session, err := waitForSession(context.Background(), port, "/my/project", 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session["session_id"] != "mine@2" {
+		t.Errorf("session = %v, want mine@2", session)
+	}
+}
+
+// TestSameProjectPath pins the normalization: separators, trailing slashes
+// and empty inputs. (Case-insensitivity is Windows-only and covered by the
+// conditional case below.)
+func TestSameProjectPath(t *testing.T) {
+	cases := []struct {
+		sessionPath, projectDir string
+		want                    bool
+	}{
+		{"/a/proj/", "/a/proj", true},
+		{"/a/proj", "/a/proj/", true},
+		{`C:\games\rpg\`, `C:/games/rpg`, true},
+		{"/a/proj/", "/a/other", false},
+		{"", "/a/proj", false},
+		{"/a/proj/", "", false},
+		{"/a/proj2/", "/a/proj", false}, // prefix must not match
+	}
+	for _, c := range cases {
+		if got := sameProjectPath(c.sessionPath, c.projectDir); got != c.want {
+			t.Errorf("sameProjectPath(%q, %q) = %v, want %v", c.sessionPath, c.projectDir, got, c.want)
+		}
+	}
+	if runtime.GOOS == "windows" && !sameProjectPath(`C:\Games\RPG\`, `c:/games/rpg`) {
+		t.Error("sameProjectPath must be case-insensitive on Windows")
+	}
+}
+
+// TestFindProjectSession: only entries whose project_path matches are
+// returned; entries without a string project_path never match.
+func TestFindProjectSession(t *testing.T) {
+	list := []any{
+		map[string]any{"session_id": "foreign@1", "project_path": "/other/"},
+		"not-a-map",
+		map[string]any{"session_id": "no-path@2"},
+		map[string]any{"session_id": "mine@3", "project_path": "/mine/"},
+	}
+	got := findProjectSession(list, "/mine")
+	if got == nil || got["session_id"] != "mine@3" {
+		t.Errorf("findProjectSession = %v, want mine@3", got)
+	}
+	if got := findProjectSession(list, "/absent"); got != nil {
+		t.Errorf("findProjectSession for absent project = %v, want nil", got)
+	}
+	if got := findProjectSession(nil, "/mine"); got != nil {
+		t.Errorf("findProjectSession(nil) = %v, want nil", got)
 	}
 }
 

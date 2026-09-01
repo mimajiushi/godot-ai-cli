@@ -81,9 +81,12 @@ semantics:
 
 ## EditorSettings backup/restore
 
-`launch` with custom ports rewrites the user's **global** EditorSettings
+`launch` rewrites the user's **global** EditorSettings
 (keys `godot_ai/http_port`, `godot_ai/ws_port`, `godot_ai/managed_server_*`)
-so the plugin finds the daemon. Every mutation is preceded by a backup at
+so the plugin finds the daemon — always when custom ports are requested, and
+on default ports when live port overrides or a trusted managed-server record
+point at other ports (`settingsMutationNeeded` in `internal/cli/launch.go`,
+fed by `godot.ReadPluginPorts`). Every mutation is preceded by a backup at
 `<user cache dir>/godot-ai-cli/launch-backup-<httpPort>.json`
 (`internal/godot/launch_backup.go`), and `stop` restores **byte-identically**:
 pre-existing keys get their original `key = value` line written back in

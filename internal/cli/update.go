@@ -25,7 +25,9 @@ func newUpdateCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Check GitHub Releases for a newer godot-ai-cli and update in place",
-		Long: `update queries the latest GitHub release of godot-ai-cli. When a newer
+		Long: `update queries the newest GitHub release of godot-ai-cli — stable
+and prerelease tags both count (the releases list endpoint is used because
+GitHub's "latest" excludes prereleases). When a newer
 version exists it offers to download the asset for this platform,
 verifies its SHA256 against the release checksums, and only then
 replaces the running executable — a checksum mismatch aborts without

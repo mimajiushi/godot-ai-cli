@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,8 +57,14 @@ func newLaunchCommand() *cobra.Command {
   2. Check the version (4.5+ required, 4.7+ recommended)
   3. Install/upgrade and enable the embedded godot_ai plugin
   4. Ensure the backend daemon runs (spawns "serve" detached if absent)
-  5. Launch the Godot editor detached (unless one is already connected)
+  5. Launch the Godot editor detached (skipped when THIS project's editor
+     already has a connected session)
   6. Wait for the plugin session handshake and print a ready JSON line
+
+Multiple projects can share one daemon: launching another project opens its
+editor as an additional session and pins it active. Ops target the active
+session by default — use "session list", "session activate <id>" or an op's
+--session flag to drive a different project.
 
 The daemon's ports are recorded in <user cache dir>/godot-ai-cli/
 last-daemon.json, so later one-shot commands (status, stop, every op, call)
@@ -204,7 +212,9 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		warnings = append(warnings, fmt.Sprintf("record daemon ports: %v", err))
 	}
 
-	// Step 5: launch the editor only when no editor session is connected.
+	// Step 5: launch the editor unless a session for THIS project is already
+	// connected. Other projects' sessions may share this daemon — they must
+	// neither suppress our editor launch nor be mistaken for our session.
 	sessions, err := getDaemonJSON(opts.httpPort, "/godot-ai/cli/sessions")
 	if err != nil {
 		return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
@@ -216,7 +226,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	}
 	editorPID := 0
 	settingsMutated := false
-	if len(sessionList) == 0 {
+	if findProjectSession(sessionList, projectDir) == nil {
 		// The plugin refuses to adopt a server whose ports differ from its
 		// EditorSettings overrides (or from a stale managed-server record
 		// for this plugin version). Only then do we touch the user's
@@ -225,7 +235,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		if recErr != nil {
 			record = godot.ManagedRecord{} // unreadable settings: treat as absent
 		}
-		if settingsMutationNeeded(opts, record) {
+		if settingsMutationNeeded(opts, record, godot.ReadPluginPorts(gv)) {
 			// Refuse to stack a second override session: a backup for a
 			// different port proves that session's overrides are still
 			// active in the same shared global EditorSettings file.
@@ -287,12 +297,33 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		}
 	}
 
-	// Step 6: wait for the plugin handshake.
-	session, err := waitForSession(ctx, opts.httpPort, opts.wait)
+	// Step 6: wait for THIS project's plugin handshake — a session belonging
+	// to another project must never satisfy the wait, or launch would report
+	// ready while its own editor never connected.
+	session, err := waitForSession(ctx, opts.httpPort, projectDir, opts.wait)
 	if err != nil {
 		return jsonError(cmd, "LAUNCH_TIMEOUT",
-			fmt.Sprintf("no plugin session connected within %s — the editor may still be starting; retry or raise --wait", opts.wait),
+			fmt.Sprintf("no plugin session for this project connected within %s — the editor may still be starting; retry or raise --wait", opts.wait),
 			map[string]any{"retryable": true})
+	}
+
+	// Pin the session active so the ops following a launch target the
+	// project just launched — the bridge otherwise keeps the FIRST connected
+	// session active, which may belong to another project.
+	if sid, ok := session["session_id"].(string); ok && sid != "" && session["active"] != true {
+		resp, err := postDaemonJSON(opts.httpPort, "/godot-ai/cli/activate",
+			map[string]any{"session_id": sid}, 5*time.Second)
+		switch {
+		case err != nil:
+			warnings = append(warnings, fmt.Sprintf("activate session %s: %v", sid, err))
+		default:
+			// postDaemonJSON only surfaces transport failures — a
+			// daemon-side refusal (e.g. the session died between the poll
+			// and this POST) arrives as an error envelope with a nil error.
+			if st, _ := resp["status"].(string); st != "ok" {
+				warnings = append(warnings, fmt.Sprintf("activate session %s refused: %v", sid, resp["error"]))
+			}
+		}
 	}
 
 	// The connected editor's version can differ from the binary probed in
@@ -341,11 +372,21 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 
 // settingsMutationNeeded decides whether launch must touch the user's
 // global EditorSettings before starting the editor. With default ports and
-// no conflicting managed-server record, the plugin's own adoption handles
-// everything and no mutation happens at all.
-func settingsMutationNeeded(opts launchOptions, record godot.ManagedRecord) bool {
+// no conflicting managed-server record or live port override, the plugin's
+// own adoption handles everything and no mutation happens at all.
+func settingsMutationNeeded(opts launchOptions, record godot.ManagedRecord, cur godot.PluginPorts) bool {
 	if opts.httpPort != daemon.DefaultHTTPPort || opts.wsPort != daemon.DefaultWSPort {
 		return true // custom ports always need overrides written
+	}
+	// Live port overrides pointing at OTHER ports would send our editor's
+	// plugin to another project's daemon even when the managed record looks
+	// clean — editor save races can blank the record while the port keys
+	// stay (one global EditorSettings file is shared by every running
+	// editor). Without this check a default-port launch during another
+	// session's custom-port override cross-wires the two projects onto one
+	// daemon.
+	if (cur.HTTPPresent && cur.HTTPPort != opts.httpPort) || (cur.WSPresent && cur.WSPort != opts.wsPort) {
+		return true
 	}
 	// Default ports: a managed record is only trusted by the plugin when
 	// its version matches the installed plugin — and then it pins the
@@ -356,11 +397,12 @@ func settingsMutationNeeded(opts launchOptions, record godot.ManagedRecord) bool
 		record.WSPort != opts.wsPort
 }
 
-// waitForSession polls the daemon's session list until one session exists
-// or the deadline expires. The active session is preferred in the result.
-// A malformed payload is an immediate error, never a panic and never a
-// misleading timeout.
-func waitForSession(ctx context.Context, httpPort int, timeout time.Duration) (map[string]any, error) {
+// waitForSession polls the daemon's session list until a session for
+// projectDir connects or the deadline expires. Sessions belonging to other
+// projects never satisfy the wait. Among matching sessions the active one
+// is preferred. A malformed payload is an immediate error, never a panic
+// and never a misleading timeout.
+func waitForSession(ctx context.Context, httpPort int, projectDir string, timeout time.Duration) (map[string]any, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		sessions, err := getDaemonJSON(httpPort, "/godot-ai/cli/sessions")
@@ -369,20 +411,24 @@ func waitForSession(ctx context.Context, httpPort int, timeout time.Duration) (m
 			if !ok {
 				return nil, errors.New("unexpected /godot-ai/cli/sessions payload shape (missing sessions array)")
 			}
-			if len(list) > 0 {
-				var first map[string]any
-				for _, entry := range list {
-					sess, ok := entry.(map[string]any)
-					if !ok {
-						return nil, fmt.Errorf("unexpected session entry shape: %T", entry)
-					}
-					if first == nil {
-						first = sess
-					}
-					if sess["active"] == true {
-						return sess, nil
-					}
+			var first map[string]any
+			for _, entry := range list {
+				sess, ok := entry.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("unexpected session entry shape: %T", entry)
 				}
+				pp, _ := sess["project_path"].(string)
+				if !sameProjectPath(pp, projectDir) {
+					continue
+				}
+				if first == nil {
+					first = sess
+				}
+				if sess["active"] == true {
+					return sess, nil
+				}
+			}
+			if first != nil {
 				return first, nil
 			}
 		}
@@ -395,4 +441,40 @@ func waitForSession(ctx context.Context, httpPort int, timeout time.Duration) (m
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// sameProjectPath reports whether a session's project_path (Godot-style:
+// forward slashes, trailing slash) and a --project directory name the same
+// project. Separator and trailing-slash differences must not split a match,
+// and on Windows neither must letter case; elsewhere the comparison is
+// exact. An empty sessionPath never matches.
+func sameProjectPath(sessionPath, projectDir string) bool {
+	norm := func(p string) string {
+		p = strings.ReplaceAll(p, "\\", "/")
+		return strings.TrimRight(p, "/")
+	}
+	a, b := norm(sessionPath), norm(projectDir)
+	if a == "" || b == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// findProjectSession returns the first session entry whose project_path
+// matches projectDir, or nil. Entries without a string project_path never
+// match.
+func findProjectSession(list []any, projectDir string) map[string]any {
+	for _, entry := range list {
+		sess, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if pp, ok := sess["project_path"].(string); ok && sameProjectPath(pp, projectDir) {
+			return sess
+		}
+	}
+	return nil
 }

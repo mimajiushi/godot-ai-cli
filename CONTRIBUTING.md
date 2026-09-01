@@ -17,7 +17,10 @@ Editor-backed smoke testing needs the demo project at `../demo`, which lives
 in the development workspace but is **not shipped in this repository**. With
 it present, `bash script/smoke-e2e.sh` exercises the full loop (launch, ops,
 GDScript suites, screenshot probe, stop, EditorSettings restore) against a
-real headless editor.
+real headless editor. `bash script/smoke-concurrent.sh` needs no demo project:
+it creates two throwaway minimal projects and verifies the multi-project
+behavior (per-project launch, session routing/isolation, `stop --session`,
+full stop leaving no orphaned editors) against real headless editors.
 
 ## Conventions
 

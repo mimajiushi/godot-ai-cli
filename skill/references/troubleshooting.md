@@ -26,7 +26,7 @@ Emitted by `launch` itself, before any editor op is possible.
 | `EDITOR_LAUNCH_FAILED` | The editor process failed to spawn | Try launching the same binary manually to see the OS error. |
 | `LAUNCH_TIMEOUT` | No plugin session within `--wait` (default 60s, retryable) | Usually still starting: check `status` for a session before retrying with `--wait 90`+. |
 | `DAEMON_UNREACHABLE` / `DAEMON_START_FAILED` | Daemon could not start or be probed | Check port availability, stale PID file, firewall on localhost. |
-| `LAUNCH_LOCK_FAILED` | A concurrent launch/stop holds the global launch lock | Wait for the other invocation to finish; the lock protects shared EditorSettings. |
+| `LAUNCH_LOCK_FAILED` | OS-level failure to open/lock the global launch-lock file — contention never produces this error: a concurrent launch/stop silently QUEUES until the holder finishes (which can look like a hang during a long `--wait`) | If a command seems stuck, another launch/stop is likely still running — wait for it. A real `LAUNCH_LOCK_FAILED` means the lock file itself (`<user cache dir>/godot-ai-cli/launch.lock`) is unusable: check permissions. |
 
 ## Update-phase codes
 
@@ -103,6 +103,18 @@ Custom ports temporarily override the user's GLOBAL Godot EditorSettings (`godot
 5. Manual recovery when all else fails: the backup JSON names the exact `editor_settings_path`, the keys, and their original values (or that they were absent) — edit the settings file by hand from it.
 
 The launch warning `"repinned the godot_ai managed-server record to this daemon"` is part of this mechanism: the plugin pins its expected WS port from that record, so custom-port launches must point it at this daemon. It is informational and rolled back with the rest on `stop`.
+
+## Multiple projects at once
+
+The recommended model is ONE daemon (default ports) hosting one editor session per project — no custom ports needed:
+
+1. `launch --project A` then `launch --project B` — each launch opens that project's editor as an additional session and pins it active. A launch only reuses an existing session when that session belongs to the SAME project; another project's session never suppresses or satisfies it.
+2. Ops target the ACTIVE session. Route to another project with `session activate <id>` or an op's `--session <id>` flag; `session list` (or `status`) shows every connected session with its `project_path` and `active` flag.
+3. Teardown granularity: `stop --session <id>` quits exactly one editor (daemon and other sessions keep running); plain `stop` quits EVERY connected editor, shuts the daemon down, and restores any settings overrides.
+4. Editors reconnect: an editor whose daemon died keeps retrying and joins the NEXT daemon on its ports. A full `stop` prevents such orphans by quitting every session — prefer it over killing the daemon process by hand. If an orphaned editor reconnects mid-launch of the SAME project, launch may still open a second editor for it — `session list` shows both twins; `stop --session` retires the stale one.
+5. Session-to-project matching compares normalized paths (case-insensitive on Windows). Exotic spellings of the same directory (junctions, symlinks, 8.3 short names) can fail to match; that failure is loud (a duplicate editor or `LAUNCH_TIMEOUT`), never silent cross-project writes.
+
+Custom ports remain for ISOLATED daemons (e.g. defaults occupied by the upstream Python server). Because the port override lives in the single shared global EditorSettings file, only one custom-port OVERRIDE SET may be live at a time: a launch that needs DIFFERENT ports while one is live (including a default-port launch during a custom-port override) fails fast with `SETTINGS_OVERRIDE_ACTIVE` naming the blocking port — `stop --http-port <that port>` first. A second project launched on the SAME custom ports simply joins that daemon as another session, exactly like the default-port model above. (When leftover overrides have no surviving backup file, launch instead normalizes the keys and proceeds — either way the projects never cross-wire.) While a custom-port daemon is live, other projects' ALREADY-CONNECTED editors are unaffected, but a running editor that saves its EditorSettings may overwrite the port keys — the restore on `stop` puts the user's original values back regardless.
 
 ## Headless caveats
 

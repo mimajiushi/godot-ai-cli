@@ -2,7 +2,8 @@
 class_name McpConnection
 extends Node
 
-## WebSocket transport to the Godot AI Python server.
+## WebSocket transport to the godot-ai server (the Go daemon in this fork;
+## upstream: the Python server).
 ## Only handles connect, reconnect, send, and receive.
 ## Command dispatch is owned by McpDispatcher.
 
@@ -43,7 +44,7 @@ var _peer := WebSocketPeer.new()
 ## first dial, then republished with the fully resolved port once the
 ## deferred startup walk (#678) finishes resolving/spawning. Each connect
 ## attempt recomputes the URL from the latest value, so reconnects keep
-## dialing the port the Python server was asked to bind.
+## dialing the port the server was asked to bind.
 var ws_port := ClientConfigurator.DEFAULT_WS_PORT
 ## Per-launch handshake auth token (#690). Set by plugin.gd from the value
 ## it generated for the server spawn (also persisted in the managed-server
@@ -71,10 +72,12 @@ var _session_id := ""
 ## close events it exists to observe, across reconnect attempts. Reset on
 ## any other close code and on a successful `handshake_ack`.
 var _auth_mismatch_closes := 0
-## Godot-AI Python package version reported by the server in its `handshake_ack`
-## reply. Empty until the ack lands. Older servers (pre-handshake_ack) leave
-## this empty forever — callers that gate on it (the dock's mismatch banner)
-## must treat empty as "unknown, don't raise a false alarm".
+## godot-ai version reported by the server in its `handshake_ack` reply
+## (the fork's Go daemon reports the embedded plugin version; upstream the
+## Python package version). Empty until the ack lands. Older servers
+## (pre-handshake_ack) leave this empty forever — callers that gate on it
+## (the dock's mismatch banner) must treat empty as "unknown, don't raise a
+## false alarm".
 var server_version := ""
 
 var dispatcher
@@ -333,7 +336,7 @@ func _attempt_reconnect() -> void:
 	)
 	## Always create a fresh WebSocketPeer before reconnecting. A peer that has
 	## reached STATE_CLOSED is terminal; reusing it can leave the editor stuck in
-	## a quiet reconnect loop after the Python server restarts.
+	## a quiet reconnect loop after the server restarts.
 	_peer = WebSocketPeer.new()
 	_preopen_failure_logged_for_peer = false
 	_peer.outbound_buffer_size = OUTBOUND_BUFFER_LIMIT_BYTES

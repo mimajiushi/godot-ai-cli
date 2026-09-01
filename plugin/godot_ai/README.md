@@ -1,3 +1,12 @@
+> **godot-ai-cli fork:** this copy of the plugin is bundled with
+> [godot-ai-cli](https://github.com/mimajiushi/godot-ai-cli) and is driven
+> entirely by that CLI — `godot-ai-cli launch` installs it, starts the Go
+> daemon, and opens the editor. There is no MCP client to configure, no
+> Python server, and no uv requirement in the fork; the upstream MCP flows
+> described below are DISABLED (see `docs/fork-patches.md` in the CLI
+> repository). The rest of this file is kept upstream-verbatim for sync
+> diffs — read it as reference, not as instructions.
+
 # Godot AI
 
 Connect AI assistants to a live Godot editor via the [Model Context Protocol](https://modelcontextprotocol.io/introduction) (MCP).

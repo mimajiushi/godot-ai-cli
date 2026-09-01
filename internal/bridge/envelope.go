@@ -11,7 +11,7 @@
 package bridge
 
 // Handshake is the first frame a plugin sends after connecting.
-// Mirrors upstream protocol/envelope.go HandshakeMessage.
+// Mirrors upstream protocol/envelope.py HandshakeMessage.
 type Handshake struct {
 	Type            string `json:"type"`
 	SessionID       string `json:"session_id"`

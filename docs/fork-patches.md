@@ -73,6 +73,18 @@ true). They are functions, not constants, so GDScript's analyzer does not
 flag patched call sites as `UNREACHABLE_CODE`. Adding a fork deviation =
 add a switch here + a marked guard at the call site.
 
+## 6. Comment/copy touch-ups (no behavior change)
+
+- `plugin/godot_ai/README.md`: a fork banner is prepended — the upstream
+  usage flow it describes (MCP client configuration, auto-started Python
+  server, uv requirement) cannot work in the fork. The upstream body is
+  kept verbatim below the banner so sync diffs stay readable.
+- `connection.gd`: four comments on the ACTIVE transport path said "the
+  Python server" where the peer is now the Go daemon (file header, the
+  `ws_port` reconnect note, the `server_version` doc, the fresh-peer
+  reconnect note). Comment-only rewording; dormant spawn-path and
+  upstream-attribution comments elsewhere keep upstream wording deliberately.
+
 ## Syncing with upstream
 
 1. Diff `plugin/godot_ai/` against the upstream tag; every hunk that is not

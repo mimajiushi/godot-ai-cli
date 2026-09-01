@@ -89,10 +89,15 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
   用于驱动运行中的游戏）。这些改动都可以安全提交；导出插件会在导出包中自动剥离
   该 helper，不会随构建发布。如果工程里已装过上游 hi-godot/godot-ai 插件，
   `launch` 会原地升级为内置的 fork 版本（不再使用 Python 后端）。
-- **CI / 无显示环境：** 加 `--headless`。依赖视口的操作（截图、合成游戏输入）需要有
-  界面的编辑器。
-- **同时开多个工程：** 给每个会话分配独立端口，例如
-  `--http-port 18000 --ws-port 19500`；后续命令不用重复带端口也能找到已记录的 daemon。
+- **CI / 无显示环境：** 加 `--headless`。依赖视口的操作（截图）需要有界面的编辑器。
+- **同时开多个工程：** 让每个工程共用同一个 daemon（相同端口）。每次 launch 都会把
+  该工程的编辑器作为一个新会话打开并置为活动；操作默认落在活动会话——用
+  `session activate <id>` 或操作的 `--session` 标志切换目标工程，用
+  `stop --session <id>` 只结束一个工程（裸 `stop` 会退出所有已连接的编辑器）。
+  自定义端口（`--http-port`/`--ws-port`）会拉起独立的第二个 daemon；但端口覆盖写在
+  全局共享的 EditorSettings 里，所以同一时间只能存活一套自定义端口覆盖——在一套
+  激活期间用不同端口 launch 会以 `SETTINGS_OVERRIDE_ACTIVE` 失败；而多个工程可以像
+  默认端口一样共用同一个自定义端口 daemon。
 - **关闭：** `godot-ai-cli stop` 会让编辑器退出并停止 daemon。
 
 ### 给 Agent 装 skill
@@ -143,8 +148,8 @@ godot-ai-cli <domain> <op> -h            # 每个操作的参数、超时、写�
 
 ## 更新
 
-`godot-ai-cli update` 查询 GitHub Releases 的最新版本，与当前构建做语义化版本比较，
-经确认提示后下载对应平台的 zip、按 release 校验和文件验证 SHA256，然后原地替换可执行文件
+`godot-ai-cli update` 查询 GitHub Releases 的最新版本（stable 与 prerelease 标签都计入），
+与当前构建做语义化版本比较，经确认提示后下载对应平台的 zip、按 release 校验和文件验证 SHA256，然后原地替换可执行文件
 （Windows 上先改名留底；残留的 `.old` 会在下次启动时清理）。更新后需要重启。
 
 ## 开发

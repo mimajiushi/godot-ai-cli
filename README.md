@@ -101,10 +101,18 @@ checks GitHub Releases and offers to update in place.
   `launch` upgrades it in place to the bundled fork (the Python backend is
   no longer used).
 - **CI / no display:** add `--headless`. Viewport-dependent ops
-  (screenshots, synthetic game input) need a windowed editor.
-- **Several projects at once:** give each session its own ports, e.g.
-  `--http-port 18000 --ws-port 19500`. Later commands find the recorded
-  daemon without repeating the flags.
+  (screenshots) need a windowed editor.
+- **Several projects at once:** launch each project against the SAME daemon
+  (same ports). Every launch opens that project's editor as an additional
+  session and pins it active; ops target the active session — pin another
+  project with `session activate <id>` or an op's `--session` flag, and end
+  one project with `stop --session <id>` (plain `stop` quits ALL connected
+  editors). Custom ports (`--http-port/--ws-port`) start an isolated second
+  daemon; because the port override lives in the single shared global
+  EditorSettings file, only one custom-port OVERRIDE SET may be live at a
+  time — launching on DIFFERENT ports while one is active fails with
+  `SETTINGS_OVERRIDE_ACTIVE`, but several projects may share one
+  custom-port daemon exactly like the default one.
 - **Shut down:** `godot-ai-cli stop` asks the editor to quit and stops the
   daemon.
 
@@ -161,7 +169,8 @@ commands atomically.
 
 ## Updating
 
-`godot-ai-cli update` queries GitHub Releases for the latest version, compares
+`godot-ai-cli update` queries GitHub Releases for the newest version
+(stable and prerelease tags both count), compares
 it semantically against the running build, and — after a confirmation prompt —
 downloads the platform zip, verifies its SHA256 against the release checksums
 file, and swaps the executable in place (rename-aside on Windows; the leftover

@@ -212,3 +212,71 @@ func TestSetPluginPortsAppendsWhenKeyAbsent(t *testing.T) {
 		t.Errorf("overrides not appended:\n%s", text)
 	}
 }
+
+// TestReadPluginPorts pins the live-override reader launch's mutation gate
+// relies on: keys found report Present with their values, a missing file or
+// missing keys report absent, and values written by SetPluginPorts round
+// back out.
+func TestReadPluginPorts(t *testing.T) {
+	v := godot.Version{Major: 4, Minor: 7, Patch: 2}
+
+	t.Run("missing file", func(t *testing.T) {
+		withEditorConfig(t)
+		ports := godot.ReadPluginPorts(v)
+		if ports.HTTPPresent || ports.WSPresent {
+			t.Errorf("ports = %+v, want both absent", ports)
+		}
+	})
+
+	t.Run("round trip", func(t *testing.T) {
+		withEditorConfig(t)
+		if _, err := godot.SetPluginPorts(v, 18099, 19599); err != nil {
+			t.Fatal(err)
+		}
+		ports := godot.ReadPluginPorts(v)
+		if !ports.HTTPPresent || ports.HTTPPort != 18099 {
+			t.Errorf("http port = %+v, want 18099 present", ports)
+		}
+		if !ports.WSPresent || ports.WSPort != 19599 {
+			t.Errorf("ws port = %+v, want 19599 present", ports)
+		}
+	})
+
+	t.Run("partial keys", func(t *testing.T) {
+		root := withEditorConfig(t)
+		path := settingsFile(t, root, v)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := "[gd_resource type=\"EditorSettings\" format=3]\n\n[resource]\ngodot_ai/ws_port = 19502\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ports := godot.ReadPluginPorts(v)
+		if ports.HTTPPresent {
+			t.Errorf("http = %+v, want absent", ports)
+		}
+		if !ports.WSPresent || ports.WSPort != 19502 {
+			t.Errorf("ws = %+v, want 19502 present", ports)
+		}
+	})
+
+	t.Run("unparseable values count as absent", func(t *testing.T) {
+		root := withEditorConfig(t)
+		path := settingsFile(t, root, v)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := "[gd_resource type=\"EditorSettings\" format=3]\n\n[resource]\ngodot_ai/http_port = not-a-number\ngodot_ai/ws_port = 19502\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ports := godot.ReadPluginPorts(v)
+		if ports.HTTPPresent {
+			t.Errorf("http = %+v, want absent (unparseable)", ports)
+		}
+		if !ports.WSPresent || ports.WSPort != 19502 {
+			t.Errorf("ws = %+v, want 19502 present", ports)
+		}
+	})
+}

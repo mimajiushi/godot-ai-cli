@@ -160,6 +160,44 @@ func ReadManagedRecord(v Version) (ManagedRecord, error) {
 	return record, nil
 }
 
+// PluginPorts carries the live godot_ai/http_port and godot_ai/ws_port
+// overrides found in an editor settings file. Each Present flag reports
+// whether that key was found at all; the int is meaningful only then.
+type PluginPorts struct {
+	HTTPPort    int
+	WSPort      int
+	HTTPPresent bool
+	WSPresent   bool
+}
+
+// ReadPluginPorts reads the CURRENT godot_ai port overrides from the editor
+// settings of the given Godot version. Every failure (no file, unreadable
+// file, missing keys) is reported as absent — this is a best-effort input
+// to launch's mutation gate, never an error source.
+func ReadPluginPorts(v Version) PluginPorts {
+	var ports PluginPorts
+	path, err := EditorSettingsPath(v)
+	if err != nil {
+		return ports
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ports
+	}
+	content := string(data)
+	if m := keyValueLine("godot_ai/http_port").FindStringSubmatch(content); m != nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(m[1])); err == nil {
+			ports.HTTPPort, ports.HTTPPresent = n, true
+		}
+	}
+	if m := keyValueLine("godot_ai/ws_port").FindStringSubmatch(content); m != nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(m[1])); err == nil {
+			ports.WSPort, ports.WSPresent = n, true
+		}
+	}
+	return ports
+}
+
 // SetPluginManagedServer pins the plugin's managed-server record to our
 // daemon, mirroring what the plugin itself writes after a managed spawn
 // (plugin.gd _write_managed_server_record). Without this, a stale record

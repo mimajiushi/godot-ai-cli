@@ -66,6 +66,30 @@ godot-ai-cli test run
 支持的 Godot 版本范围以及内置插件（godot-ai）版本。`godot-ai-cli update`
 会检查 GitHub Releases 并提供原地更新。
 
+## 接入你自己的工程
+
+- **前提：** 一个 Godot **4.5+** 工程（包含 `project.godot` 的目录）。动手前先跑
+  `godot-ai-cli -v`——它会打印支持的 Godot 版本范围，以及工程将被对齐到的内置插件版本。
+- **Godot 二进制：** `launch` 依次从 `--godot` 参数、`GODOT_BIN` 环境变量、PATH、
+  各系统常见安装位置查找编辑器。Godot 不在这些位置时显式指定一次即可：
+  `launch --project . --godot /path/to/godot`。
+- **`launch` 会改动你的工程：** 内置插件会被复制到 `addons/godot_ai/` 并在
+  `project.godot` 中启用。这两处改动可以安全提交——它是编辑器插件，不会进入导出构建。
+  如果工程里已装过上游 hi-godot/godot-ai 插件，`launch` 会原地升级为内置的 fork
+  版本（不再使用 Python 后端）。
+- **CI / 无显示环境：** 加 `--headless`。依赖视口的操作（截图、合成游戏输入）需要有
+  界面的编辑器。
+- **同时开多个工程：** 给每个会话分配独立端口，例如
+  `--http-port 18000 --ws-port 19500`；后续命令不用重复带端口也能找到已记录的 daemon。
+- **关闭：** `godot-ai-cli stop` 会让编辑器退出并停止 daemon。
+
+### 给 Agent 装 skill
+
+每个 release 还附带 `godot-ai-skill.zip`——一个开箱即用的 Agent skill，内含完整命令
+清单、端到端操作手册、错误恢复指南，以及 CLI 安装脚本。把 zip 解压到 Agent 的 skills
+目录下的新文件夹中，让 `SKILL.md` 位于 `<skills目录>/godot-ai-skill/SKILL.md`
+（例如 `~/.claude/skills/godot-ai-skill/SKILL.md`），Agent 即可获得这些指引。
+
 ## 工作原理
 
 ```

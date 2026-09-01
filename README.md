@@ -71,6 +71,38 @@ the CLI version together with the supported Godot range and the bundled plugin
 (godot-ai) version. `godot-ai-cli update`
 checks GitHub Releases and offers to update in place.
 
+## Using it in your own project
+
+- **Prerequisite:** a Godot **4.5+** project (a directory containing
+  `project.godot`). Run `godot-ai-cli -v` first — it prints the supported
+  Godot range and the bundled plugin version the project will be aligned to.
+- **Godot binary:** `launch` resolves the editor from `--godot`, then
+  `GODOT_BIN`, then PATH, then the conventional per-OS install locations.
+  If your Godot lives elsewhere, pass it once:
+  `launch --project . --godot /path/to/godot`.
+- **What `launch` writes into your project:** the bundled plugin is copied
+  to `addons/godot_ai/` and enabled in `project.godot`. Both changes are
+  safe to commit — it is an editor plugin and never ships in exported
+  builds. If the project already has the upstream hi-godot/godot-ai plugin
+  installed, `launch` upgrades it in place to the bundled fork (the Python
+  backend is no longer used).
+- **CI / no display:** add `--headless`. Viewport-dependent ops
+  (screenshots, synthetic game input) need a windowed editor.
+- **Several projects at once:** give each session its own ports, e.g.
+  `--http-port 18000 --ws-port 19500`. Later commands find the recorded
+  daemon without repeating the flags.
+- **Shut down:** `godot-ai-cli stop` asks the editor to quit and stops the
+  daemon.
+
+### For agents: install the skill
+
+Every release also attaches `godot-ai-skill.zip` — a ready-made agent skill
+with the full command catalog, end-to-end recipes, an error-recovery
+playbook, and the CLI install scripts. Unzip it into a new folder on the
+agent's skill path so that `SKILL.md` lands at
+`<skills-dir>/godot-ai-skill/SKILL.md` (e.g.
+`~/.claude/skills/godot-ai-skill/SKILL.md`).
+
 ## How it works
 
 ```

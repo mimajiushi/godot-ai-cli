@@ -27,7 +27,9 @@ run a shell command can drive Godot.
 Prebuilt binaries for Windows, macOS and Linux (amd64 & arm64) are attached to
 every [GitHub release](https://github.com/mimajiushi/godot-ai-cli/releases).
 Download `godot-ai-cli-<ver>-<os>-<arch>.zip` for your platform, verify it
-against `godot-ai-cli-<ver>-checksums.txt` (`sha256sum -c`), unzip it, and put
+against `godot-ai-cli-<ver>-checksums.txt` (`sha256sum -c`; when you only
+downloaded one zip, `grep <os>-<arch> godot-ai-cli-<ver>-checksums.txt |
+sha256sum -c -`), unzip it, and put
 `godot-ai-cli` (`godot-ai-cli.exe` on Windows) on your PATH.
 
 ### Skill install scripts
@@ -60,11 +62,14 @@ godot-ai-cli launch --project /path/to/project
 # Drive the editor
 godot-ai-cli status
 godot-ai-cli scene get-hierarchy
-godot-ai-cli node create --type Camera3D --name MainCamera --parent /Main
+godot-ai-cli node create --type Camera3D --name MainCamera --parent-path /Main
 
 # Run the project's GDScript test suites
 godot-ai-cli test run
 ```
+
+Git Bash note: MSYS rewrites absolute node paths such as `/Main` into Windows
+paths — prefix commands that take them with `MSYS_NO_PATHCONV=1`.
 
 Every command and subcommand supports `-h` / `--help`. `godot-ai-cli -v` prints
 the CLI version together with the supported Godot range and the bundled plugin
@@ -80,6 +85,10 @@ checks GitHub Releases and offers to update in place.
   `GODOT_BIN`, then PATH, then the conventional per-OS install locations.
   If your Godot lives elsewhere, pass it once:
   `launch --project . --godot /path/to/godot`.
+- **Check before launching:** `godot-ai-cli godot detect` probes the same
+  sources and prints each candidate binary's version and compatibility
+  (`GODOT_BIN=/path/to/godot godot-ai-cli godot detect` when Godot is not
+  on PATH).
 - **What `launch` writes into your project:** the bundled plugin is copied
   to `addons/godot_ai/` and enabled in `project.godot`. Both changes are
   safe to commit — it is an editor plugin and never ships in exported

@@ -25,7 +25,9 @@
 每个 [GitHub release](https://github.com/mimajiushi/godot-ai-cli/releases) 都附带
 Windows、macOS、Linux（amd64 与 arm64）的预编译二进制。下载对应平台的
 `godot-ai-cli-<版本>-<系统>-<架构>.zip`，用 `godot-ai-cli-<版本>-checksums.txt`
-校验（`sha256sum -c`），解压后把 `godot-ai-cli`（Windows 为 `godot-ai-cli.exe`）放入 PATH。
+校验（`sha256sum -c`；只下载了单个 zip 时用 `grep <系统>-<架构>
+godot-ai-cli-<版本>-checksums.txt | sha256sum -c -`），解压后把
+`godot-ai-cli`（Windows 为 `godot-ai-cli.exe`）放入 PATH。
 
 ### Skill 安装脚本
 
@@ -56,11 +58,14 @@ godot-ai-cli launch --project /path/to/project
 # 驱动编辑器
 godot-ai-cli status
 godot-ai-cli scene get-hierarchy
-godot-ai-cli node create --type Camera3D --name MainCamera --parent /Main
+godot-ai-cli node create --type Camera3D --name MainCamera --parent-path /Main
 
 # 运行工程的 GDScript 测试套件
 godot-ai-cli test run
 ```
+
+Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 路径——涉及
+此类参数的命令请加 `MSYS_NO_PATHCONV=1` 前缀。
 
 每个命令与子命令都支持 `-h` / `--help`。`godot-ai-cli -v` 会打印 CLI 版本、
 支持的 Godot 版本范围以及内置插件（godot-ai）版本。`godot-ai-cli update`
@@ -73,6 +78,9 @@ godot-ai-cli test run
 - **Godot 二进制：** `launch` 依次从 `--godot` 参数、`GODOT_BIN` 环境变量、PATH、
   各系统常见安装位置查找编辑器。Godot 不在这些位置时显式指定一次即可：
   `launch --project . --godot /path/to/godot`。
+- **启动前先检查：** `godot-ai-cli godot detect` 会从同样的来源探测并打印每个候选
+  二进制的版本与兼容性（Godot 不在 PATH 时用
+  `GODOT_BIN=/path/to/godot godot-ai-cli godot detect`）。
 - **`launch` 会改动你的工程：** 内置插件会被复制到 `addons/godot_ai/` 并在
   `project.godot` 中启用。这两处改动可以安全提交——它是编辑器插件，不会进入导出构建。
   如果工程里已装过上游 hi-godot/godot-ai 插件，`launch` 会原地升级为内置的 fork

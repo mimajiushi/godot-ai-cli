@@ -15,7 +15,7 @@
 场景、节点、脚本、信号、UI、材质、动画、粒子、相机、环境、TileMap、测试、截图等——
 都暴露为打印 JSON 的普通子命令。任何能执行 shell 命令的 Agent 都能驱动 Godot。
 
-- **支持的 Godot：** 4.5+（推荐 4.7+）
+- **支持的 Godot：** 4.5+（推荐 4.7+），标准版或 .NET（Mono）版均可
 - **支持的平台：** Windows、macOS、Linux（amd64 与 arm64）
 
 ## 安装
@@ -27,7 +27,8 @@ Windows、macOS、Linux（amd64 与 arm64）的预编译二进制。下载对应
 `godot-ai-cli-<版本>-<系统>-<架构>.zip`，用 `godot-ai-cli-<版本>-checksums.txt`
 校验（`sha256sum -c`；只下载了单个 zip 时用 `grep <系统>-<架构>
 godot-ai-cli-<版本>-checksums.txt | sha256sum -c -`），解压后把
-`godot-ai-cli`（Windows 为 `godot-ai-cli.exe`）放入 PATH。
+`godot-ai-cli`（Windows 为 `godot-ai-cli.exe`）放入 PATH；也可以不安装，直接用
+完整路径调用解压出的二进制。
 
 ### Skill 安装脚本
 
@@ -57,8 +58,10 @@ godot-ai-cli launch --project /path/to/project
 
 # 驱动编辑器
 godot-ai-cli status
+godot-ai-cli scene create --path res://main.tscn --root-type Node2D --root-name Main
+#（或打开已有场景：godot-ai-cli scene open --path res://your_scene.tscn）
 godot-ai-cli scene get-hierarchy
-godot-ai-cli node create --type Camera3D --name MainCamera --parent-path /Main
+godot-ai-cli node create --type Camera2D --name MainCamera --parent-path /Main
 
 # 运行工程的 GDScript 测试套件
 godot-ai-cli test run
@@ -81,10 +84,11 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
 - **启动前先检查：** `godot-ai-cli godot detect` 会从同样的来源探测并打印每个候选
   二进制的版本与兼容性（Godot 不在 PATH 时用
   `GODOT_BIN=/path/to/godot godot-ai-cli godot detect`）。
-- **`launch` 会改动你的工程：** 内置插件会被复制到 `addons/godot_ai/` 并在
-  `project.godot` 中启用。这两处改动可以安全提交——它是编辑器插件，不会进入导出构建。
-  如果工程里已装过上游 hi-godot/godot-ai 插件，`launch` 会原地升级为内置的 fork
-  版本（不再使用 Python 后端）。
+- **`launch` 会改动你的工程：** 内置插件会被复制到 `addons/godot_ai/`、在
+  `project.godot` 中启用，并注册一个小型运行时 autoload（`_mcp_game_helper`，
+  用于驱动运行中的游戏）。这些改动都可以安全提交；导出插件会在导出包中自动剥离
+  该 helper，不会随构建发布。如果工程里已装过上游 hi-godot/godot-ai 插件，
+  `launch` 会原地升级为内置的 fork 版本（不再使用 Python 后端）。
 - **CI / 无显示环境：** 加 `--headless`。依赖视口的操作（截图、合成游戏输入）需要有
   界面的编辑器。
 - **同时开多个工程：** 给每个会话分配独立端口，例如

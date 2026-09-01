@@ -17,7 +17,7 @@ UI, materials, animation, particles, cameras, environments, tilemaps, tests,
 screenshots and more — as plain subcommands that print JSON. Any agent that can
 run a shell command can drive Godot.
 
-- **Supported Godot:** 4.5+ (4.7+ recommended)
+- **Supported Godot:** 4.5+ (4.7+ recommended), standard or .NET (Mono) builds
 - **Platforms:** Windows, macOS, Linux (amd64 & arm64)
 
 ## Install
@@ -30,7 +30,8 @@ Download `godot-ai-cli-<ver>-<os>-<arch>.zip` for your platform, verify it
 against `godot-ai-cli-<ver>-checksums.txt` (`sha256sum -c`; when you only
 downloaded one zip, `grep <os>-<arch> godot-ai-cli-<ver>-checksums.txt |
 sha256sum -c -`), unzip it, and put
-`godot-ai-cli` (`godot-ai-cli.exe` on Windows) on your PATH.
+`godot-ai-cli` (`godot-ai-cli.exe` on Windows) on your PATH — or just invoke
+the unpacked binary by its full path; no installation step is required.
 
 ### Skill install scripts
 
@@ -61,8 +62,10 @@ godot-ai-cli launch --project /path/to/project
 
 # Drive the editor
 godot-ai-cli status
+godot-ai-cli scene create --path res://main.tscn --root-type Node2D --root-name Main
+# (or open an existing scene: godot-ai-cli scene open --path res://your_scene.tscn)
 godot-ai-cli scene get-hierarchy
-godot-ai-cli node create --type Camera3D --name MainCamera --parent-path /Main
+godot-ai-cli node create --type Camera2D --name MainCamera --parent-path /Main
 
 # Run the project's GDScript test suites
 godot-ai-cli test run
@@ -90,11 +93,13 @@ checks GitHub Releases and offers to update in place.
   (`GODOT_BIN=/path/to/godot godot-ai-cli godot detect` when Godot is not
   on PATH).
 - **What `launch` writes into your project:** the bundled plugin is copied
-  to `addons/godot_ai/` and enabled in `project.godot`. Both changes are
-  safe to commit — it is an editor plugin and never ships in exported
-  builds. If the project already has the upstream hi-godot/godot-ai plugin
-  installed, `launch` upgrades it in place to the bundled fork (the Python
-  backend is no longer used).
+  to `addons/godot_ai/`, enabled in `project.godot`, and a small runtime
+  autoload (`_mcp_game_helper`, used to drive the running game) is
+  registered there. All of it is safe to commit; an export plugin strips
+  the helper from exported packs, so none of it ships in your builds. If
+  the project already has the upstream hi-godot/godot-ai plugin installed,
+  `launch` upgrades it in place to the bundled fork (the Python backend is
+  no longer used).
 - **CI / no display:** add `--headless`. Viewport-dependent ops
   (screenshots, synthetic game input) need a windowed editor.
 - **Several projects at once:** give each session its own ports, e.g.

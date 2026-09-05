@@ -80,8 +80,9 @@ func Execute() int {
 // the subcommand did not already report as a JSON envelope (cobra-level
 // usage errors: unknown flag, bad args count, missing required flag, ...)
 // gets the standard USAGE_ERROR envelope on stdout per the output contract
-// (troubleshooting.md / CONTRIBUTING.md); the human-readable Error line
-// goes to stderr either way.
+// (troubleshooting.md / CONTRIBUTING.md). Nothing human-readable is printed
+// on top — the envelope carries code+message, and a duplicated stderr
+// "Error:" line would corrupt the output of callers merging 2>&1.
 func execute(cmd *cobra.Command) int {
 	if err := cmd.Execute(); err != nil {
 		var reported *reportedError
@@ -95,7 +96,6 @@ func execute(cmd *cobra.Command) int {
 				},
 			}, false)
 		}
-		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
 	return 0

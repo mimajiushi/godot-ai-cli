@@ -173,11 +173,6 @@ func TestLaunchMissingProjectPrintsUsageEnvelope(t *testing.T) {
 	cmd.SetErr(&buf)
 	cmd.SetArgs([]string{"launch"})
 
-	// Capture the shared stderr writer so the test stays silent.
-	oldStderr := stderr
-	stderr = &bytes.Buffer{}
-	t.Cleanup(func() { stderr = oldStderr })
-
 	if code := execute(cmd); code != 1 {
 		t.Fatalf("execute exit code = %d, want 1", code)
 	}

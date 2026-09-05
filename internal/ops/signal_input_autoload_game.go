@@ -46,6 +46,7 @@ func inputMapOps() []OpSpec {
 			Timeout: DefaultTimeout,
 			Params: []ParamSpec{
 				pb("include-builtin", "include_builtin", false, "false", "Include Godot's built-in ui_* actions"),
+				ps("action", "action", false, "", "Only list actions whose name matches this glob, e.g. move_*"),
 			},
 		},
 		{
@@ -150,6 +151,7 @@ func gameOps() []OpSpec {
 			Params: []ParamSpec{
 				pi("depth", "depth", false, "10", "Maximum depth below the root"),
 				ps("root-path", "root_path", false, "", "Subtree root (default: game root)"),
+				ps("name", "name", false, "", "Only include nodes whose name matches this glob (subtrees are still traversed)"),
 			},
 		},
 		{
@@ -159,6 +161,7 @@ func gameOps() []OpSpec {
 			Params: []ParamSpec{
 				ps("path", "path", true, "", "Node path in the running game"),
 				pb("include-properties", "include_properties", false, "true", "Include the property dump"),
+				pj("fields", "fields", false, `JSON array of property names to keep in the properties dump, e.g. ["position","visible"]`),
 			},
 		},
 		{

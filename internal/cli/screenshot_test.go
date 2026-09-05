@@ -166,3 +166,42 @@ func TestScreenshotLegacyShapeUnchanged(t *testing.T) {
 		t.Errorf("legacy response lost image_base64: %s", out)
 	}
 }
+
+// TestScreenshotFullRes: --full-res sends max_resolution=0 (no cap) instead
+// of the CLI's default 640; without it the wire keeps 640.
+func TestScreenshotFullRes(t *testing.T) {
+	d, plugin := startScreenshotDaemon(t, true)
+
+	out, err := runScreenshotArgs(t, d.HTTPPort(), "--source", "game", "--full-res")
+	if err != nil {
+		t.Fatalf("screenshot --full-res: %v\n%s", err, out)
+	}
+	got := plugin.Received()
+	var wire map[string]any
+	for _, rec := range got {
+		if rec.Command == "take_screenshot" {
+			wire = rec.Params
+		}
+	}
+	if wire == nil {
+		t.Fatal("take_screenshot never reached the plugin")
+	}
+	if v, ok := wire["max_resolution"].(float64); !ok || v != 0 {
+		t.Errorf("--full-res wire max_resolution = %v, want 0", wire["max_resolution"])
+	}
+
+	out, err = runScreenshotArgs(t, d.HTTPPort(), "--source", "game")
+	if err != nil {
+		t.Fatalf("plain screenshot: %v\n%s", err, out)
+	}
+	got = plugin.Received()
+	wire = nil
+	for _, rec := range got {
+		if rec.Command == "take_screenshot" {
+			wire = rec.Params
+		}
+	}
+	if v, ok := wire["max_resolution"].(float64); !ok || v != 640 {
+		t.Errorf("default wire max_resolution = %v, want 640", wire["max_resolution"])
+	}
+}

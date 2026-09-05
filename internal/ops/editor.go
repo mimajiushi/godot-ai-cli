@@ -29,10 +29,11 @@ func editorOps() []OpSpec {
 			ResponseNote: `{"format","width","height","frames_drawn","image_base64"}; image_base64 is a data URI
   ("data:image/png;base64,..."). The CLI-side flags --out (save to file) and
   --assert '#RRGGBB@x,y' (pixel check, --tolerance) consume the image locally
-  and omit image_base64 from the output.`,
+  and omit image_base64 from the output. --full-res captures at the source
+  resolution (no downscale cap).`,
 			Params: []ParamSpec{
 				ps("source", "source", false, "viewport", "viewport | viewport_2d | cinematic | game"),
-				pi("max-resolution", "max_resolution", false, "640", "Longest-edge pixel cap for the capture"),
+				pi("max-resolution", "max_resolution", false, "640", "Longest-edge pixel cap for the capture (or use --full-res for no cap)"),
 				pb("include-image", "include_image", false, "true", "Embed the image data in the response"),
 				ps("view-target", "view_target", false, "", "Camera3D node path for source=cinematic"),
 				pb("coverage", "coverage", false, "false", "Include scene-coverage analysis for cinematic shots"),
@@ -64,8 +65,12 @@ func editorOps() []OpSpec {
 			Domain: "editor", Name: "eval", PluginCommand: "game_eval",
 			Summary: "Evaluate GDScript code inside the running game",
 			Timeout: GameTimeout,
+			ResponseNote: `{"result","source"}; result is the value of the code's explicit
+  return (null for plain statements). --echo-prints adds "prints": the print()/
+  printerr() lines this eval produced.`,
 			Params: []ParamSpec{
 				ps("code", "code", true, "", "GDScript source to evaluate in the game context"),
+				pb("echo-prints", "echo_prints", false, "false", `Also return the print()/printerr() lines produced during this eval as "prints"`),
 			},
 		},
 	}
@@ -85,6 +90,9 @@ func logsOps() []OpSpec {
 				ps("since-run-id", "since_run_id", false, "", "Read the game log of one specific run"),
 				pi("since-cursor", "since_cursor", false, "", "Incremental editor-log poll cursor"),
 				pb("include-details", "include_details", false, "false", "Include structured error details (editor/game/all)"),
+				ps("level", "level", false, "", "Keep only lines at this level: error | warn | info ('warning' accepted as warn)"),
+				ps("grep", "grep", false, "", "Keep only lines whose text contains this substring (case-sensitive)"),
+				pi("tail", "tail", false, "", "Return only the last N matching lines (overrides --count/--offset)"),
 			},
 		},
 		{

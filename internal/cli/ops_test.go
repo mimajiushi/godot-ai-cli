@@ -411,3 +411,228 @@ func TestCustomListRoundTrip(t *testing.T) {
 		t.Errorf("catalog not printed:\n%s", buf.String())
 	}
 }
+
+// TestBoolFlagValueCompat: the space-separated bool form `--pressed false`
+// is rewritten to the flag's value and lands on the wire, while stray
+// positionals fail with a steering error naming the --flag=false form.
+func TestBoolFlagValueCompat(t *testing.T) {
+	d, err := daemon.Start(context.Background(), daemon.Config{Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
+		return &mockplugin.Response{Data: map[string]any{"ok": true}}
+	})
+
+	// `--pressed false` → wire pressed=false (wrapped under game_command).
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{
+		"game", "input-action", "--http-port", itoa(d.HTTPPort()),
+		"--action", "move_right", "--pressed", "false",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("--pressed false rejected: %v\n%s", err, buf.String())
+	}
+	got := plugin.Received()
+	if len(got) != 1 || got[0].Command != "game_command" {
+		t.Fatalf("mock received %v", got)
+	}
+	nested, ok := got[0].Params["params"].(map[string]any)
+	if !ok || nested["pressed"] != false {
+		t.Errorf("wire params = %v, want nested pressed=false", got[0].Params)
+	}
+
+	// A stray non-bool positional gets the steering error (no daemon needed).
+	cmd = NewRootCommand()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"game", "input-action", "--action", "move_right", "--pressed", "junk"})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--pressed=false") {
+		t.Errorf("stray positional error does not steer to --pressed=false: %v", err)
+	}
+
+	// Two bool flags explicitly set: ambiguous, no conversion — plain error.
+	cmd = NewRootCommand()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"game", "input-key", "--key", "D", "--pressed", "--echo", "false"})
+	if err = cmd.Execute(); err == nil {
+		t.Error("ambiguous bool positional accepted (two bool flags changed)")
+	}
+
+	// Bare `--pressed` alone keeps working (no positional at all).
+	op, leaf := leafFor(t, "game", "input-action")
+	if err := leaf.Flags().Set("action", "move_right"); err != nil {
+		t.Fatal(err)
+	}
+	if err := leaf.Flags().Set("pressed", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := boolFlagValueArgs(op)(leaf, nil); err != nil {
+		t.Errorf("no positional args must pass: %v", err)
+	}
+}
+
+// TestCollectParamsFilterFlags: the new filter/echo flags land on the wire
+// when set and stay off it at their zero values.
+func TestCollectParamsFilterFlags(t *testing.T) {
+	must := func(cmd *cobra.Command, flag, value string) {
+		t.Helper()
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// logs read --level/--grep/--tail pass through…
+	op, cmd := leafFor(t, "logs", "read")
+	must(cmd, "level", "error")
+	must(cmd, "grep", "kaboom")
+	must(cmd, "tail", "20")
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["level"] != "error" || params["grep"] != "kaboom" || params["tail"] != 20 {
+		t.Errorf("logs read filter params = %v", params)
+	}
+
+	// …and stay off the wire at their zero values (declared non-zero
+	// defaults like count/source are still sent, as before).
+	op, cmd = leafFor(t, "logs", "read")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, omitted := range []string{"level", "grep", "tail", "since_run_id", "since_cursor"} {
+		if _, ok := params[omitted]; ok {
+			t.Errorf("zero-value param %q leaked onto the wire: %v", omitted, params)
+		}
+	}
+	if params["count"] != 50 || params["source"] != "plugin" {
+		t.Errorf("declared defaults lost: %v", params)
+	}
+
+	// editor eval --echo-prints → echo_prints:true; default off → omitted.
+	op, cmd = leafFor(t, "editor", "eval")
+	must(cmd, "code", "print(1+1)")
+	must(cmd, "echo-prints", "true")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["echo_prints"] != true {
+		t.Errorf("echo_prints = %v", params)
+	}
+	op, cmd = leafFor(t, "editor", "eval")
+	must(cmd, "code", "print(1+1)")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := params["echo_prints"]; ok {
+		t.Errorf("echo_prints leaked at default: %v", params)
+	}
+
+	// input-map list --action glob.
+	op, cmd = leafFor(t, "input-map", "list")
+	must(cmd, "action", "move_*")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["action"] != "move_*" {
+		t.Errorf("input-map list action = %v", params)
+	}
+
+	// game get-scene-tree --name is wrapped under game_command params.
+	op, cmd = leafFor(t, "game", "get-scene-tree")
+	must(cmd, "name", "Player*")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, ok := params["params"].(map[string]any)
+	if !ok || nested["name"] != "Player*" || nested["depth"] != 10 {
+		t.Errorf("get-scene-tree wire params = %v", params)
+	}
+
+	// game get-node-info --fields is a JSON array param.
+	op, cmd = leafFor(t, "game", "get-node-info")
+	must(cmd, "path", "Player")
+	must(cmd, "fields", `["position","visible"]`)
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, ok = params["params"].(map[string]any)
+	fields, ok2 := nested["fields"].([]any)
+	if !ok || !ok2 || len(fields) != 2 || fields[0] != "position" {
+		t.Errorf("get-node-info wire params = %v", params)
+	}
+}
+
+// TestCollectParamsSpriteframesOps: the three spriteframes ops serialize
+// their flags onto the wire (defaults for fps/speed/loop included).
+func TestCollectParamsSpriteframesOps(t *testing.T) {
+	must := func(cmd *cobra.Command, flag, value string) {
+		t.Helper()
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	op, cmd := leafFor(t, "resource", "spriteframes-from-sheet")
+	must(cmd, "resource-path", "res://assets/hero.tres")
+	must(cmd, "texture", "res://assets/hero.png")
+	must(cmd, "cell", "32x32")
+	must(cmd, "rows", "0:idle,1:walk")
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["cell"] != "32x32" || params["rows"] != "0:idle,1:walk" ||
+		params["fps"] != 8.0 || params["loop"] != true {
+		t.Errorf("spriteframes-from-sheet params = %v", params)
+	}
+
+	op, cmd = leafFor(t, "resource", "spriteframes-add-animation")
+	must(cmd, "resource-path", "res://assets/hero.tres")
+	must(cmd, "name", "attack")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["name"] != "attack" || params["speed"] != 5.0 || params["loop"] != true {
+		t.Errorf("spriteframes-add-animation params = %v", params)
+	}
+
+	op, cmd = leafFor(t, "resource", "spriteframes-add-frame")
+	must(cmd, "resource-path", "res://assets/hero.tres")
+	must(cmd, "anim", "idle")
+	must(cmd, "texture", "res://assets/hero.png")
+	must(cmd, "region", "0,32,32,32")
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["region"] != "0,32,32,32" {
+		t.Errorf("spriteframes-add-frame params = %v", params)
+	}
+	if _, ok := params["at_index"]; ok {
+		t.Errorf("at_index leaked at default: %v", params)
+	}
+
+	// Required flags are enforced before anything hits the wire.
+	op, cmd = leafFor(t, "resource", "spriteframes-from-sheet")
+	must(cmd, "texture", "res://assets/hero.png")
+	if _, err = collectParams(cmd, op); err == nil {
+		t.Error("missing required flags accepted")
+	}
+}

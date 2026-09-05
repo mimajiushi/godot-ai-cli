@@ -9,6 +9,9 @@ const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
 func list_actions(params: Dictionary) -> Dictionary:
 	var include_builtin: bool = params.get("include_builtin", false)
+	## godot-ai-cli fork patch: optional action-name glob filter (e.g. "move_*"),
+	## applied to both the InputMap-loaded and the project.godot-only lists.
+	var pattern := str(params.get("action", ""))
 	## Authoritative source for user-authored actions is the ``[input]``
 	## section of ``project.godot``. ``ProjectSettings.has_setting`` is not
 	## reliable here because Godot registers ``ui_*`` defaults via
@@ -21,6 +24,8 @@ func list_actions(params: Dictionary) -> Dictionary:
 	var seen := {}
 	for action_name in InputMap.get_actions():
 		var name_str := str(action_name)
+		if not pattern.is_empty() and not name_str.match(pattern):
+			continue
 		var is_user_action := user_authored.has(name_str)
 		if not include_builtin and not is_user_action:
 			continue
@@ -38,6 +43,8 @@ func list_actions(params: Dictionary) -> Dictionary:
 	for action_name in user_authored.keys():
 		var name_str := str(action_name)
 		if seen.has(name_str):
+			continue
+		if not pattern.is_empty() and not name_str.match(pattern):
 			continue
 		var setting: Dictionary = user_authored.get(name_str, {})
 		var events: Array[Dictionary] = []

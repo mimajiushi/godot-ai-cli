@@ -406,12 +406,15 @@ func _reply_game_command_error(request_id: String, message: String) -> void:
 
 func _game_get_scene_tree(params: Dictionary) -> Dictionary:
 	var depth := maxi(0, int(params.get("depth", 10)))
+	## godot-ai-cli fork patch: optional node-name glob filter (e.g. "Player*");
+	## non-matching subtrees are still traversed so deep matches are found.
+	var name_pattern := str(params.get("name", ""))
 	var root := _resolve_runtime_node(str(params.get("root_path", "")))
 	if root == null:
 		return {"root": "", "nodes": [], "total_count": 0, "not_found": params.get("root_path", "")}
 
 	var nodes: Array[Dictionary] = []
-	_collect_runtime_nodes(root, 0, depth, nodes)
+	_collect_runtime_nodes(root, 0, depth, nodes, name_pattern)
 	return {
 		"root": _runtime_path(root),
 		"nodes": nodes,
@@ -419,18 +422,21 @@ func _game_get_scene_tree(params: Dictionary) -> Dictionary:
 	}
 
 
-func _collect_runtime_nodes(node: Node, current_depth: int, max_depth: int, out: Array[Dictionary]) -> void:
-	out.append({
-		"name": node.name,
-		"type": node.get_class(),
-		"path": _runtime_path(node),
-		"children_count": node.get_child_count(),
-	})
+func _collect_runtime_nodes(node: Node, current_depth: int, max_depth: int, out: Array[Dictionary], pattern: String = "") -> void:
+	## godot-ai-cli fork patch: with a pattern, only matching names are
+	## appended; recursion into children is unaffected either way.
+	if pattern.is_empty() or String(node.name).match(pattern):
+		out.append({
+			"name": node.name,
+			"type": node.get_class(),
+			"path": _runtime_path(node),
+			"children_count": node.get_child_count(),
+		})
 	if current_depth >= max_depth:
 		return
 	for child in node.get_children():
 		if child is Node:
-			_collect_runtime_nodes(child, current_depth + 1, max_depth, out)
+			_collect_runtime_nodes(child, current_depth + 1, max_depth, out, pattern)
 
 
 func _game_get_node_info(params: Dictionary) -> Dictionary:
@@ -448,7 +454,23 @@ func _game_get_node_info(params: Dictionary) -> Dictionary:
 		"found": true,
 	}
 	if bool(params.get("include_properties", true)):
-		info["properties"] = _runtime_node_properties(node)
+		var props := _runtime_node_properties(node)
+		## godot-ai-cli fork patch: optional property whitelist; names that did
+		## not resolve are reported in unknown_fields so typos are visible.
+		var fields = params.get("fields", [])
+		if fields is Array and not fields.is_empty():
+			var picked := {}
+			var unknown: Array = []
+			for f in fields:
+				var fname := str(f)
+				if props.has(fname):
+					picked[fname] = props[fname]
+				else:
+					unknown.append(fname)
+			info["properties"] = picked
+			info["unknown_fields"] = unknown
+		else:
+			info["properties"] = props
 	return info
 
 
@@ -976,6 +998,9 @@ const EVAL_TIMEOUT_SEC := 8.0
 func _handle_eval(data: Array) -> void:
 	var request_id: String = data[0] if data.size() > 0 else ""
 	var code: String = data[1] if data.size() > 1 else ""
+	## godot-ai-cli fork patch: optional third element enables per-eval print
+	## capture (older editors send only 2 elements → capture stays off).
+	var echo_prints: bool = bool(data[2]) if data.size() > 2 else false
 
 	if code.is_empty():
 		_reply_eval_error(request_id, "No code provided")
@@ -1005,6 +1030,9 @@ func _handle_eval(data: Array) -> void:
 	## eval_check probe / the in-flight poll loop) once a logged error past this
 	## baseline carries this eval's token.
 	var baseline: int = _logger.script_error_seq() if _logger != null else 0
+	## godot-ai-cli fork patch: print-capture baseline, taken at the same point
+	## so only lines produced by THIS eval's execution are echoed back.
+	var prints_baseline: int = _logger.message_seq() if echo_prints and _logger != null else 0
 
 	var script: GDScript = GDScript.new()
 	script.source_code = script_source
@@ -1085,7 +1113,14 @@ func _handle_eval(data: Array) -> void:
 	## Clean finish.
 	_inflight_evals.erase(request_id)
 	temp_node.queue_free()
-	_reply_eval_response(request_id, holder["value"])
+	## godot-ai-cli fork patch: attach the print lines this eval produced when
+	## the caller asked for them (echo_prints). NOTE: no ternary here — an
+	## `X if c else []` expression is statically untyped Array and assigning it
+	## to Array[String] aborts _handle_eval at runtime (debugger break).
+	var prints: Array[String] = []
+	if echo_prints and _logger != null:
+		prints = _logger.messages_since(prints_baseline)
+	_reply_eval_response(request_id, holder["value"], prints)
 
 
 ## Run the compiled eval node's execute() and stash the result. Kept
@@ -1137,7 +1172,7 @@ func _reply_eval_error(request_id: String, message: String, code: String = "") -
 		EngineDebugger.send_message("mcp:eval_error", payload)
 
 
-func _reply_eval_response(request_id: String, value: Variant) -> void:
+func _reply_eval_response(request_id: String, value: Variant, prints: Array[String] = []) -> void:
 	var serialized := JSON.stringify(_variant_to_json(value))
 	var serialized_bytes := serialized.to_utf8_buffer().size()
 	if serialized_bytes > EVAL_RESULT_MAX_BYTES:
@@ -1148,8 +1183,15 @@ func _reply_eval_response(request_id: String, value: Variant) -> void:
 			ErrorCodes.EVAL_RESULT_TOO_LARGE)
 		return
 	_last_eval_reply = {"kind": "response", "request_id": request_id}
+	## godot-ai-cli fork patch: record prints on the testing seam regardless of
+	## the debugger channel, and carry them as a third payload element when set.
+	if not prints.is_empty():
+		_last_eval_reply["prints"] = prints
 	if EngineDebugger.is_active():
-		EngineDebugger.send_message("mcp:eval_response", [request_id, serialized])
+		if prints.is_empty():
+			EngineDebugger.send_message("mcp:eval_response", [request_id, serialized])
+		else:
+			EngineDebugger.send_message("mcp:eval_response", [request_id, serialized, JSON.stringify(prints)])
 
 
 ## #490: if a logged script error past THIS eval's baseline carries its unique

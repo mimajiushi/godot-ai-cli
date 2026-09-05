@@ -87,6 +87,35 @@ add a switch here + a marked guard at the call site.
   reconnect note). Comment-only rewording; dormant spawn-path and
   upstream-attribution comments elsewhere keep upstream wording deliberately.
 
+## 7. Output filtering, eval print echo, and SpriteFrames ops (beta.8)
+
+Added for the CLI's output-shaping gaps; all spots carry `godot-ai-cli fork
+patch` markers. Wire-compatible on both sides: new params/fields are
+optional, older peers ignore/absent them.
+
+- `handlers/editor_handler.gd` — `get_logs` accepts `level` (`warning`
+  normalized to `warn`), `grep` (case-sensitive substring) and `tail`
+  (last-N, wins over offset/count). Filtered reads add `matched_count`
+  (post-filter, pre-window); unfiltered reads are byte-identical to before.
+  `game_eval` passes the new `echo_prints` param through.
+- `runtime/game_logger.gd` — a 256-entry ring of print()/printerr() texts
+  with a monotonic seq (`message_seq`/`messages_since`), mirroring the
+  script-error ring, so an eval can collect exactly its own output.
+- `runtime/game_helper.gd` — `_handle_eval` reads the optional third
+  `mcp:eval` payload element (echo flag), snapshots the print baseline, and
+  `_reply_eval_response` sends captured lines as a third `mcp:eval_response`
+  element. `_game_get_scene_tree`/`_game_get_node_info` accept `name`
+  (glob) and `fields` (property whitelist + `unknown_fields`).
+- `debugger/mcp_debugger_plugin.gd` — `echo_prints` is threaded
+  request_game_eval → wait/probe → `_send_eval` (third `mcp:eval` element);
+  `_on_eval_response` maps an optional third payload element to `prints`.
+- `handlers/input_handler.gd` — `list_actions` accepts an `action` glob.
+- `handlers/spriteframes_handler.gd` — NEW handler (not upstream):
+  `spriteframes_add_animation`, `spriteframes_add_frame` (optional atlas
+  region), `spriteframes_from_sheet` (idempotent row→animation batch build).
+  Registered in `plugin.gd` as the lazy "spriteframes" handler; exposed by
+  the CLI as `resource spriteframes-*` (see `internal/ops`).
+
 ## v3.2.5 sync notes
 
 The vendored base was a post-v3.2.4 upstream snapshot that already carried

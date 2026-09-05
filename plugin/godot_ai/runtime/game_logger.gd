@@ -40,11 +40,25 @@ const _MAX_RECENT_SCRIPT_ERRORS := 64
 var _script_error_seq: int = 0
 var _recent_script_errors: Array = []
 
+## godot-ai-cli fork patch: per-eval print capture. A monotonic sequence plus
+## a small ring of recent print()/printerr() texts lets game_helper snapshot a
+## baseline before an eval and collect exactly the messages produced during it
+## (messages_since). Mutex-guarded: _log_message can fire from any thread.
+const _MAX_RECENT_MESSAGES := 256
+var _message_seq: int = 0
+var _recent_messages: Array = []
+
 
 func _log_message(message: String, error: bool) -> void:
 	## `error` is true for printerr(), false for print().
 	var level := "error" if error else "info"
 	_append(level, message)
+	_mutex.lock()
+	_message_seq += 1
+	_recent_messages.append({"seq": _message_seq, "text": message})
+	if _recent_messages.size() > _MAX_RECENT_MESSAGES:
+		_recent_messages.remove_at(0)
+	_mutex.unlock()
 
 
 func _log_error(
@@ -140,3 +154,26 @@ func find_script_error_since(since_seq: int, function_name: String) -> String:
 			break
 	_mutex.unlock()
 	return found
+
+
+## godot-ai-cli fork patch: monotonic count of print()/printerr() messages
+## seen this run. game_helper snapshots this before an eval to use as the
+## baseline for messages_since(). Mutex-guarded.
+func message_seq() -> int:
+	_mutex.lock()
+	var v := _message_seq
+	_mutex.unlock()
+	return v
+
+
+## godot-ai-cli fork patch: texts of messages with seq > since_seq, in order.
+## Lets game_helper attach exactly the print lines produced during an eval to
+## its response. Mutex-guarded.
+func messages_since(since_seq: int) -> Array[String]:
+	_mutex.lock()
+	var out: Array[String] = []
+	for rec in _recent_messages:
+		if int(rec["seq"]) > since_seq:
+			out.append(str(rec["text"]))
+	_mutex.unlock()
+	return out

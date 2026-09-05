@@ -96,16 +96,59 @@ func get_logs(params: Dictionary) -> Dictionary:
 			"Invalid source '%s' — use 'plugin', 'game', 'editor', or 'all'" % source,
 		)
 
+	## godot-ai-cli fork patch: server-side level/grep/tail filtering. Levels
+	## are normalized to the buffers' vocabulary ("warn", never "warning").
+	## An empty `filters` dict below means every getter takes its original,
+	## unfiltered code path byte-for-byte.
+	var level := str(params.get("level", "")).to_lower()
+	if level == "warning":
+		level = "warn"
+	if not level.is_empty() and not level in ["error", "warn", "info"]:
+		return ErrorCodes.make(
+			ErrorCodes.VALUE_OUT_OF_RANGE,
+			"Invalid level '%s' — use 'error', 'warn', or 'info'" % str(params.get("level", "")),
+		)
+	var grep := str(params.get("grep", ""))
+	var tail: int = maxi(0, int(params.get("tail", 0)))
+	var filters := {}
+	if not level.is_empty() or not grep.is_empty() or tail > 0:
+		filters = {"level": level, "grep": grep, "tail": tail}
+
 	match source:
 		"plugin":
-			return _get_plugin_logs(count, offset)
+			return _get_plugin_logs(count, offset, filters)
 		"game":
-			return _get_game_logs(count, offset, include_details, since_run_id)
+			return _get_game_logs(count, offset, include_details, since_run_id, filters)
 		"editor":
-			return _get_editor_logs(count, offset, include_details, has_since_cursor, since_cursor)
+			return _get_editor_logs(count, offset, include_details, has_since_cursor, since_cursor, filters)
 		"all":
-			return _get_all_logs(count, offset, include_details)
+			return _get_all_logs(count, offset, include_details, filters)
 	return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR, "Unreachable")
+
+
+## godot-ai-cli fork patch: keep only entries matching level and/or a
+## case-sensitive text substring. Shared by all four log sources.
+func _filter_log_entries(entries: Array, level: String, grep: String) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for entry in entries:
+		if not level.is_empty() and str(entry.get("level", "")) != level:
+			continue
+		if not grep.is_empty() and not str(entry.get("text", "")).contains(grep):
+			continue
+		out.append(entry)
+	return out
+
+
+## godot-ai-cli fork patch: window a filtered list. tail > 0 wins over
+## offset/count and takes the LAST N entries. matched_count is the post-filter,
+## pre-window size.
+func _filtered_page(entries: Array[Dictionary], offset: int, count: int, tail: int) -> Dictionary:
+	var page_entries: Array[Dictionary]
+	if tail > 0:
+		page_entries = entries.slice(maxi(0, entries.size() - tail))
+	else:
+		page_entries = entries.slice(mini(offset, entries.size()), mini(entries.size(), offset + count))
+	return {"entries": page_entries, "matched_count": entries.size()}
 
 
 func _current_game_status() -> Dictionary:
@@ -119,24 +162,38 @@ func _current_game_status() -> Dictionary:
 	return _debugger_plugin.get_game_status()
 
 
-func _get_plugin_logs(count: int, offset: int) -> Dictionary:
+func _get_plugin_logs(count: int, offset: int, filters: Dictionary = {}) -> Dictionary:
 	var all_lines := _log_buffer.get_recent(_log_buffer.total_count())
 	var page: Array[Dictionary] = []
-	var stop := mini(all_lines.size(), offset + count)
-	for i in range(mini(offset, all_lines.size()), stop):
-		page.append({"source": "plugin", "level": "info", "text": all_lines[i]})
-	return {
-		"data": {
-			"source": "plugin",
-			"lines": page,
-			"total_count": all_lines.size(),
-			"returned_count": page.size(),
-			"offset": offset,
-		}
+	var matched_count := -1 # -1 = unfiltered; the response omits matched_count
+	if filters.is_empty():
+		var stop := mini(all_lines.size(), offset + count)
+		for i in range(mini(offset, all_lines.size()), stop):
+			page.append({"source": "plugin", "level": "info", "text": all_lines[i]})
+	else:
+		## godot-ai-cli fork patch: filtered path — wrap every line as an entry,
+		## then filter and window. Plugin lines are always level "info".
+		var entries: Array[Dictionary] = []
+		for line in all_lines:
+			entries.append({"source": "plugin", "level": "info", "text": line})
+		var page_info := _filtered_page(
+			_filter_log_entries(entries, str(filters["level"]), str(filters["grep"])),
+			offset, count, int(filters["tail"]))
+		page.assign(page_info["entries"])
+		matched_count = int(page_info["matched_count"])
+	var data := {
+		"source": "plugin",
+		"lines": page,
+		"total_count": all_lines.size(),
+		"returned_count": page.size(),
+		"offset": offset,
 	}
+	if matched_count >= 0:
+		data["matched_count"] = matched_count
+	return {"data": data}
 
 
-func _get_game_logs(count: int, offset: int, include_details: bool, since_run_id: String = "") -> Dictionary:
+func _get_game_logs(count: int, offset: int, include_details: bool, since_run_id: String = "", filters: Dictionary = {}) -> Dictionary:
 	var game_status := _current_game_status()
 	var helper_live := bool(game_status.get("helper_live", false))
 	var session_active := bool(game_status.get("session_active", false))
@@ -161,7 +218,19 @@ func _get_game_logs(count: int, offset: int, include_details: bool, since_run_id
 	var current_run_id := _game_log_buffer.run_id()
 	var target_run_id := since_run_id if not since_run_id.is_empty() else current_run_id
 	var stale_run_id := not since_run_id.is_empty() and since_run_id != current_run_id
-	var run_page := _game_log_buffer.get_run_page(target_run_id, offset, count)
+	var run_page: Dictionary
+	var matched_count := -1 # -1 = unfiltered; the response omits matched_count
+	if filters.is_empty():
+		run_page = _game_log_buffer.get_run_page(target_run_id, offset, count)
+	else:
+		## godot-ai-cli fork patch: filtered path — pull the whole retained run,
+		## then filter and window (the buffer caps at MAX_LINES entries anyway).
+		var full_page := _game_log_buffer.get_run_page(target_run_id, 0, McpGameLogBuffer.MAX_LINES)
+		var page_info := _filtered_page(
+			_filter_log_entries(full_page.get("entries", []), str(filters["level"]), str(filters["grep"])),
+			offset, count, int(filters["tail"]))
+		run_page = {"entries": page_info["entries"], "total_count": int(full_page.get("total_count", 0))}
+		matched_count = int(page_info["matched_count"])
 	var page := _entries_for_response(run_page.get("entries", []), include_details)
 	var data := {
 		"source": "game",
@@ -178,6 +247,8 @@ func _get_game_logs(count: int, offset: int, include_details: bool, since_run_id
 		"dropped_count": _game_log_buffer.dropped_count(),
 		"stale_run_id": stale_run_id,
 	}
+	if matched_count >= 0:
+		data["matched_count"] = matched_count
 	_merge_editor_errors_hint(data, game_status)
 	return {"data": data}
 
@@ -220,7 +291,7 @@ func _format_editor_error_summary(entry: Dictionary) -> String:
 	return McpSurfacedErrorTracker.format_editor_error_summary(entry)
 
 
-func _get_editor_logs(count: int, offset: int, include_details: bool, has_since_cursor: bool = false, since_cursor: int = 0) -> Dictionary:
+func _get_editor_logs(count: int, offset: int, include_details: bool, has_since_cursor: bool = false, since_cursor: int = 0, filters: Dictionary = {}) -> Dictionary:
 	## Editor-process script errors (parse errors, @tool runtime errors,
 	## EditorPlugin errors, push_error/push_warning). Captured by
 	## editor_logger.gd via OS.add_logger and gated on Godot 4.5+; on older
@@ -228,25 +299,38 @@ func _get_editor_logs(count: int, offset: int, include_details: bool, has_since_
 	## warnings/errors straight to the Debugger dock's Errors tab; those do
 	## not flow through OS.add_logger, so merge the visible tree rows here.
 	if has_since_cursor:
-		return _get_editor_logs_since(count, since_cursor, include_details)
+		return _get_editor_logs_since(count, since_cursor, include_details, filters)
 	var all_entries := _collect_editor_log_entries()
-	var page := _entries_for_response(_slice_entries(all_entries, offset, count), include_details)
+	var matched_count := -1 # -1 = unfiltered; the response omits matched_count
+	var window: Array[Dictionary] = []
+	if filters.is_empty():
+		window = _slice_entries(all_entries, offset, count)
+	else:
+		## godot-ai-cli fork patch: filtered path — filter the full merged list,
+		## then window.
+		var page_info := _filtered_page(
+			_filter_log_entries(all_entries, str(filters["level"]), str(filters["grep"])),
+			offset, count, int(filters["tail"]))
+		window = page_info["entries"]
+		matched_count = int(page_info["matched_count"])
+	var page := _entries_for_response(window, include_details)
 	var appended_total := _editor_log_buffer.appended_total() if _editor_log_buffer != null else 0
-	return {
-		"data": {
-			"source": "editor",
-			"lines": page,
-			"total_count": all_entries.size(),
-			"returned_count": page.size(),
-			"offset": offset,
-			"dropped_count": _editor_log_buffer.dropped_count() if _editor_log_buffer != null else 0,
-			"next_cursor": appended_total,
-			"appended_total": appended_total,
-		}
+	var data := {
+		"source": "editor",
+		"lines": page,
+		"total_count": all_entries.size(),
+		"returned_count": page.size(),
+		"offset": offset,
+		"dropped_count": _editor_log_buffer.dropped_count() if _editor_log_buffer != null else 0,
+		"next_cursor": appended_total,
+		"appended_total": appended_total,
 	}
+	if matched_count >= 0:
+		data["matched_count"] = matched_count
+	return {"data": data}
 
 
-func _get_editor_logs_since(count: int, since_cursor: int, include_details: bool) -> Dictionary:
+func _get_editor_logs_since(count: int, since_cursor: int, include_details: bool, filters: Dictionary = {}) -> Dictionary:
 	## Cursor reads are defined over the monotonic editor logger ring only.
 	## Visible Debugger Errors-tab rows are live UI state, not ring entries,
 	## so regular offset reads still merge them while since_cursor polling
@@ -264,26 +348,34 @@ func _get_editor_logs_since(count: int, since_cursor: int, include_details: bool
 	if _editor_log_buffer != null:
 		captured = _editor_log_buffer.get_since(since_cursor, count)
 		dropped = _editor_log_buffer.dropped_count()
-	var page := _entries_for_response(captured.get("entries", []), include_details)
-	return {
-		"data": {
-			"source": "editor",
-			"lines": page,
-			"total_count": int(captured.get("appended_total", 0)),
-			"returned_count": page.size(),
-			"offset": 0,
-			"dropped_count": dropped,
-			"cursor": int(captured.get("cursor", since_cursor)),
-			"oldest_cursor": int(captured.get("oldest_cursor", 0)),
-			"next_cursor": int(captured.get("next_cursor", 0)),
-			"appended_total": int(captured.get("appended_total", 0)),
-			"truncated": bool(captured.get("truncated", false)),
-			"has_more": bool(captured.get("has_more", false)),
-		}
+	var entries: Array = captured.get("entries", [])
+	var matched_count := -1 # -1 = unfiltered; the response omits matched_count
+	if not filters.is_empty():
+		## godot-ai-cli fork patch: filter the increment (the cursor window
+		## already bounds it); matched_count = hits inside the increment.
+		entries = _filter_log_entries(entries, str(filters["level"]), str(filters["grep"]))
+		matched_count = entries.size()
+	var page := _entries_for_response(entries, include_details)
+	var data := {
+		"source": "editor",
+		"lines": page,
+		"total_count": int(captured.get("appended_total", 0)),
+		"returned_count": page.size(),
+		"offset": 0,
+		"dropped_count": dropped,
+		"cursor": int(captured.get("cursor", since_cursor)),
+		"oldest_cursor": int(captured.get("oldest_cursor", 0)),
+		"next_cursor": int(captured.get("next_cursor", 0)),
+		"appended_total": int(captured.get("appended_total", 0)),
+		"truncated": bool(captured.get("truncated", false)),
+		"has_more": bool(captured.get("has_more", false)),
 	}
+	if matched_count >= 0:
+		data["matched_count"] = matched_count
+	return {"data": data}
 
 
-func _get_all_logs(count: int, offset: int, include_details: bool) -> Dictionary:
+func _get_all_logs(count: int, offset: int, include_details: bool, filters: Dictionary = {}) -> Dictionary:
 	## Plugin lines have no timestamp, so we can't merge chronologically.
 	## Concatenate plugin → editor → game and apply the offset/count window
 	## over the combined list. The per-line `source` field tells callers
@@ -305,30 +397,43 @@ func _get_all_logs(count: int, offset: int, include_details: bool) -> Dictionary
 		var run_page := _game_log_buffer.get_run_page(run_id, 0, McpGameLogBuffer.MAX_LINES)
 		for entry in run_page.get("entries", []):
 			combined.append(entry)
-	var stop := mini(combined.size(), offset + count)
-	var page: Array[Dictionary] = []
-	for i in range(mini(offset, combined.size()), stop):
-		page.append(combined[i])
-	page = _entries_for_response(page, include_details)
+	var matched_count := -1 # -1 = unfiltered; the response omits matched_count
+	var unfiltered_total := combined.size()
+	if not filters.is_empty():
+		## godot-ai-cli fork patch: filtered path — filter the combined list,
+		## then window (tail wins over offset/count). total_count keeps the
+		## pre-filter size; the hits are reported as matched_count.
+		combined = _filter_log_entries(combined, str(filters["level"]), str(filters["grep"]))
+		matched_count = combined.size()
+	var window: Array[Dictionary] = []
+	if matched_count >= 0:
+		var page_info := _filtered_page(combined, offset, count, int(filters["tail"]))
+		window = page_info["entries"]
+	else:
+		var stop := mini(combined.size(), offset + count)
+		for i in range(mini(offset, combined.size()), stop):
+			window.append(combined[i])
+	var page := _entries_for_response(window, include_details)
 	if _editor_log_buffer != null:
 		dropped += _editor_log_buffer.dropped_count()
 	var game_status := _current_game_status()
-	return {
-		"data": {
-			"source": "all",
-			"lines": page,
-			"total_count": combined.size(),
-			"returned_count": page.size(),
-			"offset": offset,
-			"run_id": run_id,
-			"current_run_id": current_run_id,
-			"is_running": bool(game_status.get("session_active", false)),
-			"helper_live": bool(game_status.get("helper_live", false)),
-			"session_active": bool(game_status.get("session_active", false)),
-			"game_status": game_status,
-			"dropped_count": dropped,
-		}
+	var data := {
+		"source": "all",
+		"lines": page,
+		"total_count": unfiltered_total,
+		"returned_count": page.size(),
+		"offset": offset,
+		"run_id": run_id,
+		"current_run_id": current_run_id,
+		"is_running": bool(game_status.get("session_active", false)),
+		"helper_live": bool(game_status.get("helper_live", false)),
+		"session_active": bool(game_status.get("session_active", false)),
+		"game_status": game_status,
+		"dropped_count": dropped,
 	}
+	if matched_count >= 0:
+		data["matched_count"] = matched_count
+	return {"data": data}
 
 
 func _entries_for_response(entries: Array[Dictionary], include_details: bool) -> Array[Dictionary]:
@@ -1015,7 +1120,10 @@ func game_eval(params: Dictionary) -> Dictionary:
 		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
 			"Missing request_id — cannot correlate deferred response")
 
-	_debugger_plugin.request_game_eval(code, request_id, _connection)
+	## godot-ai-cli fork patch: echo the eval's print()/printerr() lines in the
+	## response when the caller opts in (CLI flag --echo-prints).
+	var echo_prints := bool(params.get("echo_prints", false))
+	_debugger_plugin.request_game_eval(code, request_id, _connection, 10.0, echo_prints)
 	return McpDispatcher.DEFERRED_RESPONSE
 
 

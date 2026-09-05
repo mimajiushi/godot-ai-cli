@@ -240,6 +240,42 @@ func resourceOps() []OpSpec {
 				pb("overwrite", "overwrite", false, "false", "Replace an existing file"),
 			},
 		},
+		{
+			Domain: "resource", Name: "spriteframes-add-animation", PluginCommand: "spriteframes_add_animation",
+			Summary: "Add a named animation to a SpriteFrames .tres",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("resource-path", "resource_path", true, "", "res:// path of the SpriteFrames .tres"),
+				ps("name", "name", true, "", "Animation name"),
+				pf("speed", "speed", false, "5.0", "Animation speed in FPS"),
+				pb("loop", "loop", false, "true", "Whether the animation loops"),
+			},
+		},
+		{
+			Domain: "resource", Name: "spriteframes-add-frame", PluginCommand: "spriteframes_add_frame",
+			Summary: "Append a frame (whole texture or an atlas region) to a SpriteFrames animation",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("resource-path", "resource_path", true, "", "res:// path of the SpriteFrames .tres"),
+				ps("anim", "anim", true, "", "Target animation name"),
+				ps("texture", "texture", true, "", "res:// path of the frame texture"),
+				ps("region", "region", false, "", `Atlas region as "x,y,w,h" (omit for the whole texture)`),
+				pi("at-index", "at_index", false, "", "Insert position (default: append)"),
+			},
+		},
+		{
+			Domain: "resource", Name: "spriteframes-from-sheet", PluginCommand: "spriteframes_from_sheet",
+			Summary: "Batch-build SpriteFrames animations from a sprite sheet grid",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("resource-path", "resource_path", true, "", "res:// path of the SpriteFrames .tres (created if missing)"),
+				ps("texture", "texture", true, "", "res:// path of the sprite sheet texture"),
+				ps("cell", "cell", true, "", `Cell size as "WxH", e.g. 32x32`),
+				ps("rows", "rows", true, "", `Row-to-animation map, e.g. "0:idle,1:walk"`),
+				pf("fps", "fps", false, "8.0", "Animation speed (FPS) for every generated animation"),
+				pb("loop", "loop", false, "true", "Whether the generated animations loop"),
+			},
+		},
 	}
 }
 

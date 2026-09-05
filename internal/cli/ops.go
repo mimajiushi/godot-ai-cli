@@ -71,7 +71,7 @@ Optional flags left at their zero value are omitted from the wire params
 Examples:
   %s`,
 			op.Summary, op.PluginCommand, op.Timeout, writeLabel(op.Write), opResponseNote(op), opExamples(op)),
-		Args: cobra.NoArgs,
+		Args: boolFlagValueArgs(op),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if op.Domain == "editor" && op.Name == "screenshot" {
 				return runScreenshot(cmd, op)
@@ -95,6 +95,7 @@ Examples:
 		cmd.Flags().String("out", "", "save the captured image to this file and omit image_base64 from the output")
 		cmd.Flags().StringArray("assert", nil, "expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch")
 		cmd.Flags().Int("tolerance", 0, "per-channel tolerance for --assert")
+		cmd.Flags().Bool("full-res", false, "capture at full source resolution (sends max_resolution=0, no downscale cap)")
 	}
 	return cmd
 }
@@ -237,6 +238,59 @@ func registerParamFlag(cmd *cobra.Command, p ops.ParamSpec) {
 	default: // string and json both arrive as raw strings; json is validated later
 		cmd.Flags().String(p.Flag, p.Default, p.Usage)
 	}
+}
+
+// boolFlagValueArgs accepts the `--pressed false` spelling: pflag bool flags
+// carry an implicit NoOptDefVal="true" and never consume the next token, so
+// `--pressed false` strands "false" as a positional. With exactly one
+// true/false positional AND exactly one explicitly-set bool flag on the
+// command, treat the positional as that flag's value; anything else gets a
+// steering error (bool flags take no space-separated value).
+func boolFlagValueArgs(op ops.OpSpec) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		if len(args) == 1 && (args[0] == "true" || args[0] == "false") {
+			if changed := changedBoolFlags(cmd, op); len(changed) == 1 {
+				return cmd.Flags().Set(changed[0], args[0])
+			}
+		}
+		boolFlags := boolFlagNames(op)
+		hint := ""
+		if len(boolFlags) > 0 {
+			hint = fmt.Sprintf("; boolean flags (%s) do not take a separate value — use --%s / --%s=false",
+				"--"+strings.Join(boolFlags, ", --"), boolFlags[0], boolFlags[0])
+		}
+		return fmt.Errorf("unknown argument %q for \"godot-ai-cli %s %s\"%s",
+			args[0], op.Domain, op.Name, hint)
+	}
+}
+
+// changedBoolFlags lists the command's explicitly-set bool param flags, in
+// OpSpec declaration order.
+func changedBoolFlags(cmd *cobra.Command, op ops.OpSpec) []string {
+	var out []string
+	for _, p := range op.Params {
+		if p.Kind != ops.KindBool {
+			continue
+		}
+		if flag := cmd.Flags().Lookup(p.Flag); flag != nil && flag.Changed {
+			out = append(out, p.Flag)
+		}
+	}
+	return out
+}
+
+// boolFlagNames lists every KindBool flag of the op, in declaration order.
+func boolFlagNames(op ops.OpSpec) []string {
+	var out []string
+	for _, p := range op.Params {
+		if p.Kind == ops.KindBool {
+			out = append(out, p.Flag)
+		}
+	}
+	return out
 }
 
 // collectParams merges --params (base object) with the typed flags

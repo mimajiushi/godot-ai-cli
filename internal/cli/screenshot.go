@@ -34,6 +34,11 @@ func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 		return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
 	}
 
+	// --full-res overrides the CLI's default 640 cap; plugin-side 0 means no cap.
+	if fullRes, _ := cmd.Flags().GetBool("full-res"); fullRes {
+		params["max_resolution"] = 0
+	}
+
 	// source=game against a non-running game used to surface the editor
 	// viewport's error (misleading — the viewport state is irrelevant).
 	// Preflight with get_editor_state and report the real cause; the

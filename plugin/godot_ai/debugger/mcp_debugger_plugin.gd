@@ -1133,6 +1133,7 @@ func request_game_eval(
 	request_id: String,
 	connection: McpConnection,
 	timeout_sec: float = 10.0,
+	echo_prints: bool = false,
 ) -> void:
 	if request_id.is_empty():
 		push_warning("MCP debugger: eval request missing request_id")
@@ -1146,12 +1147,12 @@ func request_game_eval(
 
 	var run_token := _game_run_token
 	if is_game_capture_ready():
-		_probe_then_eval(tree, code, request_id, connection, timeout_sec, run_token)
+		_probe_then_eval(tree, code, request_id, connection, timeout_sec, run_token, echo_prints)
 		return
 
 	if _log_buffer:
 		_log_buffer.log("[debug] waiting for game_helper hello before eval (%s)" % request_id)
-	_wait_then_eval(tree, code, request_id, connection, timeout_sec, run_token)
+	_wait_then_eval(tree, code, request_id, connection, timeout_sec, run_token, echo_prints)
 
 
 func _wait_then_eval(
@@ -1161,6 +1162,7 @@ func _wait_then_eval(
 	connection: McpConnection,
 	timeout_sec: float,
 	run_token: int,
+	echo_prints: bool = false,
 ) -> void:
 	## #500: eval uses EVAL_READY_WAIT_SEC (not the 20s GAME_READY_WAIT_SEC) so
 	## the not-ready path returns its actionable error before the 15s server-side
@@ -1169,6 +1171,7 @@ func _wait_then_eval(
 		"kind": "eval_ready_wait",
 		"connection": connection,
 		"run_token": run_token,
+		"echo_prints": echo_prints, # godot-ai-cli fork patch: keep the capture flag across the wait
 	}
 	var deadline := Time.get_ticks_msec() + int(EVAL_READY_WAIT_SEC * 1000.0)
 	## #645: the leading yield guarantees the dispatcher has registered the
@@ -1207,7 +1210,7 @@ func _wait_then_eval(
 			_explain_not_live(get_game_status(-1, EVAL_READY_WAIT_SEC), ErrorCodes.EVAL_GAME_NOT_READY))
 		return
 	_clear_pending(request_id)
-	_probe_then_eval(tree, code, request_id, connection, timeout_sec, run_token)
+	_probe_then_eval(tree, code, request_id, connection, timeout_sec, run_token, echo_prints)
 
 
 ## #859: registration is run-scoped but not a liveness guarantee. Ping the
@@ -1220,6 +1223,7 @@ func _probe_then_eval(
 	connection: McpConnection,
 	timeout_sec: float,
 	run_token: int,
+	echo_prints: bool = false,
 ) -> void:
 	if not _is_current_game_run(run_token) or not is_game_capture_ready():
 		_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
@@ -1242,6 +1246,7 @@ func _probe_then_eval(
 		"code": code,
 		"eval_timeout_sec": timeout_sec,
 		"run_token": run_token,
+		"echo_prints": echo_prints, # godot-ai-cli fork patch: keep the capture flag across the probe
 	}
 	session.send_message("mcp:eval_liveness", [request_id])
 	if _log_buffer:
@@ -1273,6 +1278,7 @@ func _on_eval_liveness_response(data: Array) -> void:
 	var code := str(pending_entry.get("code", ""))
 	var timeout_sec := float(pending_entry.get("eval_timeout_sec", 10.0))
 	var run_token := int(pending_entry.get("run_token", -1))
+	var echo_prints := bool(pending_entry.get("echo_prints", false)) # godot-ai-cli fork patch
 	var loop_live := bool(data[1])
 	_clear_pending(request_id)
 	if connection == null or not is_instance_valid(connection):
@@ -1290,7 +1296,7 @@ func _on_eval_liveness_response(data: Array) -> void:
 		_send_error(connection, request_id, ErrorCodes.INTERNAL_ERROR,
 			"Editor main loop is not a SceneTree — cannot schedule eval")
 		return
-	_send_eval(current_tree, code, request_id, connection, timeout_sec)
+	_send_eval(current_tree, code, request_id, connection, timeout_sec, echo_prints)
 
 
 func _send_eval(
@@ -1299,6 +1305,7 @@ func _send_eval(
 	request_id: String,
 	connection: McpConnection,
 	timeout_sec: float,
+	echo_prints: bool = false,
 ) -> void:
 	var session: EditorDebuggerSession = _first_active_session()
 	if session == null:
@@ -1333,7 +1340,9 @@ func _send_eval(
 		"compiled": false,
 	}
 
-	session.send_message("mcp:eval", [request_id, code])
+	## godot-ai-cli fork patch: echo_prints rides as a third element; older
+	## game helpers read only the first two and ignore it.
+	session.send_message("mcp:eval", [request_id, code, echo_prints])
 	if _log_buffer:
 		_log_buffer.log("[debug] -> mcp:eval (%s)" % request_id)
 
@@ -1414,12 +1423,17 @@ func _on_eval_response(data: Array) -> void:
 	var result_json: String = data[1] if data.size() > 1 else "null"
 	var json := JSON.new()
 	var parse_err := json.parse(result_json)
-	connection.send_deferred_response(request_id, {
-		"data": {
-			"result": json.data if parse_err == OK else result_json,
-			"source": "game",
-		}
-	})
+	var data_payload := {
+		"result": json.data if parse_err == OK else result_json,
+		"source": "game",
+	}
+	## godot-ai-cli fork patch: the game side attaches the eval's captured
+	## print lines as a third payload element (only for echo_prints requests).
+	if data.size() > 2:
+		var prints_json := JSON.new()
+		if prints_json.parse(str(data[2])) == OK and prints_json.data is Array:
+			data_payload["prints"] = prints_json.data
+	connection.send_deferred_response(request_id, {"data": data_payload})
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_response (%s)" % request_id)
 

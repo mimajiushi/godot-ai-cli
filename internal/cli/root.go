@@ -61,6 +61,7 @@ removes the record when it stops that daemon.`,
 	root.AddCommand(newStopCommand())
 	root.AddCommand(newGodotCommand())
 	root.AddCommand(newPluginCommand())
+	root.AddCommand(newImageCommand())
 	root.AddCommand(newCallCommand())
 	root.AddCommand(newCommandsCommand())
 	root.AddCommand(newUpdateCommand())

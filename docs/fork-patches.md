@@ -116,6 +116,26 @@ optional, older peers ignore/absent them.
   Registered in `plugin.gd` as the lazy "spriteframes" handler; exposed by
   the CLI as `resource spriteframes-*` (see `internal/ops`).
 
+## 8. Frame-aligned record, debug draw, and break recovery (beta.9)
+
+- `runtime/game_helper.gd` — new game ops: `record_frames` (one viewport
+  readback per process frame, 600-frame / 5 MiB payload caps, fail-fast when
+  the main loop is stalled) and `debug_draw` (tri-state on/off toggles for
+  the engine's debug_*_hint rendering flags).
+- `handlers/editor_handler.gd` — `game_command` widens the deferred budget
+  to 60s for `record_frames` (same pattern as `input_sequence`).
+- `debugger/mcp_debugger_plugin.gd` — `continue_game()` resumes a
+  debugger-broken game via the plain "continue" debugger message
+  (remote_debugger.cpp); `_auto_continue_after_eval_error` auto-resumes the
+  game after an eval-attributed compile/runtime error so a bad eval no
+  longer parks the loop and silently kills later evals.
+- `handlers/project_handler.gd` — `continue_run` delegates to the debugger
+  plugin; registered in `plugin.gd` as `project_continue` (CLI
+  `project continue`).
+- CLI-only (no plugin change): `editor record` (WrapOp record_frames; local
+  PNG/GIF post-processing), `editor screenshot --region` (local crop),
+  `image grid-detect` (local sprite-sheet grid inference).
+
 ## v3.2.5 sync notes
 
 The vendored base was a post-v3.2.4 upstream snapshot that already carried

@@ -205,3 +205,52 @@ func TestScreenshotFullRes(t *testing.T) {
 		t.Errorf("default wire max_resolution = %v, want 640", wire["max_resolution"])
 	}
 }
+
+// TestScreenshotRegion: --region crops locally at source resolution — the
+// wire asks for an uncapped capture, the output is the crop, and --assert
+// coordinates then refer to the cropped image.
+func TestScreenshotRegion(t *testing.T) {
+	d, plugin := startScreenshotDaemon(t, true)
+
+	// 2x1 fixture: (0,0)=#212327, (1,0)=#FF0000. Crop the right half.
+	out, err := runScreenshotArgs(t, d.HTTPPort(), "--source", "game", "--region", "1,0,1,1")
+	if err != nil {
+		t.Fatalf("screenshot --region: %v\n%s", err, out)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace([]byte(out)), &parsed); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+	if parsed["width"].(float64) != 1 || parsed["height"].(float64) != 1 {
+		t.Errorf("cropped size = %vx%v", parsed["width"], parsed["height"])
+	}
+	if parsed["region"] == nil {
+		t.Errorf("region not echoed: %s", out)
+	}
+	// The crop keeps the red pixel: assert against the cropped coordinates.
+	out, err = runScreenshotArgs(t, d.HTTPPort(), "--source", "game", "--region", "1,0,1,1",
+		"--assert", "#FF0000@0,0")
+	if err != nil {
+		t.Fatalf("--assert on cropped image: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, `"passed":true`) {
+		t.Errorf("assert on crop failed: %s", out)
+	}
+
+	// The wire asked for the uncapped frame so the crop happens at source res.
+	got := plugin.Received()
+	var wire map[string]any
+	for _, rec := range got {
+		if rec.Command == "take_screenshot" {
+			wire = rec.Params
+		}
+	}
+	if v, ok := wire["max_resolution"].(float64); !ok || v != 0 {
+		t.Errorf("--region wire max_resolution = %v, want 0 (uncapped source)", wire["max_resolution"])
+	}
+
+	// Out-of-bounds region → INVALID_PARAMS, nothing saved.
+	if _, err = runScreenshotArgs(t, d.HTTPPort(), "--source", "game", "--region", "5,5,9,9"); err == nil {
+		t.Fatal("out-of-bounds --region must fail")
+	}
+}

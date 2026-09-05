@@ -235,5 +235,18 @@ func gameOps() []OpSpec {
 				pj("actions", "actions", false, "JSON array of action names (default: all)"),
 			},
 		},
+		{
+			Domain: "game", Name: "debug-draw", PluginCommand: "game_command", WrapOp: "debug_draw",
+			Summary: "Toggle engine debug rendering (collision shapes, paths, navigation) in the running game",
+			Timeout: GameTimeout,
+			ResponseNote: `{"debug_collisions_hint","debug_paths_hint","debug_navigation_hint"} —
+  the current states after applying the given flags. Pair with editor screenshot
+  --source game (or editor record) to verify collision-shape fit visually.`,
+			Params: []ParamSpec{
+				ps("collisions", "collisions", false, "", "on | off (omit to leave unchanged)"),
+				ps("paths", "paths", false, "", "on | off (omit to leave unchanged)"),
+				ps("navigation", "navigation", false, "", "on | off (omit to leave unchanged)"),
+			},
+		},
 	}
 }

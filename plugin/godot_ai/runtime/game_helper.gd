@@ -384,11 +384,18 @@ func _handle_game_command(data: Array) -> void:
 			result = _game_input_action(json.data)
 		"input_state":
 			result = _game_input_state(json.data)
+		"debug_draw":
+			# godot-ai-cli fork patch: 调试渲染开关（碰撞形状/路径/导航）
+			result = _game_debug_draw(json.data)
 		"input_sequence":
 			## Async: steps frames and replies itself (deferred), so bail out
 			## before the synchronous send below — same shape as the eval and
 			## screenshot capture paths.
 			_run_input_sequence(request_id, json.data)
+			return
+		"record_frames":
+			## godot-ai-cli fork patch: 异步逐帧连拍，自带回复（同 input_sequence 形态）
+			_run_record_frames(request_id, json.data)
 			return
 		_:
 			_reply_game_command_error(request_id, "Unknown game op: %s" % op)
@@ -914,6 +921,111 @@ func _reply_input_sequence_error(request_id: String, message: String) -> void:
 	_last_game_command_reply = {"kind": "error", "op": "input_sequence", "message": message}
 	if EngineDebugger.is_active():
 		EngineDebugger.send_message("mcp:game_command_error", [request_id, message])
+
+
+## godot-ai-cli fork patch: frame-aligned burst capture (CLI `editor record`).
+## One viewport readback per process frame — never wall-clock sampling — so
+## per-frame animation slices land exactly on game frames.
+const MAX_RECORD_FRAMES := 600
+## The debugger peer silently drops messages over ~8 MiB (see
+## EVAL_RESULT_MAX_BYTES); keep the whole burst payload under 5 MiB.
+const RECORD_RESULT_MAX_BYTES := 5 * 1024 * 1024
+
+
+func _run_record_frames(request_id: String, params: Dictionary) -> void:
+	var frames := mini(maxi(0, int(params.get("frames", 0))), MAX_RECORD_FRAMES)
+	var max_res := maxi(0, int(params.get("max_resolution", 0)))
+	if frames <= 0:
+		_reply_record_error(request_id, "record_frames needs frames > 0 (cap %d)" % MAX_RECORD_FRAMES)
+		return
+	var tree := get_tree()
+	## A frozen main loop (backgrounded window) can never advance frames —
+	## fail fast with an actionable message instead of hanging to the timeout.
+	## Checked before the viewport: a stalled loop makes capture impossible
+	## regardless, and this helper may run before it enters the tree in tests.
+	if _main_loop_appears_stalled():
+		_reply_record_error(request_id,
+			"The game's main loop is stalled (backgrounded/frozen window) — frame-aligned capture cannot advance. Focus the game window or relaunch with project_run, then retry.")
+		return
+	var viewport := tree.root if tree != null else null
+	if viewport == null:
+		_reply_record_error(request_id, "No game root viewport available")
+		return
+
+	var images: Array = []
+	var deltas: Array = []
+	var total_bytes := 0
+	var width := 0
+	var height := 0
+	var last_ms := Time.get_ticks_msec()
+	for i in range(frames):
+		await tree.process_frame
+		var texture := viewport.get_texture()
+		if texture == null:
+			_reply_record_error(request_id, "Root viewport has no texture (headless?)")
+			return
+		var image := texture.get_image()
+		if image == null or image.is_empty():
+			_reply_record_error(request_id, "Captured an empty image from game viewport")
+			return
+		var encoded: Dictionary = ScreenshotEncode.downscale_and_encode(image, max_res)
+		total_bytes += String(encoded.base64).length()
+		if total_bytes > RECORD_RESULT_MAX_BYTES:
+			_reply_record_error(request_id,
+				"Record payload exceeded %d bytes after %d frames — lower --max-resolution or --frames."
+				% [RECORD_RESULT_MAX_BYTES, i])
+			return
+		images.append(encoded.base64)
+		width = int(encoded.width)
+		height = int(encoded.height)
+		var now := Time.get_ticks_msec()
+		deltas.append(now - last_ms)
+		last_ms = now
+	_reply_record_ok(request_id, {
+		"captured": images.size(),
+		"frames": images,
+		"frame_deltas_ms": deltas,
+		"width": width,
+		"height": height,
+	})
+
+
+func _reply_record_ok(request_id: String, result: Dictionary) -> void:
+	result["source"] = "game"
+	result["op"] = "record_frames"
+	_last_game_command_reply = {"kind": "response", "op": "record_frames", "result": result}
+	if EngineDebugger.is_active():
+		EngineDebugger.send_message("mcp:game_command_response",
+			[request_id, JSON.stringify(_variant_to_json(result))])
+
+
+func _reply_record_error(request_id: String, message: String) -> void:
+	_last_game_command_reply = {"kind": "error", "op": "record_frames", "message": message}
+	if EngineDebugger.is_active():
+		EngineDebugger.send_message("mcp:game_command_error", [request_id, message])
+
+
+## godot-ai-cli fork patch: toggle the engine's debug rendering (collision
+## shapes / paths / navigation) in the running game. Flags are tri-state
+## strings ("on"/"off"); omitted flags leave the current state untouched.
+func _game_debug_draw(params: Dictionary) -> Dictionary:
+	var tree := get_tree()
+	for pair in [
+		["collisions", "debug_collisions_hint"],
+		["paths", "debug_paths_hint"],
+		["navigation", "debug_navigation_hint"],
+	]:
+		var raw := str(params.get(pair[0], ""))
+		if raw.is_empty():
+			continue
+		if raw != "on" and raw != "off":
+			return {"error": "Invalid value '%s' for %s — use on|off" % [raw, pair[0]]}
+		tree.set(pair[1], raw == "on")
+	return {
+		"debug_collisions_hint": tree.debug_collisions_hint,
+		"debug_paths_hint": tree.debug_paths_hint,
+		"debug_navigation_hint": tree.debug_navigation_hint,
+	}
 
 
 ## Resolve a mouse-position param. Absent (null, or an empty {}) falls back to

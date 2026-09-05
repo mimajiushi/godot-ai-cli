@@ -62,6 +62,19 @@ func editorOps() []OpSpec {
 			Timeout: DefaultTimeout,
 		},
 		{
+			Domain: "editor", Name: "record", PluginCommand: "game_command", WrapOp: "record_frames",
+			Summary: "Capture a frame-aligned burst of the running game (one readback per game frame)",
+			Timeout: RecordTimeout,
+			ResponseNote: `{"captured","frames","frame_deltas_ms","width","height"}; "frames" holds
+  base64 PNGs in order. CLI-side flags: --out-dir (save frame_0001.png… locally,
+  frames omitted from stdout), --format gif --out <file.gif>, --duration/--fps
+  (frame count = duration×fps), --full-res (no per-frame downscale cap).`,
+			Params: []ParamSpec{
+				pi("frames", "frames", false, "", "Capture this many consecutive game frames"),
+				pi("max-resolution", "max_resolution", false, "640", "Longest-edge pixel cap per frame (or use --full-res)"),
+			},
+		},
+		{
 			Domain: "editor", Name: "eval", PluginCommand: "game_eval",
 			Summary: "Evaluate GDScript code inside the running game",
 			Timeout: GameTimeout,

@@ -5,11 +5,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"image"
+	"image/png"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -36,6 +39,19 @@ func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 
 	// --full-res overrides the CLI's default 640 cap; plugin-side 0 means no cap.
 	if fullRes, _ := cmd.Flags().GetBool("full-res"); fullRes {
+		params["max_resolution"] = 0
+	}
+
+	// --region crops in SOURCE-image pixels, so the capture must arrive
+	// uncapped; the crop runs locally and --max-resolution applies afterwards.
+	regionStr, _ := cmd.Flags().GetString("region")
+	var region [4]int
+	if regionStr != "" {
+		r, err := parseRegion(regionStr)
+		if err != nil {
+			return jsonError(cmd, "INVALID_PARAMS", fmt.Sprintf("--region: %v", err), nil)
+		}
+		region = r
 		params["max_resolution"] = 0
 	}
 
@@ -67,7 +83,8 @@ func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 	outPath, _ := cmd.Flags().GetString("out")
 	assertions, _ := cmd.Flags().GetStringArray("assert")
 	tolerance, _ := cmd.Flags().GetInt("tolerance")
-	if status, _ := resp["status"].(string); status != "ok" || (outPath == "" && len(assertions) == 0) {
+	regionSet := regionStr != ""
+	if status, _ := resp["status"].(string); status != "ok" || (outPath == "" && len(assertions) == 0 && !regionSet) {
 		return printExecuteResponse(cmd, resp) // legacy path, unchanged
 	}
 
@@ -76,6 +93,33 @@ func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 	raw, err := decodeDataURI(b64)
 	if err != nil {
 		return jsonError(cmd, "SCREENSHOT_DECODE_FAILED", err.Error(), nil)
+	}
+
+	if regionSet {
+		// 先按原始帧缓冲裁剪，再套用 --max-resolution 上限（本地最近邻缩放，
+		// 像素画不糊）；响应里的 width/height 反映最终图，original_* 保持整帧。
+		img, err := imganalysis.DecodeBytes(raw)
+		if err != nil {
+			return jsonError(cmd, "SCREENSHOT_DECODE_FAILED", err.Error(), nil)
+		}
+		cropped, err := imganalysis.Crop(img, region[0], region[1], region[2], region[3])
+		if err != nil {
+			return jsonError(cmd, "INVALID_PARAMS", fmt.Sprintf("--region: %v", err), nil)
+		}
+		maxRes, _ := cmd.Flags().GetInt("max-resolution")
+		if fullRes, _ := cmd.Flags().GetBool("full-res"); fullRes {
+			maxRes = 0
+		}
+		final := imganalysis.DownscaleNearest(cropped, maxRes)
+		var enc bytes.Buffer
+		if err := png.Encode(&enc, final); err != nil {
+			return jsonError(cmd, "SCREENSHOT_ENCODE_FAILED", err.Error(), nil)
+		}
+		raw = enc.Bytes()
+		data["width"] = final.Bounds().Dx()
+		data["height"] = final.Bounds().Dy()
+		data["region"] = []int{region[0], region[1], region[2], region[3]}
+		data["image_base64"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(raw)
 	}
 	// --out/--assert consume the image locally; the bulky base64 never
 	// reaches stdout in that mode.
@@ -116,6 +160,23 @@ func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 		}
 	}
 	return printJSON(cmd.OutOrStdout(), data, prettyOutput)
+}
+
+// parseRegion parses an "x,y,w,h" region string into its four ints.
+func parseRegion(raw string) ([4]int, error) {
+	var out [4]int
+	parts := strings.Split(raw, ",")
+	if len(parts) != 4 {
+		return out, fmt.Errorf("want \"x,y,w,h\", got %q", raw)
+	}
+	for i, p := range parts {
+		v, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return out, fmt.Errorf("%q is not an integer", p)
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 // decodeDataURI decodes a base64 payload, stripping an optional data-URI

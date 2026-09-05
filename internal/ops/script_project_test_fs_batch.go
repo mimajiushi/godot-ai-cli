@@ -102,6 +102,11 @@ func projectOps() []OpSpec {
 			Summary: "Stop the running game",
 			Timeout: DefaultTimeout,
 		},
+		{
+			Domain: "project", Name: "continue", PluginCommand: "project_continue",
+			Summary: "Resume a game paused at a debugger break (e.g. after a failed eval)",
+			Timeout: DefaultTimeout,
+		},
 	}
 }
 

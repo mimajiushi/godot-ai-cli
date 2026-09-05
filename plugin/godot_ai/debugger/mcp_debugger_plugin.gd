@@ -1508,6 +1508,7 @@ func _on_eval_grace(request_id: String) -> void:
 		"Game eval failed to compile — likely a GDScript syntax/parse error. The parse error text is in the editor's Output/Debugger panel; it is not capturable from the running game. Check your eval code's syntax.")
 	if _log_buffer:
 		_log_buffer.log("[debug] !! eval compile error (%s)" % request_id)
+	_auto_continue_after_eval_error(request_id)
 
 
 ## #490: the game sends this the instant reload() of the eval source
@@ -1549,6 +1550,42 @@ func _on_eval_runtime_error(data: Array) -> void:
 	_send_error(connection, request_id, ErrorCodes.EVAL_RUNTIME_ERROR, msg)
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_runtime_error (%s): %s" % [request_id, message])
+	_auto_continue_after_eval_error(request_id)
+
+
+## godot-ai-cli fork patch: an eval-attributed error parks the game at a
+## debugger break, which freezes the helper loop and silently kills every
+## later eval (the shoot-2d report: parse error → status="break" → all
+## subsequent evals return {"result":null}). The break was caused by OUR eval,
+## not by user debugging — resume the game right after replying the error.
+func _auto_continue_after_eval_error(request_id: String) -> void:
+	var session := _first_active_session()
+	if session == null or not session.is_breaked():
+		return
+	session.send_message("continue", [])
+	if _log_buffer:
+		_log_buffer.log("[debug] auto-continue after eval error (%s)" % request_id)
+
+
+## godot-ai-cli fork patch: resume a game paused at a debugger break
+## (CLI `project continue`). The game-side remote debugger resumes on a plain
+## "continue" message (remote_debugger.cpp).
+func continue_game() -> Dictionary:
+	var session := _first_active_session()
+	if session == null:
+		return ErrorCodes.make_not_ready(
+			ErrorCodes.SUB_EDITOR_GAME_NOT_RUNNING,
+			"Game is not running — start the project first", false,
+			"Start the game with project_run, then retry.")
+	var was_breaked := session.is_breaked()
+	if was_breaked:
+		session.send_message("continue", [])
+		if _log_buffer:
+			_log_buffer.log("[debug] project continue -> sent continue")
+	return {"data": {
+		"continued": was_breaked,
+		"was_breaked": was_breaked,
+	}}
 
 
 ## #490: arm one probe tick for an in-flight eval. Re-arms itself each tick

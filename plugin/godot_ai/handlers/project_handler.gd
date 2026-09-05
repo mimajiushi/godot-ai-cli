@@ -544,6 +544,16 @@ static func _format_editor_error_summary(entry: Dictionary) -> String:
 	return McpSurfacedErrorTracker.format_editor_error_summary(entry)
 
 
+## godot-ai-cli fork patch: resume a game paused at a debugger break
+## (CLI `project continue`) — the recovery path when a failed eval parked the
+## game loop. Delegates to the debugger plugin, which owns session tracking.
+func continue_run(_params: Dictionary) -> Dictionary:
+	if _debugger_plugin == null:
+		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
+			"Debugger bridge unavailable — plugin may not be fully initialised")
+	return _debugger_plugin.continue_game()
+
+
 func stop_project(params: Dictionary) -> Dictionary:
 	# Idempotent: a project that's already stopped satisfies the caller's intent.
 	# Returning INVALID_PARAMS here was the largest single source of fleet-wide

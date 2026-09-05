@@ -31,6 +31,9 @@ const (
 	// InputSequenceTimeout mirrors INPUT_SEQUENCE_TIMEOUT_SEC: the
 	// frame-timed sequence drives the game forward one frame per step.
 	InputSequenceTimeout = 30 * time.Second
+	// RecordTimeout mirrors RECORD_FRAMES_TIMEOUT_SEC plus margin: frame-aligned
+	// burst capture takes one readback per game frame.
+	RecordTimeout = 75 * time.Second
 )
 
 // Param kinds accepted by ParamSpec.Kind.
@@ -75,13 +78,14 @@ type ParamSpec struct {
 // because they talk to the daemon, not to a plugin command (or route
 // through a dynamic command name, or — the image group — run fully local).
 var HandWiredLeaves = []string{
-	"session list",     // daemon-side: GET /godot-ai/cli/sessions
-	"session activate", // daemon-side: POST /godot-ai/cli/activate
-	"custom list",      // daemon-side: custom-tool catalog cached from plugin events
-	"custom invoke",    // dynamic plugin command custom_tool:<name>
-	"call",             // escape hatch for arbitrary plugin commands
-	"image palette",    // local: pure-Go texture palette analysis, no daemon
-	"image probe",      // local: pure-Go pixel sampling, no daemon
+	"session list",      // daemon-side: GET /godot-ai/cli/sessions
+	"session activate",  // daemon-side: POST /godot-ai/cli/activate
+	"custom list",       // daemon-side: custom-tool catalog cached from plugin events
+	"custom invoke",     // dynamic plugin command custom_tool:<name>
+	"call",              // escape hatch for arbitrary plugin commands
+	"image palette",     // local: pure-Go texture palette analysis, no daemon
+	"image probe",       // local: pure-Go pixel sampling, no daemon
+	"image grid-detect", // local: pure-Go sprite-sheet grid detection, no daemon
 }
 
 // InternalOnlySpec documents a registered plugin command that is

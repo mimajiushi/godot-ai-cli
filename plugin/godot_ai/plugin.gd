@@ -416,6 +416,7 @@ func _enter_tree() -> void:
 	_dispatcher.register_lazy("set_main_scene", "project", &"set_main_scene")
 	_dispatcher.register_lazy("run_project", "project", &"run_project")
 	_dispatcher.register_lazy("stop_project", "project", &"stop_project")
+	_dispatcher.register_lazy("project_continue", "project", &"continue_run")
 	_dispatcher.register_lazy("search_filesystem", "project", &"search_filesystem")
 	## godot-ai-cli fork patch: MCP client-config wire commands are not
 	## registered in the fork — client configuration is a CLI/skill concern.

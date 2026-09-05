@@ -76,6 +76,9 @@ Examples:
 			if op.Domain == "editor" && op.Name == "screenshot" {
 				return runScreenshot(cmd, op)
 			}
+			if op.Domain == "editor" && op.Name == "record" {
+				return runRecord(cmd, op)
+			}
 			params, err := collectParams(cmd, op)
 			if err != nil {
 				return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
@@ -96,6 +99,15 @@ Examples:
 		cmd.Flags().StringArray("assert", nil, "expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch")
 		cmd.Flags().Int("tolerance", 0, "per-channel tolerance for --assert")
 		cmd.Flags().Bool("full-res", false, "capture at full source resolution (sends max_resolution=0, no downscale cap)")
+		cmd.Flags().String("region", "", "crop the capture to \"x,y,w,h\" in source-image pixels (crops first, then --max-resolution applies)")
+	}
+	if op.Domain == "editor" && op.Name == "record" {
+		cmd.Flags().String("out-dir", "", "save each frame as PNG into this directory (frames omitted from stdout)")
+		cmd.Flags().String("out", "", "with --format gif: write the animated GIF to this file")
+		cmd.Flags().String("format", "png", "png (per-frame files) | gif (animated)")
+		cmd.Flags().Float64("duration", 0, "capture this many seconds (frame count = duration x --fps)")
+		cmd.Flags().Int("fps", 0, "frame rate used with --duration")
+		cmd.Flags().Bool("full-res", false, "capture frames at full source resolution (sends max_resolution=0)")
 	}
 	return cmd
 }

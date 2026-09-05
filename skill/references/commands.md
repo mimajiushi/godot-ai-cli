@@ -27,13 +27,14 @@ Conventions applying to every op:
 - CLI-side extras not in the wire params: `batch execute` also accepts `--file <path>` (a JSON file holding the commands array); `editor screenshot` also accepts `--out <file>` (save the capture locally; `image_base64` is then omitted from stdout), `--assert '#RRGGBB@x,y'` (repeatable pixel check, fails with `PIXEL_ASSERT_FAILED` on mismatch), `--tolerance <n>` (per-channel slack for --assert) and `--full-res` (capture at the source resolution — sends `max_resolution=0`, no downscale cap; the default cap is 640).
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
 
-Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` (local texture palette analysis / pixel sampling — no editor needed), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
+Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` (local texture palette analysis / pixel sampling / sprite-sheet grid detection — no editor needed), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
 
-## editor (8 ops)
+## editor (9 ops)
 
 ### `editor eval` — Evaluate GDScript code inside the running game
 `game_eval` · 15s · --code string (required), --echo-prints bool (default "false")
 Response: `{"result","source"}` — `result` is the value of the code's explicit `return` (null for plain statements). `--echo-prints` adds `"prints"`: the print()/printerr() lines this eval produced, e.g. `editor eval --code 'print($Player.position)' --echo-prints` → `{"result":null,"source":"game","prints":["(144, 136)\n"]}` — no follow-up `logs read` needed.
+Eval code constraints: the code becomes the body of a generated function — keep it flat (no `if`/`for` blocks sharing one line after a colon, e.g. `for x in range(3): var a := 1; if ...` fails to parse); use real newlines and indentation. A parse error returns `EVAL_COMPILE_ERROR`; the game auto-resumes from the debugger break it caused (manual recovery: `project continue`).
 
 ### `editor monitors` — Read Godot performance monitor values
 `get_performance_monitors` · 8s · --monitors json
@@ -41,12 +42,17 @@ Response: `{"result","source"}` — `result` is the value of the code's explicit
 ### `editor quit` — Ask the connected editor to quit gracefully
 `quit_editor` · 8s · no flags
 
+### `editor record` — Capture a frame-aligned burst of the running game (one readback per game frame)
+`game_command` · 75s · --frames int, --max-resolution int (default "640")
+CLI-side flags (not wire params): --out-dir dir (per-frame PNGs), --format gif --out file.gif, --duration sec + --fps n (frame count = duration×fps), --full-res
+Response: `captured`, `frame_deltas_ms`, `width`, `height`, plus `files` (png) or `saved`/`bytes` (gif). Captures one readback per game frame — use it to verify per-frame animation content, particles, or projectiles in one call instead of N eval→screenshot round trips. Fails fast with an actionable error when the game's main loop is stalled. Examples: `editor record --frames 60 --out-dir shots/burst1` · `editor record --duration 2 --fps 30 --format gif --out run.gif`.
+
 ### `editor reload-plugin` — Reload the godot_ai plugin and wait for reconnect
 `reload_plugin` · 8s · no flags
 
 ### `editor screenshot` — Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer
 `take_screenshot` · 30s · --source string (default "viewport"), --max-resolution int (default "640"), --include-image bool (default "true"), --view-target string, --coverage bool (default "false"), --elevation float, --azimuth float, --fov float, --user-prompt string
-CLI-side flags (not wire params): --out file, --assert '#RRGGBB@x,y' (repeatable), --tolerance int (default 0), --full-res (no downscale cap — pixel-art games need it to eyeball frames; the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera)
+CLI-side flags (not wire params): --out file, --assert '#RRGGBB@x,y' (repeatable), --tolerance int (default 0), --full-res (no downscale cap — pixel-art games need it to eyeball frames; the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera), --region 'x,y,w,h' (crop in SOURCE-image pixels — crop first, then --max-resolution applies; --assert coordinates refer to the cropped image)
 Response: `format`, `width`, `height`, `frames_drawn`, `image_base64` (data URI `data:image/png;base64,...`; omitted when --out/--assert is given, which also adds `saved`/`bytes` or `passed`/`samples`). `--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first.
 
 ### `editor selection-get` — List the currently selected editor nodes
@@ -139,7 +145,11 @@ Response: `format`, `width`, `height`, `frames_drawn`, `image_base64` (data URI 
 ### `script read` — Read a GDScript source file
 `read_script` · 8s · --path string (required)
 
-## project (5 ops)
+## project (6 ops)
+
+### `project continue` — Resume a game paused at a debugger break (e.g. after a failed eval)
+`project_continue` · 8s · no flags
+Response: `{"continued","was_breaked"}`. A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.
 
 ### `project run` — Play the project and wait briefly for game liveness
 `run_project` · 8s · **[write]** · --mode string (default "main"), --scene string, --autosave bool (default "true")
@@ -340,7 +350,11 @@ Response: `format`, `width`, `height`, `frames_drawn`, `image_base64` (data URI 
 ### `input-map remove-action` — Remove an input action and its bindings
 `remove_action` · 8s · **[write]** · --action string (required)
 
-## game (9 ops)
+## game (10 ops)
+
+### `game debug-draw` — Toggle engine debug rendering (collision shapes, paths, navigation) in the running game
+`game_command` · 15s · --collisions string (`on`|`off`), --paths string, --navigation string (omit a flag to leave that state unchanged)
+Response: the current `debug_collisions_hint` / `debug_paths_hint` / `debug_navigation_hint` states. Pair with `editor screenshot --source game` (or `editor record`) to verify collision-shape fit visually — debug outlines ARE included in the game framebuffer capture; a capture flagged `stale_frame` predates your change (frozen/backgrounded game), retry with a live loop.
 
 ### `game get-node-info` — Property snapshot of a node in the running game
 `game_command` · 15s · --path string (required), --include-properties bool (default "true"), --fields json (property-name whitelist, e.g. `--fields '["position","visible"]'`; unresolved names are reported in `unknown_fields`)

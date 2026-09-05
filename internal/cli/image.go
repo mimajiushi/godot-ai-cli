@@ -19,10 +19,59 @@ import (
 func newImageCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "image",
-		Short: "Local image analysis (palette, pixel probes) — no editor required",
+		Short: "Local image analysis (palette, pixel probes, grid detect) — no editor required",
 	}
 	cmd.AddCommand(newImagePaletteCommand())
 	cmd.AddCommand(newImageProbeCommand())
+	cmd.AddCommand(newImageGridDetectCommand())
+	return cmd
+}
+
+// newImageGridDetectCommand infers a sprite sheet's real frame grid from its
+// alpha silhouette — the "how was this sheet really cut" question (a wrong
+// arithmetic assumption like 384÷32=12 breaks SpriteFrames slicing when the
+// art is actually 8 paired columns at a 48 px pitch).
+func newImageGridDetectCommand() *cobra.Command {
+	var (
+		path           string
+		project        string
+		alphaThreshold float64
+	)
+	cmd := &cobra.Command{
+		Use:   "grid-detect --path <file>",
+		Short: "Detect a sprite sheet's frame grid from alpha clusters",
+		Long: `image grid-detect scans a sheet for columns/rows carrying any pixel
+above the alpha threshold, clusters them, and suggests plausible grids
+(cell size + frame count + offset) under which every cluster fits in one
+cell and every cell holds art.
+
+Examples:
+  godot-ai-cli image grid-detect --path res://resources/texture/drone_pair.png
+  godot-ai-cli image grid-detect --path sheet.png --alpha-threshold 0.5`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			resolved, err := resolveImagePath(path, project)
+			if err != nil {
+				return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
+			}
+			img, err := imganalysis.Load(resolved)
+			if err != nil {
+				return jsonError(cmd, "IMAGE_LOAD_FAILED", err.Error(), nil)
+			}
+			out := imganalysis.GridDetect(img, alphaThreshold)
+			return printJSON(cmd.OutOrStdout(), map[string]any{
+				"path":            path,
+				"size":            out.Size,
+				"column_clusters": out.ColumnClusters,
+				"row_clusters":    out.RowClusters,
+				"suggested_grids": out.SuggestedGrids,
+			}, prettyOutput)
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", "", "image file (disk path or res://)")
+	cmd.Flags().StringVar(&project, "project", "", "Godot project dir for res:// paths (default: project of the last launch)")
+	cmd.Flags().Float64Var(&alphaThreshold, "alpha-threshold", 0.0, "pixels with alpha at or below this are ignored (0-1)")
+	_ = cmd.MarkFlagRequired("path")
 	return cmd
 }
 

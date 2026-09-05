@@ -78,6 +78,11 @@ const VALID_LOG_SOURCES := ["plugin", "game", "editor", "all"]
 ## budget is the backstop for a frozen game loop, mirroring take_screenshot.
 const INPUT_SEQUENCE_TIMEOUT_SEC := 30.0
 
+## godot-ai-cli fork patch: deferred budget for the `record_frames` game op —
+## it captures one readback per game frame, so large bursts legitimately
+## outlast the 15s one-shot budget (game side caps at MAX_RECORD_FRAMES).
+const RECORD_FRAMES_TIMEOUT_SEC := 60.0
+
 
 func get_logs(params: Dictionary) -> Dictionary:
 	## Coerce defensively — MCP clients can send JSON numbers as floats or
@@ -1162,6 +1167,16 @@ func game_command(params: Dictionary) -> Dictionary:
 		return {
 			"_deferred": true,
 			"_deferred_timeout_ms": int(INPUT_SEQUENCE_TIMEOUT_SEC * 1000.0),
+		}
+
+	## godot-ai-cli fork patch: record_frames 逐帧连拍，同理加宽预算。
+	if op == "record_frames":
+		_debugger_plugin.request_game_command(
+			op, command_params, request_id, _connection, RECORD_FRAMES_TIMEOUT_SEC
+		)
+		return {
+			"_deferred": true,
+			"_deferred_timeout_ms": int(RECORD_FRAMES_TIMEOUT_SEC * 1000.0),
 		}
 
 	_debugger_plugin.request_game_command(op, command_params, request_id, _connection)

@@ -42,10 +42,13 @@ release_json="$(curl -fsSL -H "Accept: application/vnd.github+json" "$API_URL")"
 # 列表为 JSON 数组，取第一个非草稿条目的 tag_name。只用 awk（POSIX 必有），
 # 不探测 python3 —— Windows 应用商店占位 stub 会让探测假阳性。
 # 依赖 GitHub release 对象内 tag_name 先于 draft 出现的字段序。
-tag="$(printf '%s' "$release_json" | awk '
+# 注意：必须用 here-string 喂 awk，不能用 printf 管道 —— awk 找到条目后提前
+# exit，管道另一端的 printf 会收到 SIGPIPE；在 set -o pipefail 下整个脚本会以
+# exit 141 静默中断（真实 release 响应 >100KB，远超管道缓冲区，必然触发）。
+tag="$(awk '
   /"tag_name":/ { t=$0; sub(/.*"tag_name": *"/, "", t); sub(/".*/, "", t) }
   /"draft":/    { if (t != "" && $0 !~ /true/) { print t; exit } t="" }
-')"
+' <<< "$release_json")"
 [ -n "$tag" ] || die "could not find a non-draft release in the releases list payload"
 ver="${tag#v}"  # 资产命名使用去掉前导 v 的版本号
 info "latest release: ${tag}"

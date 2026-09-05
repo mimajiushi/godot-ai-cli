@@ -38,7 +38,9 @@ executable cannot be overwritten); the next startup removes the
 leftover. On Unix the binary is replaced atomically.
 
 The update applies only after an interactive confirmation; --yes skips
-the prompt. Without a terminal the answer defaults to No.
+the prompt. Without a terminal there is no prompt: the result is
+"cancelled" together with the release details — re-run with --yes to
+apply.
 
 Examples:
   godot-ai-cli update

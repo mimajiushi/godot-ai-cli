@@ -85,7 +85,8 @@ type Options struct {
 	// In is where the confirmation answer is read from (default os.Stdin).
 	In io.Reader
 	// IsTerminal reports whether In is interactive; without a terminal the
-	// answer always defaults to No.
+	// answer defaults to No and the cancelled payload carries the release
+	// details plus the --yes hint.
 	IsTerminal bool
 	// PromptOut receives the confirmation prompt (default os.Stderr), so
 	// stdout stays pure JSON.
@@ -153,8 +154,12 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 
 	if !opts.AssumeYes {
 		if !opts.IsTerminal {
-			// Nobody to ask: default to No with a bare cancelled marker.
-			return map[string]any{"status": "cancelled"}, nil
+			// Nobody to ask: decline before any download, but say exactly
+			// what is available and how to apply it — a bare cancelled
+			// marker forced script/agent callers to guess at --yes.
+			result := withStatus(availability, "cancelled")
+			result["message"] = "no terminal to confirm the update; re-run with --yes to apply"
+			return result, nil
 		}
 		fmt.Fprintf(opts.PromptOut, "Update now? [y/N]: ")
 		if !readYes(opts.In) {

@@ -389,13 +389,19 @@ func TestRunDevBuildIsOlderThanStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Non-TTY without --yes: declined before any download happens.
-	if result["status"] != "cancelled" || len(result) != 1 {
-		t.Errorf("result = %v, want a bare cancelled marker", result)
+	// Non-TTY without --yes: declined before any download happens, but the
+	// payload still reports the available release (see TestRunNonTTYDefaultsToNo).
+	if result["status"] != "cancelled" || result["update_available"] != true {
+		t.Errorf("result = %v", result)
+	}
+	if result["latest_version"] != "0.1.0" {
+		t.Errorf("latest_version = %v", result["latest_version"])
 	}
 }
 
-// TestRunNonTTYDefaultsToNo: piped stdin without --yes never updates.
+// TestRunNonTTYDefaultsToNo: piped stdin without --yes never updates — but
+// the cancelled payload must carry the release details and the --yes hint,
+// or a script/agent caller cannot tell what happened or how to proceed.
 func TestRunNonTTYDefaultsToNo(t *testing.T) {
 	server := fakegithub.New(t, "v0.2.0", nil)
 	result, err := Run(context.Background(), Options{
@@ -408,8 +414,17 @@ func TestRunNonTTYDefaultsToNo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result["status"] != "cancelled" || len(result) != 1 {
-		t.Errorf("result = %v, want a bare cancelled marker", result)
+	if result["status"] != "cancelled" || result["update_available"] != true {
+		t.Errorf("result = %v", result)
+	}
+	if result["current_version"] != "0.1.0" || result["latest_version"] != "0.2.0" {
+		t.Errorf("versions = %v/%v", result["current_version"], result["latest_version"])
+	}
+	if url, _ := result["release_notes_url"].(string); !strings.Contains(url, "/releases/tag/v0.2.0") {
+		t.Errorf("release_notes_url = %v", result["release_notes_url"])
+	}
+	if msg, _ := result["message"].(string); !strings.Contains(msg, "--yes") {
+		t.Errorf("message does not point at --yes: %v", result["message"])
 	}
 }
 

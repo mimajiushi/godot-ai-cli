@@ -183,6 +183,9 @@ it semantically against the running build, and — after a confirmation prompt �
 downloads the platform zip, verifies its SHA256 against the release checksums
 file, and swaps the executable in place (rename-aside on Windows; the leftover
 `.old` binary is removed on the next startup). A restart is required afterwards.
+`--yes` skips the prompt; without a terminal (scripts, CI, agent pipes) the
+update is NOT applied silently — the result is `"status":"cancelled"` plus the
+release details and a hint, so the caller can re-run with `--yes` to apply.
 
 ## Development
 

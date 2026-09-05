@@ -66,7 +66,8 @@ func TestUpdateCommandAlreadyUpToDate(t *testing.T) {
 }
 
 // TestUpdateCommandCancelledNonTTY: a newer release but no terminal → the
-// bare cancelled marker and no prompt on stdout.
+// update is declined, yet the payload still carries the release details and
+// the --yes hint so a script/agent caller knows how to proceed.
 func TestUpdateCommandCancelledNonTTY(t *testing.T) {
 	server := fakegithub.New(t, "v9.9.9", nil)
 	setUpdateAPIBase(t, server.URL)
@@ -75,8 +76,14 @@ func TestUpdateCommandCancelledNonTTY(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if out["status"] != "cancelled" || len(out) != 1 {
-		t.Errorf("out = %v, want a bare cancelled marker", out)
+	if out["status"] != "cancelled" || out["update_available"] != true {
+		t.Errorf("out = %v", out)
+	}
+	if out["latest_version"] != "9.9.9" {
+		t.Errorf("latest_version = %v", out["latest_version"])
+	}
+	if msg, _ := out["message"].(string); !strings.Contains(msg, "--yes") {
+		t.Errorf("message does not point at --yes: %v", out["message"])
 	}
 }
 

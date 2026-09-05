@@ -157,6 +157,8 @@ PNG/JPEG 的指定坐标像素——贴图配色分析与截图验证都不再�
 `godot-ai-cli update` 查询 GitHub Releases 的最新版本（stable 与 prerelease 标签都计入），
 与当前构建做语义化版本比较，经确认提示后下载对应平台的 zip、按 release 校验和文件验证 SHA256，然后原地替换可执行文件
 （Windows 上先改名留底；残留的 `.old` 会在下次启动时清理）。更新后需要重启。
+`--yes` 跳过确认提示；在无终端环境（脚本、CI、agent 管道）下不会静默执行更新——
+结果为 `"status":"cancelled"` 并附带 release 详情与提示，调用方据此以 `--yes` 重跑即可应用更新。
 
 ## 开发
 

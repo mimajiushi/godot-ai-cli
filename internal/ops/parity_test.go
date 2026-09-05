@@ -163,7 +163,7 @@ func TestTableConventions(t *testing.T) {
 		}
 	}
 	if got := len(ops.All()); got < 130 {
-		t.Errorf("only %d ops — expected 147; the table lost entries", got)
+		t.Errorf("only %d ops — expected 148; the table lost entries", got)
 	}
 }
 

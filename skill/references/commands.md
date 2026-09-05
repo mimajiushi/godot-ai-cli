@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --json` (147 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --json` (148 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --json --pretty
@@ -135,10 +135,13 @@ Non-op leaves (not in this catalog): `session list` / `session activate` (daemon
 ### `script read` — Read a GDScript source file
 `read_script` · 8s · --path string (required)
 
-## project (4 ops)
+## project (5 ops)
 
 ### `project run` — Play the project and wait briefly for game liveness
 `run_project` · 8s · **[write]** · --mode string (default "main"), --scene string, --autosave bool (default "true")
+
+### `project set-main-scene` — Set the project main scene (application/run/main_scene)
+`set_main_scene` · 8s · **[write]** · --path string (required)
 
 ### `project settings-get` — Read one project setting by key
 `get_project_setting` · 8s · --key string (required)

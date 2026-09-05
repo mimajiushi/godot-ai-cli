@@ -17,7 +17,7 @@ import (
 
 // testVersion is the server version every test bridge reports; it must
 // equal the vendored plugin.cfg version for real deployments.
-const testVersion = "3.2.4"
+const testVersion = "3.2.5"
 
 // startServer boots a bridge on an ephemeral loopback port.
 func startServer(t *testing.T) *bridge.Server {

@@ -46,7 +46,7 @@ full stop leaving no orphaned editors) against real headless editors.
 ## Fork-patch policy
 
 `plugin/godot_ai/` tracks upstream [hi-godot/godot-ai](https://github.com/hi-godot/godot-ai)
-v3.2.4 and must stay **minimally divergent** so upstream syncs remain
+v3.2.5 and must stay **minimally divergent** so upstream syncs remain
 reviewable:
 
 - Every deviation is gated behind a switch in

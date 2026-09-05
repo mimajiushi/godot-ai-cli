@@ -16,7 +16,7 @@ import (
 )
 
 // testVersion mirrors the vendored plugin version the daemon advertises.
-const testVersion = "3.2.4"
+const testVersion = "3.2.5"
 
 // startDaemon boots a daemon on ephemeral loopback ports.
 func startDaemon(t *testing.T) *daemon.Daemon {
@@ -119,6 +119,9 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 	if body["pid"].(float64) <= 0 {
 		t.Errorf("pid = %v", body["pid"])
+	}
+	if body["telemetry_enabled"] != false {
+		t.Errorf("telemetry_enabled = %v, want false (the fork never phones home)", body["telemetry_enabled"])
 	}
 }
 

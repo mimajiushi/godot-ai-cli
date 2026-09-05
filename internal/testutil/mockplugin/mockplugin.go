@@ -76,7 +76,7 @@ func Dial(t *testing.T, addr string, handshake map[string]any) *Plugin {
 		"session_id":       fmt.Sprintf("mock-%d", nextID.Add(1)),
 		"godot_version":    "4.7.0",
 		"project_path":     "C:/projects/mock",
-		"plugin_version":   "3.2.4",
+		"plugin_version":   "3.2.5",
 		"protocol_version": 1,
 		"readiness":        "ready",
 		"editor_pid":       4321,

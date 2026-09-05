@@ -80,6 +80,14 @@ func projectOps() []OpSpec {
 			},
 		},
 		{
+			Domain: "project", Name: "set-main-scene", PluginCommand: "set_main_scene",
+			Summary: "Set the project main scene (application/run/main_scene)",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "res:// path of an existing PackedScene to boot into"),
+			},
+		},
+		{
 			Domain: "project", Name: "run", PluginCommand: "run_project",
 			Summary: "Play the project and wait briefly for game liveness",
 			Timeout: DefaultTimeout, Write: true,

@@ -1,7 +1,7 @@
 ---
 name: godot-ai-skill
 description: |
-  Drive a live Godot editor (4.5+, 4.7+ recommended) from the shell via the godot-ai-cli single binary — no MCP. Covers: installing/updating the CLI from GitHub Releases, launching a project headed or --headless (one `launch` call installs the bundled godot_ai plugin, starts the local daemon, and opens the editor), ~147 editor ops as JSON-printing subcommands (scene/node/script/signal/UI/theme/animation/material/resource/tilemap/particles/camera), running in-editor GDScript test suites, driving the running game with synthetic input, and editor/game screenshots. Use this skill whenever the user asks to operate, automate, or script the Godot editor, build or edit a Godot scene, create nodes/UI/animations, run Godot tests, screenshot the editor, or mentions godot-ai-cli / the godot_ai plugin — including Chinese phrases such as 操作Godot编辑器、控制Godot、建场景、搭界面、跑测试、驱动运行中的游戏、编辑器截图验证. Do NOT use for setting up the upstream Python/MCP godot-ai server, for general Godot engine Q&A, or for offline file edits that need no live editor.
+  Drive a live Godot editor (4.5+, 4.7+ recommended) from the shell via the godot-ai-cli single binary — no MCP. Covers: installing/updating the CLI from GitHub Releases, launching a project headed or --headless (one `launch` call installs the bundled godot_ai plugin, starts the local daemon, and opens the editor), ~148 editor ops as JSON-printing subcommands (scene/node/script/signal/UI/theme/animation/material/resource/tilemap/particles/camera), running in-editor GDScript test suites, driving the running game with synthetic input, and editor/game screenshots. Use this skill whenever the user asks to operate, automate, or script the Godot editor, build or edit a Godot scene, create nodes/UI/animations, run Godot tests, screenshot the editor, or mentions godot-ai-cli / the godot_ai plugin — including Chinese phrases such as 操作Godot编辑器、控制Godot、建场景、搭界面、跑测试、驱动运行中的游戏、编辑器截图验证. Do NOT use for setting up the upstream Python/MCP godot-ai server, for general Godot engine Q&A, or for offline file edits that need no live editor.
 ---
 
 # godot-ai-cli
@@ -55,6 +55,6 @@ Route on `error.code`; the full taxonomy with per-code recovery lives in referen
 
 | Need | Read |
 |---|---|
-| Flags, timeout, write gate, or plugin command for any of the 147 ops | references/commands.md |
+| Flags, timeout, write gate, or plugin command for any of the 148 ops | references/commands.md |
 | End-to-end recipes: build a scene, UI + theme, animation, run test suites, game run + input, windowed screenshot loop, headless CI | references/workflows.md |
 | Error-code taxonomy, port conflicts, EditorSettings backup/restore, headless caveats | references/troubleshooting.md |

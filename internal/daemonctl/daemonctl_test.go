@@ -31,8 +31,9 @@ func freePort(t *testing.T) int {
 // TestEnsureRunningAlreadyUp: a live compatible daemon short-circuits.
 func TestEnsureRunningAlreadyUp(t *testing.T) {
 	httpPort, wsPort := freePort(t), freePort(t)
+	// No Version: defaults to the vendored plugin version, i.e. compatible.
 	d, err := daemon.Start(context.Background(), daemon.Config{
-		HTTPPort: httpPort, WSPort: wsPort, Version: "3.2.4",
+		HTTPPort: httpPort, WSPort: wsPort,
 	})
 	if err != nil {
 		t.Fatalf("daemon start: %v", err)
@@ -178,8 +179,9 @@ func TestHelperProcess(t *testing.T) {
 	}
 	httpPort, _ := strconv.Atoi(os.Getenv("GODOT_AI_CLI_HELPER_HTTP_PORT"))
 	wsPort, _ := strconv.Atoi(os.Getenv("GODOT_AI_CLI_HELPER_WS_PORT"))
+	// No Version: defaults to the vendored plugin version, i.e. compatible.
 	d, err := daemon.Start(context.Background(), daemon.Config{
-		HTTPPort: httpPort, WSPort: wsPort, Version: "3.2.4",
+		HTTPPort: httpPort, WSPort: wsPort,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "helper: %v\n", err)

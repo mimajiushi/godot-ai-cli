@@ -151,7 +151,7 @@ loopback-only. The topology, wire envelope and gating rules are documented in
 
 ## Command surface
 
-147 editor operations across 26 domains (scene, node, script, signal, UI,
+148 editor operations across 26 domains (scene, node, script, signal, UI,
 theme, animation, material, resource, tilemap, particles, camera, audio, input,
 game, tests, screenshots and more). Ask the binary for the live catalog:
 
@@ -198,7 +198,7 @@ script/build-release.sh` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Relationship to hi-godot/godot-ai
 
-The editor plugin under `plugin/godot_ai/` is a fork of upstream v3.2.4 with
+The editor plugin under `plugin/godot_ai/` is a fork of upstream v3.2.5 with
 telemetry removed and the Python server spawn disabled (the Go daemon replaces
 the Python backend entirely). Every divergence is marked `godot-ai-cli fork
 patch` in the GDScript source and enumerated in

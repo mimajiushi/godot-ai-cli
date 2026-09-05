@@ -255,6 +255,9 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"attach_protocol_version": 1,
 		"package_path":            "godot-ai-cli",
 		"pid":                     os.Getpid(),
+		// The fork never phones home; publish it so the 3.2.5+ dock
+		// telemetry tooltip reflects the running server's real state.
+		"telemetry_enabled": false,
 	})
 }
 

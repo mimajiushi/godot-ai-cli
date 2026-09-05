@@ -131,7 +131,7 @@ WebSocket 桥转发给编辑器内的插件。全部通信仅限本机回环。�
 
 ## 命令面
 
-26 个域共 147 个编辑器操作（scene、node、script、signal、ui、theme、animation、
+26 个域共 148 个编辑器操作（scene、node、script、signal、ui、theme、animation、
 material、resource、tilemap、particle、camera、audio、input、game、test、
 截图等）。直接问二进制要实时清单：
 
@@ -173,7 +173,7 @@ script/build-release.sh`（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
 ## 与 hi-godot/godot-ai 的关系
 
-`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v3.2.4，移除了遥测并禁用了
+`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v3.2.5，移除了遥测并禁用了
 Python server 拉起逻辑（Go daemon 完全取代 Python 后端）。每一处分叉都在 GDScript
 源码中以 `godot-ai-cli fork patch` 标注，并在
 [docs/fork-patches.md](docs/fork-patches.md) 中逐条列出。上游许可证：MIT，

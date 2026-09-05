@@ -21,7 +21,7 @@ func TestVersionOutputContainsCompatibilityInfo(t *testing.T) {
 	for _, want := range []string{
 		"godot-ai-cli version",
 		"supported Godot:     4.5+ (4.7+ recommended)",
-		"bundled plugin:      godot-ai v3.2.4",
+		"bundled plugin:      godot-ai v3.2.5",
 		"protocol version:    1",
 		"plugin command coverage:",
 	} {

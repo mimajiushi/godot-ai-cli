@@ -15,7 +15,7 @@ Emitted by `launch` itself, before any editor op is possible.
 | Code | Meaning | Recovery |
 |---|---|---|
 | `INVALID_PROJECT` | `--project` dir has no `project.godot` | Point at the real project root. |
-| `GODOT_NOT_FOUND` | No binary via `--godot` / `GODOT_BIN` / PATH / conventional locations | Install Godot or pass `--godot <path>`; `godot detect` lists what would be found. |
+| `GODOT_NOT_FOUND` | No binary via `--godot` / `GODOT_BIN` / `godot use` default / PATH / conventional locations | Install Godot, pass `--godot <path>`, or save it once with `godot use <path>`; `godot detect` lists what would be found. |
 | `GODOT_VERSION_UNKNOWN` | `--version` on the resolved binary failed/unparseable | Check the binary actually runs. |
 | `GODOT_UNSUPPORTED` | Godot < 4.5 (`data.detected` / `data.supported` / `data.recommended`) | Upgrade Godot; 4.7+ recommended. (4.5–4.6 and 5.x are warnings in `warnings[]`, not failures.) |
 | `PLUGIN_INSTALL_FAILED` | Could not extract/enable the bundled `godot_ai` plugin | Check project dir writability; retry `plugin install --project <dir>` for the bare error. |

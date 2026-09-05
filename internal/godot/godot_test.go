@@ -99,6 +99,23 @@ func fakeBinary(t *testing.T, dir, name string) string {
 	return path
 }
 
+// isolateConfigDir points the OS user-config dir at a temp dir so a
+// `godot use` record on the host machine never leaks into the test (and the
+// test never writes one). os.UserConfigDir reads an env var on every
+// supported platform, so t.Setenv keeps this hermetic without code hooks.
+func isolateConfigDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", dir)
+	case "darwin":
+		t.Setenv("HOME", dir)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", dir)
+	}
+}
+
 // TestFindPrecedence checks flag > GODOT_BIN > PATH resolution using only
 // temp dirs, so the result never depends on the host machine.
 func TestFindPrecedence(t *testing.T) {
@@ -145,6 +162,7 @@ func TestFindPrecedence(t *testing.T) {
 	})
 
 	t.Run("PATH used when flag and env are absent", func(t *testing.T) {
+		isolateConfigDir(t) // a host `godot use` record would beat PATH
 		t.Setenv("GODOT_BIN", "")
 		t.Setenv("PATH", pathDir)
 		got, err := godot.Find("")
@@ -175,6 +193,104 @@ func TestCandidatesIncludesPathHit(t *testing.T) {
 		}
 	}
 	t.Errorf("Candidates() = %v, missing PATH binary %q", godot.Candidates(), pathBin)
+}
+
+// TestDefaultBinary covers the `godot use` record: save/load/clear
+// roundtrip, Find precedence (flag > env > saved > PATH), the loud error
+// for a stale record, and Candidates listing the saved path.
+func TestDefaultBinary(t *testing.T) {
+	absPath := func(p string) string {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return p
+		}
+		return abs
+	}
+
+	t.Run("save load clear roundtrip", func(t *testing.T) {
+		isolateConfigDir(t)
+		if _, ok := godot.LoadDefaultBinary(); ok {
+			t.Fatal("no record expected before save")
+		}
+		bin := fakeBinary(t, t.TempDir(), exeName("godot-custom"))
+		if err := godot.SaveDefaultBinary(bin); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := godot.LoadDefaultBinary()
+		if !ok {
+			t.Fatal("record expected after save")
+		}
+		if absPath(got) != absPath(bin) {
+			t.Errorf("LoadDefaultBinary() = %q, want %q", got, bin)
+		}
+		if err := godot.ClearDefaultBinary(); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := godot.LoadDefaultBinary(); ok {
+			t.Error("record should be gone after clear")
+		}
+		if err := godot.ClearDefaultBinary(); err != nil {
+			t.Error("clearing a missing record must not error")
+		}
+	})
+
+	t.Run("saved beats PATH but loses to env and flag", func(t *testing.T) {
+		isolateConfigDir(t)
+		savedBin := fakeBinary(t, t.TempDir(), exeName("godot-saved"))
+		if err := godot.SaveDefaultBinary(savedBin); err != nil {
+			t.Fatal(err)
+		}
+		envBin := fakeBinary(t, t.TempDir(), exeName("godot-env"))
+		flagBin := fakeBinary(t, t.TempDir(), exeName("godot-flag"))
+		pathDir := t.TempDir()
+		fakeBinary(t, pathDir, exeName("godot"))
+
+		t.Setenv("GODOT_BIN", "")
+		t.Setenv("PATH", pathDir)
+		got, err := godot.Find("")
+		if err != nil || absPath(got) != absPath(savedBin) {
+			t.Errorf("Find() = %q, %v, want saved %q", got, err, savedBin)
+		}
+
+		t.Setenv("GODOT_BIN", envBin)
+		if got, err := godot.Find(""); err != nil || got != envBin {
+			t.Errorf("Find() = %q, %v, want env %q", got, err, envBin)
+		}
+		if got, err := godot.Find(flagBin); err != nil || got != flagBin {
+			t.Errorf("Find(flag) = %q, %v, want %q", got, err, flagBin)
+		}
+	})
+
+	t.Run("stale record errors loudly", func(t *testing.T) {
+		isolateConfigDir(t)
+		gone := filepath.Join(t.TempDir(), exeName("godot-gone"))
+		if err := godot.SaveDefaultBinary(gone); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GODOT_BIN", "")
+		_, err := godot.Find("")
+		if err == nil {
+			t.Fatal("expected error for a stale saved record")
+		}
+		if !strings.Contains(err.Error(), "godot use") {
+			t.Errorf("error should point at `godot use`: %v", err)
+		}
+	})
+
+	t.Run("candidates include the saved path", func(t *testing.T) {
+		isolateConfigDir(t)
+		savedBin := fakeBinary(t, t.TempDir(), exeName("godot-saved"))
+		if err := godot.SaveDefaultBinary(savedBin); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GODOT_BIN", "")
+		for _, c := range godot.Candidates() {
+			if absPath(c) == absPath(savedBin) {
+				return
+			}
+		}
+		t.Errorf("Candidates() = %v, missing saved %q", godot.Candidates(), savedBin)
+	})
 }
 
 // exeName appends .exe on Windows so LookPath finds the fake binary.

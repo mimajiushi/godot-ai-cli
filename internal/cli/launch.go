@@ -53,7 +53,8 @@ func newLaunchCommand() *cobra.Command {
 		Short: "Install the plugin, start the daemon, and launch the Godot editor",
 		Long: `launch performs the full editor startup with zero manual steps:
 
-  1. Resolve the Godot binary (--godot > GODOT_BIN > PATH > common locations)
+  1. Resolve the Godot binary (--godot > GODOT_BIN > "godot use" default >
+     PATH > common locations)
   2. Check the version (4.5+ required, 4.7+ recommended)
   3. Install/upgrade and enable the embedded godot_ai plugin
   4. Ensure the backend daemon runs (spawns "serve" detached if absent)

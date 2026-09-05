@@ -26,7 +26,7 @@ Conventions applying to every op:
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
 - CLI-side extras not in the wire params: `batch execute` also accepts `--file <path>` (a JSON file holding the commands array).
 
-Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `plugin install` / `update` / `version` / `commands`.
+Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
 
 ## editor (8 ops)
 

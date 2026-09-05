@@ -15,8 +15,9 @@ import (
 //
 //  1. explicit (--godot flag) — must exist, error otherwise
 //  2. GODOT_BIN environment variable — must exist when set
-//  3. PATH lookup (godot / godot.exe)
-//  4. conventional per-OS install locations
+//  3. default saved by `godot use` — must exist when set
+//  4. PATH lookup (godot / godot.exe)
+//  5. conventional per-OS install locations
 //
 // It returns an error naming every attempted source when nothing matches.
 func Find(explicit string) (string, error) {
@@ -32,18 +33,26 @@ func Find(explicit string) (string, error) {
 		}
 		return "", fmt.Errorf("godot binary from GODOT_BIN does not exist: %s", env)
 	}
+	if saved, ok := LoadDefaultBinary(); ok {
+		if fileExists(saved) {
+			return saved, nil
+		}
+		return "", fmt.Errorf("godot binary saved by `godot use` no longer exists: %s (re-run `godot-ai-cli godot use` or clear it with `godot-ai-cli godot use --clear`)", saved)
+	}
 	if path, err := exec.LookPath("godot"); err == nil {
 		return path, nil
 	}
 	if locations := conventionalLocations(); len(locations) > 0 {
 		return locations[0], nil
 	}
-	return "", fmt.Errorf("godot binary not found: pass --godot, set GODOT_BIN, or add godot to PATH")
+	return "", fmt.Errorf("godot binary not found: pass --godot, set GODOT_BIN, save one with `godot-ai-cli godot use`, or add godot to PATH")
 }
 
 // Candidates returns every Godot binary that exists on this machine, in
-// the precedence order Find uses (GODOT_BIN, PATH, conventional
-// locations), deduplicated. It backs `godot-ai-cli godot detect`.
+// the precedence order Find uses (GODOT_BIN, the `godot use` default, PATH,
+// conventional locations), deduplicated. It backs `godot-ai-cli godot
+// detect`. A `godot use` record is listed even when its binary has since
+// been deleted, so detect surfaces the staleness instead of hiding it.
 func Candidates() []string {
 	var out []string
 	seen := map[string]bool{}
@@ -59,6 +68,9 @@ func Candidates() []string {
 	}
 	if env := os.Getenv("GODOT_BIN"); env != "" && fileExists(env) {
 		add(env)
+	}
+	if saved, ok := LoadDefaultBinary(); ok {
+		add(saved)
 	}
 	if path, err := exec.LookPath("godot"); err == nil {
 		add(path)

@@ -85,8 +85,10 @@ checks GitHub Releases and offers to update in place.
   `project.godot`). Run `godot-ai-cli -v` first — it prints the supported
   Godot range and the bundled plugin version the project will be aligned to.
 - **Godot binary:** `launch` resolves the editor from `--godot`, then
-  `GODOT_BIN`, then PATH, then the conventional per-OS install locations.
-  If your Godot lives elsewhere, pass it once:
+  `GODOT_BIN`, then the default saved by `godot use`, then PATH, then the
+  conventional per-OS install locations. If your Godot lives elsewhere,
+  save it once with `godot-ai-cli godot use /path/to/godot` (persisted in
+  the user config dir), or pass it per run:
   `launch --project . --godot /path/to/godot`.
 - **Check before launching:** `godot-ai-cli godot detect` probes the same
   sources and prints each candidate binary's version and compatibility

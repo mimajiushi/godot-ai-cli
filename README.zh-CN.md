@@ -78,9 +78,10 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
 
 - **前提：** 一个 Godot **4.5+** 工程（包含 `project.godot` 的目录）。动手前先跑
   `godot-ai-cli -v`——它会打印支持的 Godot 版本范围，以及工程将被对齐到的内置插件版本。
-- **Godot 二进制：** `launch` 依次从 `--godot` 参数、`GODOT_BIN` 环境变量、PATH、
-  各系统常见安装位置查找编辑器。Godot 不在这些位置时显式指定一次即可：
-  `launch --project . --godot /path/to/godot`。
+- **Godot 二进制：** `launch` 依次从 `--godot` 参数、`GODOT_BIN` 环境变量、
+  `godot use` 保存的默认路径、PATH、各系统常见安装位置查找编辑器。Godot 不在这些
+  位置时，用 `godot-ai-cli godot use /path/to/godot` 保存一次（写入用户配置目录，
+  长期生效），或每次显式指定：`launch --project . --godot /path/to/godot`。
 - **启动前先检查：** `godot-ai-cli godot detect` 会从同样的来源探测并打印每个候选
   二进制的版本与兼容性（Godot 不在 PATH 时用
   `GODOT_BIN=/path/to/godot godot-ai-cli godot detect`）。

@@ -166,15 +166,20 @@ func TestCommandsUnknownDomain(t *testing.T) {
 // TestLaunchMissingProjectPrintsUsageEnvelope: a cobra-level failure
 // (required --project flag missing) still honors the JSON envelope
 // contract — execute wraps it as USAGE_ERROR on stdout and exits 1.
+// stderr must stay EMPTY (no human "Error:" line) so output survives
+// 2>&1 merging (the B4 regression guard).
 func TestLaunchMissingProjectPrintsUsageEnvelope(t *testing.T) {
 	cmd := NewRootCommand()
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
+	var outBuf, errBuf bytes.Buffer
+	cmd.SetOut(&outBuf)
+	cmd.SetErr(&errBuf)
 	cmd.SetArgs([]string{"launch"})
 
 	if code := execute(cmd); code != 1 {
 		t.Fatalf("execute exit code = %d, want 1", code)
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("stderr must stay empty (single-JSON contract), got %q", errBuf.String())
 	}
 	var envelope struct {
 		Status string `json:"status"`
@@ -183,11 +188,11 @@ func TestLaunchMissingProjectPrintsUsageEnvelope(t *testing.T) {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &envelope); err != nil {
-		t.Fatalf("stdout is not the JSON envelope: %v\n%s", err, buf.String())
+	if err := json.Unmarshal(bytes.TrimSpace(outBuf.Bytes()), &envelope); err != nil {
+		t.Fatalf("stdout is not the JSON envelope: %v\n%s", err, outBuf.String())
 	}
 	if envelope.Status != "error" || envelope.Error.Code != "USAGE_ERROR" {
-		t.Errorf("envelope = %s", buf.String())
+		t.Errorf("envelope = %s", outBuf.String())
 	}
 	if !strings.Contains(envelope.Error.Message, "project") {
 		t.Errorf("envelope message does not mention the missing flag: %s", envelope.Error.Message)

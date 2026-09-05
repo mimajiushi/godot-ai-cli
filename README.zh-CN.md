@@ -89,7 +89,8 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
   `project.godot` 中启用，并注册一个小型运行时 autoload（`_mcp_game_helper`，
   用于驱动运行中的游戏）。这些改动都可以安全提交；导出插件会在导出包中自动剥离
   该 helper，不会随构建发布。如果工程里已装过上游 hi-godot/godot-ai 插件，
-  `launch` 会原地升级为内置的 fork 版本（不再使用 Python 后端）。
+  `launch` 会原地升级为内置的 fork 版本（不再使用 Python 后端）。只想对齐插件版本、
+  不启动编辑器时，单独运行 `plugin install --project <dir>`。
 - **CI / 无显示环境：** 加 `--headless`。依赖视口的操作（截图）需要有界面的编辑器。
 - **同时开多个工程：** 让每个工程共用同一个 daemon（相同端口）。每次 launch 都会把
   该工程的编辑器作为一个新会话打开并置为活动；操作默认落在活动会话——用

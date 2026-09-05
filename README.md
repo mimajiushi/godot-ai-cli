@@ -101,7 +101,8 @@ checks GitHub Releases and offers to update in place.
   the helper from exported packs, so none of it ships in your builds. If
   the project already has the upstream hi-godot/godot-ai plugin installed,
   `launch` upgrades it in place to the bundled fork (the Python backend is
-  no longer used).
+  no longer used). To align a project's plugin version without launching,
+  run `plugin install --project <dir>` on its own.
 - **CI / no display:** add `--headless`. Viewport-dependent ops
   (screenshots) need a windowed editor.
 - **Several projects at once:** launch each project against the SAME daemon

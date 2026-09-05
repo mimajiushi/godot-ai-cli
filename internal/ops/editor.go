@@ -26,6 +26,10 @@ func editorOps() []OpSpec {
 			Domain: "editor", Name: "screenshot", PluginCommand: "take_screenshot",
 			Summary: "Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer",
 			Timeout: ScreenshotTimeout,
+			ResponseNote: `{"format","width","height","frames_drawn","image_base64"}; image_base64 is a data URI
+  ("data:image/png;base64,..."). The CLI-side flags --out (save to file) and
+  --assert '#RRGGBB@x,y' (pixel check, --tolerance) consume the image locally
+  and omit image_base64 from the output.`,
 			Params: []ParamSpec{
 				ps("source", "source", false, "viewport", "viewport | viewport_2d | cinematic | game"),
 				pi("max-resolution", "max_resolution", false, "640", "Longest-edge pixel cap for the capture"),

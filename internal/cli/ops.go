@@ -53,14 +53,14 @@ func newDomainCommands() []*cobra.Command {
 
 // newOpCommand builds one leaf command from its OpSpec: typed flags per
 // ParamSpec plus the shared --session/--params flags (and --file for
-// batch execute).
+// batch execute, --out/--assert/--tolerance for editor screenshot).
 func newOpCommand(op ops.OpSpec) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   op.Name + opUseSuffix(op),
 		Short: op.Summary,
 		Long: fmt.Sprintf(`%s
 
-Plugin command: %s (timeout %s, %s)
+Plugin command: %s (timeout %s, %s)%s
 
 Every op also accepts:
   --session <id>      pin the call to one connected editor session
@@ -70,9 +70,12 @@ Optional flags left at their zero value are omitted from the wire params
 
 Examples:
   %s`,
-			op.Summary, op.PluginCommand, op.Timeout, writeLabel(op.Write), opExamples(op)),
+			op.Summary, op.PluginCommand, op.Timeout, writeLabel(op.Write), opResponseNote(op), opExamples(op)),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if op.Domain == "editor" && op.Name == "screenshot" {
+				return runScreenshot(cmd, op)
+			}
 			params, err := collectParams(cmd, op)
 			if err != nil {
 				return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
@@ -87,6 +90,11 @@ Examples:
 	cmd.Flags().String("params", "", "base params as a JSON object; explicit flags override colliding keys")
 	if op.Domain == "batch" && op.Name == "execute" {
 		cmd.Flags().String("file", "", "JSON file containing an array of {\"command\": ..., \"params\": {...}}")
+	}
+	if op.Domain == "editor" && op.Name == "screenshot" {
+		cmd.Flags().String("out", "", "save the captured image to this file and omit image_base64 from the output")
+		cmd.Flags().StringArray("assert", nil, "expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch")
+		cmd.Flags().Int("tolerance", 0, "per-channel tolerance for --assert")
 	}
 	return cmd
 }
@@ -108,6 +116,14 @@ func writeLabel(write bool) string {
 		return "write-gated"
 	}
 	return "read-only"
+}
+
+// opResponseNote renders the optional "Response:" help section.
+func opResponseNote(op ops.OpSpec) string {
+	if op.ResponseNote == "" {
+		return ""
+	}
+	return "\n\nResponse:\n  " + op.ResponseNote
 }
 
 // opExamples renders one or two example invocations for the Long help.
@@ -342,9 +358,21 @@ func parseParamValue(p ops.ParamSpec, raw string) (any, error) {
 // resolved per daemonPortCandidates (--http-port flag → recorded
 // last-daemon port → default, with the default as recorded-port fallback).
 func executeOp(cmd *cobra.Command, command string, params map[string]any, timeout time.Duration, write bool) error {
-	httpPort, err := requireDaemonPort(cmd)
+	resp, err := executeOpRaw(cmd, command, params, timeout, write)
 	if err != nil {
 		return err
+	}
+	return printExecuteResponse(cmd, resp)
+}
+
+// executeOpRaw is the transport half of executeOp: it returns the daemon's
+// raw response so callers with CLI-side post-processing (editor screenshot's
+// --out/--assert, the source=game preflight) can inspect it before printing.
+// Transport failures are already enveloped (DAEMON_UNREACHABLE).
+func executeOpRaw(cmd *cobra.Command, command string, params map[string]any, timeout time.Duration, write bool) (map[string]any, error) {
+	httpPort, err := requireDaemonPort(cmd)
+	if err != nil {
+		return nil, err
 	}
 	body := map[string]any{
 		"command":     command,
@@ -359,9 +387,9 @@ func executeOp(cmd *cobra.Command, command string, params map[string]any, timeou
 	// itself adds its own margin on top of timeout_sec.
 	resp, err := postDaemonJSON(httpPort, "/godot-ai/cli/execute", body, timeout+15*time.Second)
 	if err != nil {
-		return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
+		return nil, jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
 	}
-	return printExecuteResponse(cmd, resp)
+	return resp, nil
 }
 
 // printExecuteResponse renders the daemon's execute reply: data on

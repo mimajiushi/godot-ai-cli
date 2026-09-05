@@ -51,6 +51,10 @@ type OpSpec struct {
 	Timeout       time.Duration // per-op timeout from the upstream ladder
 	Write         bool          // true → readiness gate (write:true on execute)
 	Params        []ParamSpec   // declared flags
+	// ResponseNote, when non-empty, is appended to the -h long help as a
+	// "Response:" section documenting the payload fields (agents otherwise
+	// discover response keys by trial and error).
+	ResponseNote string
 	// WrapOp, when non-empty, routes through a wrapper plugin command:
 	// the wire params become {"op": WrapOp, "params": <collected>}.
 	// Used by the game domain (everything goes through game_command).
@@ -69,13 +73,15 @@ type ParamSpec struct {
 
 // HandWiredLeaves documents the CLI leaves that are NOT OpSpec-backed
 // because they talk to the daemon, not to a plugin command (or route
-// through a dynamic command name).
+// through a dynamic command name, or — the image group — run fully local).
 var HandWiredLeaves = []string{
 	"session list",     // daemon-side: GET /godot-ai/cli/sessions
 	"session activate", // daemon-side: POST /godot-ai/cli/activate
 	"custom list",      // daemon-side: custom-tool catalog cached from plugin events
 	"custom invoke",    // dynamic plugin command custom_tool:<name>
 	"call",             // escape hatch for arbitrary plugin commands
+	"image palette",    // local: pure-Go texture palette analysis, no daemon
+	"image probe",      // local: pure-Go pixel sampling, no daemon
 }
 
 // InternalOnlySpec documents a registered plugin command that is

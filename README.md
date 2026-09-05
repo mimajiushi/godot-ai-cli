@@ -170,6 +170,11 @@ a typed subcommand is reachable via `godot-ai-cli call <plugin_command>
 --params '<json>'`, and `batch execute --file ops.json` runs several plugin
 commands atomically.
 
+Local helpers that need no editor at all: `image palette` extracts a
+texture's dominant colors (`--grid WxH` for per-tile TileSet analysis) and
+`image probe` samples pixels of a saved PNG/JPEG — texture color analysis
+and screenshot verification without Python or any other runtime.
+
 ## Updating
 
 `godot-ai-cli update` queries GitHub Releases for the newest version

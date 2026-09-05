@@ -148,6 +148,10 @@ godot-ai-cli <domain> <op> -h            # 每个操作的参数、超时、写�
 没有具名子命令的操作可以走 `godot-ai-cli call <plugin_command>
 --params '<json>'`；`batch execute --file ops.json` 可以原子执行多条插件命令。
 
+另有无需编辑器的本地辅助命令：`image palette` 提取贴图主色调（`--grid WxH`
+可按瓦片网格逐格统计，适合 TileSet 图集分析），`image probe` 采样已保存
+PNG/JPEG 的指定坐标像素——贴图配色分析与截图验证都不再需要 Python 等第三方运行时。
+
 ## 更新
 
 `godot-ai-cli update` 查询 GitHub Releases 的最新版本（stable 与 prerelease 标签都计入），

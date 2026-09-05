@@ -142,6 +142,16 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	if err != nil {
 		return jsonError(cmd, "GODOT_NOT_FOUND", err.Error(), nil)
 	}
+	// An explicit --godot that no saved default covers is worth one pointer:
+	// `godot use` makes it permanent instead of repeating the flag every run.
+	// Never auto-persist here — a per-run flag must not silently become
+	// global state.
+	if opts.godotBin != "" {
+		if _, saved := godot.LoadDefaultBinary(); !saved {
+			warnings = append(warnings, fmt.Sprintf(
+				"Godot resolved via --godot; save it as the default with `godot-ai-cli godot use %s`", binary))
+		}
+	}
 	gv, err := godot.VersionFromBinary(binary)
 	if err != nil {
 		return jsonError(cmd, "GODOT_VERSION_UNKNOWN", err.Error(), nil)

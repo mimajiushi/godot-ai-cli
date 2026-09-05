@@ -28,6 +28,18 @@ Emitted by `launch` itself, before any editor op is possible.
 | `DAEMON_UNREACHABLE` / `DAEMON_START_FAILED` | Daemon could not start or be probed | Check port availability, stale PID file, firewall on localhost. |
 | `LAUNCH_LOCK_FAILED` | OS-level failure to open/lock the global launch-lock file — contention never produces this error: a concurrent launch/stop silently QUEUES until the holder finishes (which can look like a hang during a long `--wait`) | If a command seems stuck, another launch/stop is likely still running — wait for it. A real `LAUNCH_LOCK_FAILED` means the lock file itself (`<user cache dir>/godot-ai-cli/launch.lock`) is unusable: check permissions. |
 
+## Image / screenshot codes
+
+Emitted by the `image` command group (local, no daemon) and the CLI-side
+extras of `editor screenshot`.
+
+| Code | Meaning | Recovery |
+|---|---|---|
+| `GAME_NOT_RUNNING` | `editor screenshot --source game` while no game is running (retryable) | Start it with `project run`, then retry; use `--source viewport`/`viewport_2d` for the editor viewport. |
+| `PIXEL_ASSERT_FAILED` | One or more `editor screenshot --assert '#RRGGBB@x,y'` checks mismatched (`data.samples` carries expected vs actual) | Inspect `data.samples`; widen `--tolerance` only if the delta is rendering noise, not a real regression. |
+| `IMAGE_LOAD_FAILED` | `image palette`/`image probe` could not decode the file | PNG/JPEG only (no WebP); check the path — `res://` needs `--project` or a remembered launch project. |
+| `SCREENSHOT_DECODE_FAILED` / `SCREENSHOT_SAVE_FAILED` | The capture's base64 payload was undecodable, or `--out` could not be written | Check disk writability; report undecodable payloads as a bug. |
+
 ## Update-phase codes
 
 Emitted by `update`. None of them modify the install — checksum/download failures always abort before any file is touched.

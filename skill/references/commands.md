@@ -24,9 +24,9 @@ Conventions applying to every op:
 - `[write]` ops are gated on editor writability: while the editor is importing or playing they fail with `EDITOR_NOT_READY` (see references/troubleshooting.md).
 - Timeouts are the daemon-side per-op budget. Long ops: `test run` 300s, `editor screenshot` 30s, `filesystem scan` 30s, `batch execute` 30s, `game input-sequence` 30s.
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
-- CLI-side extras not in the wire params: `batch execute` also accepts `--file <path>` (a JSON file holding the commands array).
+- CLI-side extras not in the wire params: `batch execute` also accepts `--file <path>` (a JSON file holding the commands array); `editor screenshot` also accepts `--out <file>` (save the capture locally; `image_base64` is then omitted from stdout), `--assert '#RRGGBB@x,y'` (repeatable pixel check, fails with `PIXEL_ASSERT_FAILED` on mismatch) and `--tolerance <n>` (per-channel slack for --assert).
 
-Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
+Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` (local texture palette analysis / pixel sampling — no editor needed), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
 
 ## editor (8 ops)
 
@@ -44,6 +44,8 @@ Non-op leaves (not in this catalog): `session list` / `session activate` (daemon
 
 ### `editor screenshot` — Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer
 `take_screenshot` · 30s · --source string (default "viewport"), --max-resolution int (default "640"), --include-image bool (default "true"), --view-target string, --coverage bool (default "false"), --elevation float, --azimuth float, --fov float, --user-prompt string
+CLI-side flags (not wire params): --out file, --assert '#RRGGBB@x,y' (repeatable), --tolerance int (default 0)
+Response: `format`, `width`, `height`, `frames_drawn`, `image_base64` (data URI `data:image/png;base64,...`; omitted when --out/--assert is given, which also adds `saved`/`bytes` or `passed`/`samples`). `--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first.
 
 ### `editor selection-get` — List the currently selected editor nodes
 `get_selection` · 8s · no flags

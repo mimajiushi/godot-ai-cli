@@ -127,10 +127,10 @@ tile_set = ExtResource("1_ts")
 // coordinate plus one alternative != 0 cell.
 func groundFixtureCells() []Cell {
 	return []Cell{
-		{X: 2, Y: 1, Source: 0, Atlas: [2]int{0, 1}},            // blue
-		{X: -1, Y: 0, Source: 0, Atlas: [2]int{1, 1}},           // yellow
+		{X: 2, Y: 1, Source: 0, Atlas: [2]int{0, 1}},                 // blue
+		{X: -1, Y: 0, Source: 0, Atlas: [2]int{1, 1}},                // yellow
 		{X: 0, Y: 0, Source: 0, Atlas: [2]int{1, 0}, Alternative: 2}, // green, alt ignored
-		{X: 1, Y: 0, Source: 1, Atlas: [2]int{0, 0}},            // magenta
+		{X: 1, Y: 0, Source: 1, Atlas: [2]int{0, 0}},                 // magenta
 	}
 }
 

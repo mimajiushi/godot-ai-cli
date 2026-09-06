@@ -74,8 +74,8 @@ func tilesetOps() []OpSpec {
 		},
 		{
 			Domain: "tileset", Name: "add-physics-layer", PluginCommand: "tileset_add_physics_layer",
-			Summary:      "Add a physics layer to a TileSet",
-			Timeout:      DefaultTimeout, Write: true,
+			Summary: "Add a physics layer to a TileSet",
+			Timeout: DefaultTimeout, Write: true,
 			ResponseNote: `{"physics_layers_count"}`,
 			Params: []ParamSpec{
 				ps("resource", "resource", true, "", "res:// path of the TileSet .tres"),
@@ -85,8 +85,8 @@ func tilesetOps() []OpSpec {
 		},
 		{
 			Domain: "tileset", Name: "set-tile-collision", PluginCommand: "tileset_set_tile_collision",
-			Summary:      "Set a collision polygon on one atlas tile of a TileSet",
-			Timeout:      DefaultTimeout, Write: true,
+			Summary: "Set a collision polygon on one atlas tile of a TileSet",
+			Timeout: DefaultTimeout, Write: true,
 			ResponseNote: `{"points"}`,
 			DocNote:      "Example: `tileset set-tile-collision --resource res://tiles.tres --source 0 --atlas-coords 2,3 --points \"0,0 16,0 16,16 0,16\"` adds a full-tile square on physics layer 0.",
 			Params: []ParamSpec{

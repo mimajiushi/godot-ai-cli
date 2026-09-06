@@ -289,8 +289,8 @@ func resourceOps() []OpSpec {
 		},
 		{
 			Domain: "resource", Name: "spriteframes-swap-frames", PluginCommand: "resource_spriteframes_swap_frames",
-			Summary:      "Swap the frame lists of two animations in a SpriteFrames .tres",
-			Timeout:      DefaultTimeout, Write: true,
+			Summary: "Swap the frame lists of two animations in a SpriteFrames .tres",
+			Timeout: DefaultTimeout, Write: true,
 			ResponseNote: `{"swapped","frame_counts"}`,
 			Params: []ParamSpec{
 				ps("resource", "resource", true, "", "res:// path of the SpriteFrames .tres"),

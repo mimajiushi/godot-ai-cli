@@ -138,6 +138,75 @@ func TestCollectParamsRequiredAndJSON(t *testing.T) {
 	}
 }
 
+// TestCollectParamsNodeRef: node set-property --node-ref expands to the
+// $node reference encoding as the wire value, satisfies the required
+// --value check, and loses to an explicit --value (documented override).
+func TestCollectParamsNodeRef(t *testing.T) {
+	op, cmd := leafFor(t, "node", "set-property")
+	must := func(c *cobra.Command, flag, value string) {
+		t.Helper()
+		if err := c.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(cmd, "path", "/Root/Player")
+	must(cmd, "property", "target")
+	must(cmd, "node-ref", "../Sprite2D")
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, ok := params["value"].(map[string]any)
+	if !ok || ref["$node"] != "../Sprite2D" {
+		t.Errorf("value = %v, want {\"$node\":\"../Sprite2D\"}", params["value"])
+	}
+
+	// An explicit --value overrides the --node-ref base.
+	op, cmd = leafFor(t, "node", "set-property")
+	must(cmd, "path", "/Root/Player")
+	must(cmd, "property", "target")
+	must(cmd, "node-ref", "../Sprite2D")
+	must(cmd, "value", `{"$node":"../Other"}`)
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, ok = params["value"].(map[string]any)
+	if !ok || ref["$node"] != "../Other" {
+		t.Errorf("explicit --value did not win: %v", params["value"])
+	}
+
+	// An explicitly empty --node-ref is an input error, not a silent drop.
+	op, cmd = leafFor(t, "node", "set-property")
+	must(cmd, "path", "/Root/Player")
+	must(cmd, "property", "target")
+	must(cmd, "node-ref", "")
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("empty --node-ref accepted")
+	}
+}
+
+// TestCollectParamsNodeRefJSONPassthrough: the raw $node JSON form passes
+// --value straight through as a JSON object (no CLI-side interception).
+func TestCollectParamsNodeRefJSONPassthrough(t *testing.T) {
+	op, cmd := leafFor(t, "node", "set-property")
+	for flag, value := range map[string]string{
+		"path": "/Root/Player", "property": "target", "value": `{"$node":"../Sprite2D"}`,
+	} {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, ok := params["value"].(map[string]any)
+	if !ok || len(ref) != 1 || ref["$node"] != "../Sprite2D" {
+		t.Errorf("value = %v, want the $node object verbatim", params["value"])
+	}
+}
+
 // TestCollectParamsWrapOp: game-domain ops wrap their params into the
 // game_command envelope {"op": ..., "params": {...}}.
 func TestCollectParamsWrapOp(t *testing.T) {

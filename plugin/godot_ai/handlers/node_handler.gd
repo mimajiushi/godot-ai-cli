@@ -201,10 +201,14 @@ func set_property(params: Dictionary) -> Dictionary:
 
 	var found := false
 	var prop_type: int = TYPE_NIL
+	var prop_hint: int = PROPERTY_HINT_NONE
+	var prop_hint_string := ""
 	for prop in node.get_property_list():
 		if prop.name == property:
 			found = true
 			prop_type = prop.get("type", TYPE_NIL)
+			prop_hint = prop.get("hint", PROPERTY_HINT_NONE)
+			prop_hint_string = prop.get("hint_string", "")
 			break
 	if not found:
 		return ErrorCodes.make(ErrorCodes.PROPERTY_NOT_ON_CLASS, McpPropertyErrors.build_message(node, property))
@@ -225,6 +229,15 @@ func set_property(params: Dictionary) -> Dictionary:
 		var json := JSON.new()
 		if json.parse(value) == OK and json.data is Dictionary and (json.data as Dictionary).has("__class__"):
 			value = json.data
+
+	# {"$node": "../Sprite2D"} 编码：节点引用赋值分支（@export var target:
+	# CanvasItem 这类 Node 派生对象槽）。必须先于资源路径与 __class__ 分支
+	# 处理——Dictionary 值不会进资源分支，但混用 __class__ 等其他键时必须
+	# 在这里明确报错，而不是落入通用 coercion。
+	if value is Dictionary and (value as Dictionary).has("$node"):
+		return _set_node_reference(
+			node, node_path, property, target_type, prop_hint, prop_hint_string, value, old_value
+		)
 
 	var nil_resource_string: bool = target_type == TYPE_NIL and (value == "" or (value is String and value.begins_with("res://")))
 	var resource_string_value: bool = value is String and (target_type == TYPE_OBJECT or nil_resource_string)
@@ -308,6 +321,132 @@ func set_property(params: Dictionary) -> Dictionary:
 			"undoable": true,
 		}
 	}
+
+
+## {"$node": "<NodePath>"} 节点引用赋值：把相对目标节点自身解析到的场景内
+## 节点对象赋给 Node 派生的 TYPE_OBJECT 属性（如 @export var target: CanvasItem）。
+## 序列化由引擎负责——被引用节点与持有节点同属当前编辑场景（owner 链完整）时，
+## scene save 会写出 node_paths=["<prop>"] 头字段 + <prop> = NodePath("...")，
+## 与在检查器中拖入节点完全一致；被引用节点若无 owner（不在场景存档内），
+## 赋值在内存中生效但不会落盘，这是引擎既有行为。
+func _set_node_reference(
+	node: Node,
+	node_path: String,
+	property: String,
+	target_type: int,
+	prop_hint: int,
+	prop_hint_string: String,
+	value: Dictionary,
+	old_value: Variant
+) -> Dictionary:
+	# $node 必须单独出现，不允许与 __class__ 等其他键混用。
+	if value.size() != 1:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			'"$node" cannot be combined with other keys in the value object; got keys %s' % str(value.keys()),
+		)
+	# 属性必须是对象槽，否则谈不上节点引用（如 position 这类 Vector2）。
+	if target_type != TYPE_OBJECT:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Property '%s' is not a node reference type (declared type %s); $node only applies to Object-typed properties expecting a Node" % [
+				property, type_string(target_type),
+			],
+		)
+	var expect_err: Variant = _node_ref_expectation_error(property, prop_hint, prop_hint_string)
+	if expect_err != null:
+		return expect_err
+	var raw: Variant = value["$node"]
+	if not (raw is String or raw is StringName):
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			'"$node" value must be a NodePath string, got %s' % type_string(typeof(raw)),
+		)
+	var ref_path := String(raw)
+	if ref_path.is_empty():
+		return ErrorCodes.make(ErrorCodes.INVALID_PARAMS, '"$node" value must not be empty')
+	# NodePath 相对目标节点自身解析，与检查器里显示的引用路径语义一致。
+	var target := node.get_node_or_null(NodePath(ref_path))
+	if target == null:
+		return ErrorCodes.make(
+			ErrorCodes.NODE_NOT_FOUND,
+			"Cannot resolve node reference '%s' relative to %s; check the scene structure (the path is resolved from the node that owns the property)" % [
+				ref_path, node_path,
+			],
+		)
+	var conform_err: Variant = _node_ref_conformance_error(target, property, prop_hint, prop_hint_string)
+	if conform_err != null:
+		return conform_err
+
+	_undo_redo.create_action("MCP: Set %s.%s" % [node.name, property])
+	_undo_redo.add_do_property(node, property, target)
+	_undo_redo.add_undo_property(node, property, old_value)
+	_undo_redo.commit_action()
+
+	return {
+		"data": {
+			"path": node_path,
+			"property": property,
+			"value": _node_ref_display(node, node.get(property)),
+			"old_value": _node_ref_display(node, old_value),
+			"undoable": true,
+		}
+	}
+
+
+## 校验属性期望类型为 Node 派生。返回错误字典或 null。
+## - PROPERTY_HINT_NODE_TYPE：@export var x: CanvasItem 的标准形态，放行。
+## - hint_string 逗号分隔的类名中有 ClassDB 已知类且任一 Node 派生：放行；
+##   有已知类但无 Node 派生（如 RESOURCE_TYPE 的 "Texture2D"）：拒绝。
+## - 拿不到有效 hint（hint 为 NONE 且 hint_string 为空，或只列出 ClassDB
+##   不可见的脚本类）：宽容放行——无法静态证明它不是节点槽，类型安全交由
+##   引擎 setter 兜底。
+static func _node_ref_expectation_error(property: String, hint: int, hint_string: String) -> Variant:
+	if hint == PROPERTY_HINT_NODE_TYPE:
+		return null
+	var any_known_class := false
+	for cls in hint_string.split(",", false):
+		if ClassDB.class_exists(cls):
+			any_known_class = true
+			if cls == "Node" or ClassDB.is_parent_class(cls, "Node"):
+				return null
+	if any_known_class:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Property '%s' is not a node reference type (expects %s); $node only applies to properties expecting a Node-derived object" % [
+				property, hint_string,
+			],
+		)
+	return null
+
+
+## hint_string 列出 ClassDB 已知原生类时，校验解析到的节点类型符合槽位约束；
+## 只含脚本类（ClassDB 不可见）时宽容放行。返回错误字典或 null。
+static func _node_ref_conformance_error(target: Node, property: String, hint: int, hint_string: String) -> Variant:
+	if hint != PROPERTY_HINT_NODE_TYPE or hint_string.is_empty():
+		return null
+	var any_known := false
+	for cls in hint_string.split(",", false):
+		if ClassDB.class_exists(cls):
+			any_known = true
+			if target.is_class(cls):
+				return null
+	if any_known:
+		return ErrorCodes.make(
+			ErrorCodes.WRONG_TYPE,
+			"Resolved node %s (%s) does not satisfy property '%s' (expects %s)" % [
+				str(target.get_path()), target.get_class(), property, hint_string,
+			],
+		)
+	return null
+
+
+## 节点引用属性的响应序列化：返回相对持有节点的 NodePath 字符串
+## （无引用或节点已离树则 null）。
+static func _node_ref_display(node: Node, value: Variant) -> Variant:
+	if value is Node and node.is_inside_tree() and (value as Node).is_inside_tree():
+		return str(node.get_path_to(value))
+	return null
 
 
 func rename_node(params: Dictionary) -> Dictionary:

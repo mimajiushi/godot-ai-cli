@@ -368,3 +368,37 @@ detected the already-running editor.
   port file OR a legacy global override exists. `stop` removes each session
   project's port pin (only while it still points at the stopped daemon's
   port; reported as `project_ports_cleared`).
+
+## 14. Node-reference assignment in `set_property`, `open_scene` stale-disk warning (beta.18)
+
+`plugin.cfg` version 3.2.9 → 3.2.10. Two editor-iteration gaps closed:
+node-typed properties could not be assigned through `set_property` at all
+(the editor-inspector "drag a node onto the slot" case), and `open_scene`
+silently picked up on-disk content newer than the editor's in-memory state.
+
+- `set_property` node-reference encoding (plugin-side,
+  `handlers/node_handler.gd`): a value of `{"$node":"<path>"}` assigns a
+  NODE reference instead of plain JSON. The path resolves RELATIVE TO THE
+  TARGET NODE (the `path` param), so `{"$node":"../Sprite2D"}` on
+  `/Root/Player` points at `/Root/Sprite2D`; scene-root-absolute
+  `/Root/Sprite2D` works too. After `save_scene` the reference serializes
+  exactly like a hand-dragged inspector assignment: NodePath-typed
+  properties become a `NodePath("../Sprite2D")` plus a `node_paths` entry
+  in the .tscn. An unresolvable reference fails with `NODE_NOT_FOUND`, a
+  non-string/malformed `$node` payload with `INVALID_PARAMS`.
+- CLI side (`internal/cli/ops.go`, `internal/ops/scene_node.go`): the
+  `--value` JSON passthrough needed no change (a `{"$node":...}` object
+  travels as-is). On top, `node set-property` gained the CLI-side flag
+  `--node-ref <path>` (declared via the existing CLIFlagSpec mechanism,
+  consumed in `collectParams`) which expands to the `{"$node":...}` wire
+  value; an explicit `--value` still wins when both are given, matching the
+  documented "--params base, flags override" semantics, and an explicitly
+  empty `--node-ref` is an `INVALID_PARAMS` input error.
+- `open_scene` stale-disk warning (plugin-side): the response data may now
+  carry a `warning` string when the scene file on disk was NEWER than what
+  the editor had loaded (external edit / another tool wrote it) —
+  informational, not an error. Documented on the `scene open` DocNote.
+- Docs: op DocNotes in `internal/ops/scene_node.go`, regenerated
+  `references/commands.md`, SKILL.md procedure step 4, and
+  `references/troubleshooting.md` cover the new surface; pinned Go-side
+  version tests bumped to 3.2.10.

@@ -347,6 +347,18 @@ func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 			params["commands"] = commands
 		}
 	}
+	if op.Domain == "node" && op.Name == "set-property" {
+		// CLI-side shorthand: --node-ref <path> expands to the $node
+		// reference encoding. It is a BASE value — an explicit --value
+		// flag still wins, matching the documented override semantics.
+		if flag := cmd.Flags().Lookup("node-ref"); flag != nil && flag.Changed {
+			ref := flag.Value.String()
+			if ref == "" {
+				return nil, fmt.Errorf("--node-ref must not be empty (want a node path like ../Sprite2D)")
+			}
+			params["value"] = map[string]any{"$node": ref}
+		}
+	}
 	for _, p := range op.Params {
 		flag := cmd.Flags().Lookup(p.Flag)
 		if flag == nil {

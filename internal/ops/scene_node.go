@@ -36,6 +36,7 @@ func sceneOps() []OpSpec {
 				ps("path", "path", true, "", "res:// path of the scene to open"),
 				pb("force-reload", "force_reload", false, "false", "Reload from disk, discarding unsaved changes"),
 			},
+			DocNote: "The response data may carry a `warning` string: the scene file on disk is NEWER than what the editor had loaded (external edit, another tool wrote it), so the open picked up on-disk content that may differ from the editor's previous in-memory state. Informational, not an error — save via `scene save` or re-open with `--force-reload` to settle the state explicitly.",
 		},
 		{
 			Domain: "scene", Name: "save", PluginCommand: "save_scene",
@@ -134,6 +135,10 @@ func nodeOps() []OpSpec {
 				pj("value", "value", true, `JSON value, e.g. 42, "text", [1,2], {"x":1,"y":2}`),
 				ps("scene-file", "scene_file", false, "", "Guard: only apply when this scene is being edited"),
 			},
+			CLIFlags: []CLIFlagSpec{
+				cls("node-ref", "", "Shorthand for a Node reference value: `--node-ref ../Sprite2D` sends value as {\"$node\":\"../Sprite2D\"} (an explicit --value wins when both are given)"),
+			},
+			DocNote: "Node-typed properties (e.g. `RemoteTransform2D.remote_path`-style NodePath exports, or `@export var target: Node2D` object slots) take a node REFERENCE, not plain JSON: `--value '{\"$node\":\"../Sprite2D\"}'` (or the `--node-ref ../Sprite2D` shorthand). The path resolves RELATIVE TO THE TARGET NODE (`--path`), so `../Sprite2D` on `/Root/Player` points at `/Root/Sprite2D`; scene-root-absolute forms like `/Root/Sprite2D` work too. After `scene save` the reference serializes exactly like a hand-dragged inspector assignment: NodePath-typed properties become a `NodePath(\"../Sprite2D\")` plus a `node_paths` entry in the .tscn, object-typed ones a NodePath the loader resolves. A reference that does not resolve fails with `NODE_NOT_FOUND`; a non-string or malformed `$node` payload fails with `INVALID_PARAMS`. Example: `node set-property --path /Root/Player --property target --node-ref ../Sprite2D`.",
 		},
 		{
 			Domain: "node", Name: "rename", PluginCommand: "rename_node",

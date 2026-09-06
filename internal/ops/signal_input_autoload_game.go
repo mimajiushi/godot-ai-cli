@@ -151,7 +151,7 @@ func gameOps() []OpSpec {
 			Params: []ParamSpec{
 				pi("depth", "depth", false, "10", "Maximum depth below the root"),
 				ps("root-path", "root_path", false, "", "Subtree root (default: game root)"),
-				ps("name", "name", false, "", "Only include nodes whose name matches this glob (subtrees are still traversed)"),
+				ps("name", "name", false, "", "Only include nodes whose name matches this glob (non-matching subtrees are still traversed; hits carry full paths)"),
 			},
 		},
 		{
@@ -161,7 +161,7 @@ func gameOps() []OpSpec {
 			Params: []ParamSpec{
 				ps("path", "path", true, "", "Node path in the running game"),
 				pb("include-properties", "include_properties", false, "true", "Include the property dump"),
-				pj("fields", "fields", false, `JSON array of property names to keep in the properties dump, e.g. ["position","visible"]`),
+				pj("fields", "fields", false, `JSON array of property names to keep in the properties dump, e.g. ["position","visible"] (unresolved names are reported in unknown_fields)`),
 			},
 		},
 		{
@@ -242,6 +242,7 @@ func gameOps() []OpSpec {
 			ResponseNote: `{"debug_collisions_hint","debug_paths_hint","debug_navigation_hint"} —
   the current states after applying the given flags. Pair with editor screenshot
   --source game (or editor record) to verify collision-shape fit visually.`,
+			DocNote: "Debug outlines ARE included in the game framebuffer capture; a capture flagged `stale_frame` predates your change (frozen/backgrounded game), retry with a live loop.",
 			Params: []ParamSpec{
 				ps("collisions", "collisions", false, "", "on | off (omit to leave unchanged)"),
 				ps("paths", "paths", false, "", "on | off (omit to leave unchanged)"),

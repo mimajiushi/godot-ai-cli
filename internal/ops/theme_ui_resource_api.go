@@ -259,7 +259,7 @@ func resourceOps() []OpSpec {
 				ps("resource-path", "resource_path", true, "", "res:// path of the SpriteFrames .tres"),
 				ps("anim", "anim", true, "", "Target animation name"),
 				ps("texture", "texture", true, "", "res:// path of the frame texture"),
-				ps("region", "region", false, "", `Atlas region as "x,y,w,h" (omit for the whole texture)`),
+				ps("region", "region", false, "", `Atlas region as "x,y,w,h" (builds an AtlasTexture frame; omit for the whole texture)`),
 				pi("at-index", "at_index", false, "", "Insert position (default: append)"),
 			},
 		},
@@ -267,6 +267,7 @@ func resourceOps() []OpSpec {
 			Domain: "resource", Name: "spriteframes-from-sheet", PluginCommand: "spriteframes_from_sheet",
 			Summary: "Batch-build SpriteFrames animations from a sprite sheet grid",
 			Timeout: DefaultTimeout, Write: true,
+			DocNote: `Animations named in --rows are rebuilt in place (idempotent); others are untouched. Example: ` + "`resource spriteframes-from-sheet --resource-path res://assets/hero.tres --texture res://assets/hero.png --cell 32x32 --rows \"0:normal_down,1:normal_left\" --fps 8`.",
 			Params: []ParamSpec{
 				ps("resource-path", "resource_path", true, "", "res:// path of the SpriteFrames .tres (created if missing)"),
 				ps("texture", "texture", true, "", "res:// path of the sprite sheet texture"),

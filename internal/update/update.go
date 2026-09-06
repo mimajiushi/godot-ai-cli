@@ -16,13 +16,16 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/ops"
 	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
 
@@ -196,7 +199,108 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 		// CleanupStaleBinary removes it.
 		result["previous_binary"] = target + ".old"
 	}
+	if hint := docsHint(ctx, target); hint != nil {
+		result["docs_hint"] = hint
+	}
 	return result, nil
+}
+
+// queryOps lists the op names ("<domain> <name>") the binary at exePath
+// exposes, via `exe commands --json`; a package-level seam for tests.
+var queryOps = defaultQueryOps
+
+// currentOps lists the running (pre-update) binary's op names; a seam for
+// tests. The production implementation reads this binary's own op table —
+// at update time the RUNNING binary is the OLD version, so its table is
+// exactly the pre-update surface.
+var currentOps = defaultCurrentOps
+
+// docsHintMessage tells the caller how to re-sync the skill reference docs
+// after the binary changed underneath them.
+const docsHintMessage = "sync the skill reference docs against the new binary: `godot-ai-cli commands --format md > references/commands.md` (and refresh the ops counts in SKILL.md when ops were added or removed)"
+
+// docsHint compares the pre-update op surface against the freshly installed
+// binary's. A changed surface (or an unqueryable new binary) yields a
+// docs_hint payload; an unchanged surface returns nil — version bumps that
+// add no ops need no doc sync.
+func docsHint(ctx context.Context, newBinary string) map[string]any {
+	newOps, err := queryOps(ctx, newBinary)
+	if err != nil {
+		return map[string]any{
+			"message":        docsHintMessage,
+			"ops_diff_error": err.Error(),
+		}
+	}
+	added, removed := diffOpNames(currentOps(), newOps)
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+	hint := map[string]any{"message": docsHintMessage}
+	if len(added) > 0 {
+		hint["ops_added"] = added
+	}
+	if len(removed) > 0 {
+		hint["ops_removed"] = removed
+	}
+	return hint
+}
+
+// defaultQueryOps runs `exe commands --json` and collects "<domain> <name>".
+func defaultQueryOps(ctx context.Context, exe string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, exe, "commands", "--json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("run the new binary's commands --json: %v", err)
+	}
+	var payload struct {
+		Ops []struct {
+			Domain string `json:"domain"`
+			Name   string `json:"name"`
+		} `json:"ops"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return nil, fmt.Errorf("decode the new binary's commands --json: %v", err)
+	}
+	names := make([]string, 0, len(payload.Ops))
+	for _, op := range payload.Ops {
+		names = append(names, op.Domain+" "+op.Name)
+	}
+	return names, nil
+}
+
+// defaultCurrentOps reads the running binary's own op table.
+func defaultCurrentOps() []string {
+	all := ops.All()
+	names := make([]string, 0, len(all))
+	for _, op := range all {
+		names = append(names, op.Domain+" "+op.Name)
+	}
+	return names
+}
+
+// diffOpNames returns the sorted op names added and removed between the old
+// and the new surface.
+func diffOpNames(oldOps, newOps []string) (added, removed []string) {
+	oldSet := make(map[string]bool, len(oldOps))
+	for _, n := range oldOps {
+		oldSet[n] = true
+	}
+	newSet := make(map[string]bool, len(newOps))
+	for _, n := range newOps {
+		newSet[n] = true
+		if !oldSet[n] {
+			added = append(added, n)
+		}
+	}
+	for _, n := range oldOps {
+		if !newSet[n] {
+			removed = append(removed, n)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
 }
 
 // withStatus copies m and stamps the status field onto the copy.

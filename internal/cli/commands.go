@@ -15,13 +15,15 @@ import (
 
 // opJSON is the wire shape of one op in `commands --json`.
 type opJSON struct {
-	Domain        string      `json:"domain"`
-	Name          string      `json:"name"`
-	PluginCommand string      `json:"plugin_command"`
-	Summary       string      `json:"summary"`
-	TimeoutSec    float64     `json:"timeout_sec"`
-	Write         bool        `json:"write"`
-	Params        []paramJSON `json:"params"`
+	Domain        string        `json:"domain"`
+	Name          string        `json:"name"`
+	PluginCommand string        `json:"plugin_command"`
+	Summary       string        `json:"summary"`
+	TimeoutSec    float64       `json:"timeout_sec"`
+	Write         bool          `json:"write"`
+	Params        []paramJSON   `json:"params"`
+	CLIFlags      []cliFlagJSON `json:"cli_flags"`
+	Response      string        `json:"response"`
 }
 
 // paramJSON is the wire shape of one param in `commands --json`.
@@ -34,27 +36,47 @@ type paramJSON struct {
 	Usage    string `json:"usage"`
 }
 
+// cliFlagJSON is the wire shape of one CLI-side-only flag in
+// `commands --json` (no Param key — these never reach the wire).
+type cliFlagJSON struct {
+	Flag    string `json:"flag"`
+	Kind    string `json:"kind"`
+	Default string `json:"default"`
+	Usage   string `json:"usage"`
+}
+
+// commandsOutputFormat names the supported `commands --format` values.
+const (
+	formatText = "text"
+	formatJSON = "json"
+	formatMD   = "md"
+)
+
 // newCommandsCommand builds the `commands` discovery subcommand.
 func newCommandsCommand() *cobra.Command {
 	var (
 		domainFilter string
 		jsonOut      bool
+		format       string
 	)
 	cmd := &cobra.Command{
 		Use:   "commands",
-		Short: "List every op subcommand (plain text or JSON)",
+		Short: "List every op subcommand (plain text, JSON, or markdown)",
 		Long: `commands exposes the full op surface generated from the internal op
 table: one entry per <domain> <op> leaf with its plugin command, timeout,
-write gate, and typed params.
+write gate, typed params, CLI-side-only flags, and response notes.
 
-Plain text groups ops under ## <domain> headers; --json emits the complete
-spec for machine consumption (honors the root --pretty flag); --domain
-narrows the listing to a single domain.
+--format text (default) groups ops under ## <domain> headers; --format json
+emits the complete spec for machine consumption (honors the root --pretty
+flag; --json is a shorthand); --format md emits the skill's op-catalog
+markdown (references/commands.md) so the doc regenerates with one command;
+--domain narrows the listing to a single domain.
 
 Examples:
   godot-ai-cli commands
   godot-ai-cli commands --domain node
   godot-ai-cli commands --json | jq '.ops[].plugin_command'
+  godot-ai-cli commands --format md > references/commands.md
   godot-ai-cli --pretty commands --json --domain scene`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -67,15 +89,26 @@ Examples:
 							domainFilter, strings.Join(ops.SortedDomainsWithOps(), ", ")), nil)
 				}
 			}
-			if jsonOut {
+			switch {
+			case jsonOut && cmd.Flags().Changed("format") && format != formatJSON:
+				return jsonError(cmd, "USAGE_ERROR",
+					"--json and --format "+format+" contradict each other; pick one", nil)
+			case jsonOut || format == formatJSON:
 				return printJSON(cmd.OutOrStdout(),
 					map[string]any{"ops": toOpJSON(list)}, prettyOutput)
+			case format == formatMD:
+				return printOpsMarkdown(cmd.OutOrStdout(), list)
+			case format == formatText || format == "":
+				return printOpsText(cmd.OutOrStdout(), list)
+			default:
+				return jsonError(cmd, "USAGE_ERROR",
+					fmt.Sprintf("unknown --format %q (valid: text, json, md)", format), nil)
 			}
-			return printOpsText(cmd.OutOrStdout(), list)
 		},
 	}
 	cmd.Flags().StringVar(&domainFilter, "domain", "", "only list ops of one domain (e.g. node)")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full op spec as JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full op spec as JSON (shorthand for --format json)")
+	cmd.Flags().StringVar(&format, "format", "", "output format: text (default) | json | md (skill op-catalog markdown)")
 	return cmd
 }
 
@@ -107,8 +140,8 @@ func filterDomain(list []ops.OpSpec, domain string) []ops.OpSpec {
 	return out
 }
 
-// toOpJSON converts specs to their JSON wire shape (params always an
-// array, never null).
+// toOpJSON converts specs to their JSON wire shape (params and cli_flags
+// always arrays, never null).
 func toOpJSON(list []ops.OpSpec) []opJSON {
 	out := make([]opJSON, 0, len(list))
 	for _, op := range list {
@@ -123,6 +156,15 @@ func toOpJSON(list []ops.OpSpec) []opJSON {
 				Usage:    p.Usage,
 			})
 		}
+		cliFlags := make([]cliFlagJSON, 0, len(op.CLIFlags))
+		for _, f := range op.CLIFlags {
+			cliFlags = append(cliFlags, cliFlagJSON{
+				Flag:    f.Flag,
+				Kind:    f.Kind,
+				Default: f.Default,
+				Usage:   f.Usage,
+			})
+		}
 		out = append(out, opJSON{
 			Domain:        op.Domain,
 			Name:          op.Name,
@@ -131,6 +173,8 @@ func toOpJSON(list []ops.OpSpec) []opJSON {
 			TimeoutSec:    op.Timeout.Seconds(),
 			Write:         op.Write,
 			Params:        params,
+			CLIFlags:      cliFlags,
+			Response:      op.ResponseNote,
 		})
 	}
 	return out

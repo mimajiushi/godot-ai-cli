@@ -106,6 +106,8 @@ func projectOps() []OpSpec {
 			Domain: "project", Name: "continue", PluginCommand: "project_continue",
 			Summary: "Resume a game paused at a debugger break (e.g. after a failed eval)",
 			Timeout: DefaultTimeout,
+			ResponseNote: `{"continued","was_breaked"}`,
+			DocNote:     "A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.",
 		},
 	}
 }
@@ -194,6 +196,9 @@ func batchOps() []OpSpec {
 			Params: []ParamSpec{
 				pj("commands", "commands", false, `JSON array of {"command": ..., "params": {...}} (or pass --file)`),
 				pb("undo", "undo", false, "true", "Roll back applied commands on first error"),
+			},
+			CLIFlags: []CLIFlagSpec{
+				cls("file", "", `JSON file containing an array of {"command": ..., "params": {...}}`),
 			},
 		},
 	}

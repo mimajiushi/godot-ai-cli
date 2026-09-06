@@ -43,6 +43,9 @@ const (
 	KindFloat  = "float"
 	KindBool   = "bool"
 	KindJSON   = "json" // raw JSON value (array, object, string, number)
+	// KindStringArray is only valid on CLIFlagSpec (repeatable string
+	// flag, e.g. editor screenshot --assert); wire params never use it.
+	KindStringArray = "stringArray"
 )
 
 // OpSpec declares one CLI leaf command bound to a plugin command.
@@ -58,6 +61,17 @@ type OpSpec struct {
 	// "Response:" section documenting the payload fields (agents otherwise
 	// discover response keys by trial and error).
 	ResponseNote string
+	// CLIFlags declares CLI-side flags that do NOT map 1:1 to wire params
+	// (local file output, convenience shorthands, batch input files). The
+	// CLI layer registers them from this table, so `commands --json` and
+	// `commands --format md` can surface them mechanically instead of the
+	// flags existing only in -h text.
+	CLIFlags []CLIFlagSpec
+	// DocNote, when non-empty, is extra catalog prose printed verbatim by
+	// `commands --format md` after the Response line (worked examples,
+	// usage constraints). It is deliberately NOT part of -h — help stays
+	// compact.
+	DocNote string
 	// WrapOp, when non-empty, routes through a wrapper plugin command:
 	// the wire params become {"op": WrapOp, "params": <collected>}.
 	// Used by the game domain (everything goes through game_command).
@@ -72,6 +86,14 @@ type ParamSpec struct {
 	Required bool
 	Default  string // flag default (empty = kind zero value)
 	Usage    string // English help text
+}
+
+// CLIFlagSpec declares one CLI-side-only flag on an op leaf command.
+type CLIFlagSpec struct {
+	Flag    string // CLI flag name (kebab-case), e.g. "out-dir"
+	Kind    string // string|int|float|bool|stringArray
+	Default string // flag default (empty = kind zero value)
+	Usage   string // English help text
 }
 
 // HandWiredLeaves documents the CLI leaves that are NOT OpSpec-backed
@@ -282,6 +304,29 @@ func pj(flag, param string, required bool, usage string) ParamSpec {
 	return ParamSpec{Flag: flag, Param: param, Kind: KindJSON, Required: required, Usage: usage}
 }
 
+// cls / cli / clf / clb / clsa are CLIFlagSpec constructors keeping the
+// CLI-side flag tables compact (string / int / float / bool / stringArray).
+
+func cls(flag, def, usage string) CLIFlagSpec {
+	return CLIFlagSpec{Flag: flag, Kind: KindString, Default: def, Usage: usage}
+}
+
+func cli(flag, def, usage string) CLIFlagSpec {
+	return CLIFlagSpec{Flag: flag, Kind: KindInt, Default: def, Usage: usage}
+}
+
+func clf(flag, def, usage string) CLIFlagSpec {
+	return CLIFlagSpec{Flag: flag, Kind: KindFloat, Default: def, Usage: usage}
+}
+
+func clb(flag, def, usage string) CLIFlagSpec {
+	return CLIFlagSpec{Flag: flag, Kind: KindBool, Default: def, Usage: usage}
+}
+
+func clsa(flag, usage string) CLIFlagSpec {
+	return CLIFlagSpec{Flag: flag, Kind: KindStringArray, Usage: usage}
+}
+
 // Validate sanity-checks one spec; the convention tests run it over All().
 func (op OpSpec) Validate() error {
 	if op.Domain == "" || op.Name == "" || op.PluginCommand == "" || op.Summary == "" {
@@ -298,6 +343,16 @@ func (op OpSpec) Validate() error {
 		}
 		if p.Flag == "" || p.Param == "" {
 			return fmt.Errorf("op %s/%s: param with empty Flag or Param", op.Domain, op.Name)
+		}
+	}
+	for _, f := range op.CLIFlags {
+		switch f.Kind {
+		case KindString, KindInt, KindFloat, KindBool, KindStringArray:
+		default:
+			return fmt.Errorf("op %s/%s: CLI flag %s has invalid kind %q", op.Domain, op.Name, f.Flag, f.Kind)
+		}
+		if f.Flag == "" {
+			return fmt.Errorf("op %s/%s: CLI flag with empty Flag", op.Domain, op.Name)
 		}
 	}
 	return nil

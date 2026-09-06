@@ -91,23 +91,8 @@ Examples:
 	}
 	cmd.Flags().String("session", "", "pin the call to one connected editor session")
 	cmd.Flags().String("params", "", "base params as a JSON object; explicit flags override colliding keys")
-	if op.Domain == "batch" && op.Name == "execute" {
-		cmd.Flags().String("file", "", "JSON file containing an array of {\"command\": ..., \"params\": {...}}")
-	}
-	if op.Domain == "editor" && op.Name == "screenshot" {
-		cmd.Flags().String("out", "", "save the captured image to this file and omit image_base64 from the output")
-		cmd.Flags().StringArray("assert", nil, "expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch")
-		cmd.Flags().Int("tolerance", 0, "per-channel tolerance for --assert")
-		cmd.Flags().Bool("full-res", false, "capture at full source resolution (sends max_resolution=0, no downscale cap)")
-		cmd.Flags().String("region", "", "crop the capture to \"x,y,w,h\" in source-image pixels (crops first, then --max-resolution applies)")
-	}
-	if op.Domain == "editor" && op.Name == "record" {
-		cmd.Flags().String("out-dir", "", "save each frame as PNG into this directory (frames omitted from stdout)")
-		cmd.Flags().String("out", "", "with --format gif: write the animated GIF to this file")
-		cmd.Flags().String("format", "png", "png (per-frame files) | gif (animated)")
-		cmd.Flags().Float64("duration", 0, "capture this many seconds (frame count = duration x --fps)")
-		cmd.Flags().Int("fps", 0, "frame rate used with --duration")
-		cmd.Flags().Bool("full-res", false, "capture frames at full source resolution (sends max_resolution=0)")
+	for _, f := range op.CLIFlags {
+		registerCLIFlag(cmd, f)
 	}
 	return cmd
 }
@@ -249,6 +234,32 @@ func registerParamFlag(cmd *cobra.Command, p ops.ParamSpec) {
 		cmd.Flags().Bool(p.Flag, def, p.Usage)
 	default: // string and json both arrive as raw strings; json is validated later
 		cmd.Flags().String(p.Flag, p.Default, p.Usage)
+	}
+}
+
+// registerCLIFlag adds one typed flag for a CLIFlagSpec (CLI-side-only
+// flags; consumed by the op's RunE, never sent as wire params).
+func registerCLIFlag(cmd *cobra.Command, f ops.CLIFlagSpec) {
+	switch f.Kind {
+	case ops.KindInt:
+		def := 0
+		if f.Default != "" {
+			def, _ = strconv.Atoi(f.Default)
+		}
+		cmd.Flags().Int(f.Flag, def, f.Usage)
+	case ops.KindFloat:
+		var def float64
+		if f.Default != "" {
+			def, _ = strconv.ParseFloat(f.Default, 64)
+		}
+		cmd.Flags().Float64(f.Flag, def, f.Usage)
+	case ops.KindBool:
+		def := f.Default == "true"
+		cmd.Flags().Bool(f.Flag, def, f.Usage)
+	case ops.KindStringArray:
+		cmd.Flags().StringArray(f.Flag, nil, f.Usage)
+	default: // string
+		cmd.Flags().String(f.Flag, f.Default, f.Usage)
 	}
 }
 

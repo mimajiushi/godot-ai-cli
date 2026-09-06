@@ -1,9 +1,9 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --json` (148 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --format md` (154 ops). Regenerate against a newer binary with:
 
 ```bash
-godot-ai-cli commands --json --pretty
+godot-ai-cli commands --format md
 ```
 
 ## Path and param conventions
@@ -22,9 +22,9 @@ Conventions applying to every op:
 - Every op also accepts `--session <id>` (pin to one connected editor when several are attached) and `--params '<json>'` (base wire params; explicit flags override colliding keys).
 - Optional flags left at their zero value are omitted from the wire params.
 - `[write]` ops are gated on editor writability: while the editor is importing or playing they fail with `EDITOR_NOT_READY` (see references/troubleshooting.md).
-- Timeouts are the daemon-side per-op budget. Long ops: `test run` 300s, `editor screenshot` 30s, `filesystem scan` 30s, `batch execute` 30s, `game input-sequence` 30s.
+- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem scan` 30s, `batch execute` 30s.
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
-- CLI-side extras not in the wire params: `batch execute` also accepts `--file <path>` (a JSON file holding the commands array); `editor screenshot` also accepts `--out <file>` (save the capture locally; `image_base64` is then omitted from stdout), `--assert '#RRGGBB@x,y'` (repeatable pixel check, fails with `PIXEL_ASSERT_FAILED` on mismatch), `--tolerance <n>` (per-channel slack for --assert) and `--full-res` (capture at the source resolution — sends `max_resolution=0`, no downscale cap; the default cap is 640).
+- CLI-side extras not in the wire params: `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
 
 Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` (local texture palette analysis / pixel sampling / sprite-sheet grid detection — no editor needed), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
@@ -33,7 +33,8 @@ Non-op leaves (not in this catalog): `session list` / `session activate` (daemon
 
 ### `editor eval` — Evaluate GDScript code inside the running game
 `game_eval` · 15s · --code string (required), --echo-prints bool (default "false")
-Response: `{"result","source"}` — `result` is the value of the code's explicit `return` (null for plain statements). `--echo-prints` adds `"prints"`: the print()/printerr() lines this eval produced, e.g. `editor eval --code 'print($Player.position)' --echo-prints` → `{"result":null,"source":"game","prints":["(144, 136)\n"]}` — no follow-up `logs read` needed.
+Response: {"result","source"}; result is the value of the code's explicit return (null for plain statements). --echo-prints adds "prints": the print()/printerr() lines this eval produced.
+Example: `editor eval --code 'print($Player.position)' --echo-prints` → `{"result":null,"source":"game","prints":["(144, 136)\n"]}` — no follow-up `logs read` needed.
 Eval code constraints: the code becomes the body of a generated function — keep it flat (no `if`/`for` blocks sharing one line after a colon, e.g. `for x in range(3): var a := 1; if ...` fails to parse); use real newlines and indentation. A parse error returns `EVAL_COMPILE_ERROR`; the game auto-resumes from the debugger break it caused (manual recovery: `project continue`).
 
 ### `editor monitors` — Read Godot performance monitor values
@@ -44,16 +45,18 @@ Eval code constraints: the code becomes the body of a generated function — kee
 
 ### `editor record` — Capture a frame-aligned burst of the running game (one readback per game frame)
 `game_command` · 75s · --frames int, --max-resolution int (default "640")
-CLI-side flags (not wire params): --out-dir dir (per-frame PNGs), --format gif --out file.gif, --duration sec + --fps n (frame count = duration×fps), --full-res
-Response: `captured`, `frame_deltas_ms`, `width`, `height`, plus `files` (png) or `saved`/`bytes` (gif). Captures one readback per game frame — use it to verify per-frame animation content, particles, or projectiles in one call instead of N eval→screenshot round trips. Fails fast with an actionable error when the game's main loop is stalled. Examples: `editor record --frames 60 --out-dir shots/burst1` · `editor record --duration 2 --fps 30 --format gif --out run.gif`.
+CLI-side flags (not wire params): `--out-dir` string — save each frame as PNG into this directory (frames omitted from stdout); `--out` string — with --format gif: write the animated GIF to this file; `--format` string (default "png") — png (per-frame files) | gif (animated); `--duration` float (default "0") — capture this many seconds (frame count = duration x --fps); `--fps` int (default "0") — frame rate used with --duration; `--full-res` bool (default "false") — capture frames at full source resolution (sends max_resolution=0)
+Response: {"captured","frames","frame_deltas_ms","width","height"}; "frames" holds base64 PNGs in order. CLI-side flags: --out-dir (save frame_0001.png… locally, frames omitted from stdout, adds "files"), --format gif --out <file.gif> (adds "saved"/"bytes"), --duration/--fps (frame count = duration×fps), --full-res (no per-frame downscale cap).
+Captures one readback per game frame — use it to verify per-frame animation content, particles, or projectiles in one call instead of N eval→screenshot round trips. Fails fast with an actionable error when the game's main loop is stalled. Examples: `editor record --frames 60 --out-dir shots/burst1` · `editor record --duration 2 --fps 30 --format gif --out run.gif`.
 
 ### `editor reload-plugin` — Reload the godot_ai plugin and wait for reconnect
 `reload_plugin` · 8s · no flags
 
 ### `editor screenshot` — Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer
 `take_screenshot` · 30s · --source string (default "viewport"), --max-resolution int (default "640"), --include-image bool (default "true"), --view-target string, --coverage bool (default "false"), --elevation float, --azimuth float, --fov float, --user-prompt string
-CLI-side flags (not wire params): --out file, --assert '#RRGGBB@x,y' (repeatable), --tolerance int (default 0), --full-res (no downscale cap — pixel-art games need it to eyeball frames; the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera), --region 'x,y,w,h' (crop in SOURCE-image pixels — crop first, then --max-resolution applies; --assert coordinates refer to the cropped image)
-Response: `format`, `width`, `height`, `frames_drawn`, `image_base64` (data URI `data:image/png;base64,...`; omitted when --out/--assert is given, which also adds `saved`/`bytes` or `passed`/`samples`). `--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first.
+CLI-side flags (not wire params): `--out` string — save the captured image to this file and omit image_base64 from the output; `--assert` string[] — expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch; `--tolerance` int (default "0") — per-channel tolerance for --assert; `--full-res` bool (default "false") — capture at full source resolution (sends max_resolution=0, no downscale cap; the default cap is 640); `--region` string — crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image)
+Response: {"format","width","height","frames_drawn","image_base64"}; image_base64 is a data URI ("data:image/png;base64,..."). The CLI-side flags --out (save to file, adds "saved"/"bytes") and --assert '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") consume the image locally and omit image_base64 from the output. --full-res captures at the source resolution (no downscale cap).
+`--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first. Pixel-art games need `--full-res` to eyeball frames: the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera.
 
 ### `editor selection-get` — List the currently selected editor nodes
 `get_selection` · 8s · no flags
@@ -149,7 +152,8 @@ Response: `format`, `width`, `height`, `frames_drawn`, `image_base64` (data URI 
 
 ### `project continue` — Resume a game paused at a debugger break (e.g. after a failed eval)
 `project_continue` · 8s · no flags
-Response: `{"continued","was_breaked"}`. A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.
+Response: {"continued","was_breaked"}
+A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.
 
 ### `project run` — Play the project and wait briefly for game liveness
 `run_project` · 8s · **[write]** · --mode string (default "main"), --scene string, --autosave bool (default "true")
@@ -345,7 +349,7 @@ Response: `{"continued","was_breaked"}`. A failed eval that parked the game at a
 `ensure_binding` · 8s · **[write]** · --action string (required), --event-type string (required), --deadzone float (default "0.5"), --keycode string, --button int, --axis int, --axis-value float, --ctrl bool, --alt bool, --shift bool
 
 ### `input-map list` — List project input actions and their bindings
-`list_actions` · 8s · --include-builtin bool (default "false"), --action string (glob filter on action names, e.g. `--action 'move_*'` — avoids pulling every built-in action just to check four bindings)
+`list_actions` · 8s · --include-builtin bool (default "false"), --action string
 
 ### `input-map remove-action` — Remove an input action and its bindings
 `remove_action` · 8s · **[write]** · --action string (required)
@@ -353,14 +357,15 @@ Response: `{"continued","was_breaked"}`. A failed eval that parked the game at a
 ## game (10 ops)
 
 ### `game debug-draw` — Toggle engine debug rendering (collision shapes, paths, navigation) in the running game
-`game_command` · 15s · --collisions string (`on`|`off`), --paths string, --navigation string (omit a flag to leave that state unchanged)
-Response: the current `debug_collisions_hint` / `debug_paths_hint` / `debug_navigation_hint` states. Pair with `editor screenshot --source game` (or `editor record`) to verify collision-shape fit visually — debug outlines ARE included in the game framebuffer capture; a capture flagged `stale_frame` predates your change (frozen/backgrounded game), retry with a live loop.
+`game_command` · 15s · --collisions string, --paths string, --navigation string
+Response: {"debug_collisions_hint","debug_paths_hint","debug_navigation_hint"} — the current states after applying the given flags. Pair with editor screenshot --source game (or editor record) to verify collision-shape fit visually.
+Debug outlines ARE included in the game framebuffer capture; a capture flagged `stale_frame` predates your change (frozen/backgrounded game), retry with a live loop.
 
 ### `game get-node-info` — Property snapshot of a node in the running game
-`game_command` · 15s · --path string (required), --include-properties bool (default "true"), --fields json (property-name whitelist, e.g. `--fields '["position","visible"]'`; unresolved names are reported in `unknown_fields`)
+`game_command` · 15s · --path string (required), --include-properties bool (default "true"), --fields json
 
 ### `game get-scene-tree` — Scene tree of the running game
-`game_command` · 15s · --depth int (default "10"), --root-path string, --name string (glob filter on node names, e.g. `--name 'Player*'`; non-matching subtrees are still traversed, hits carry full paths)
+`game_command` · 15s · --depth int (default "10"), --root-path string, --name string
 
 ### `game get-ui-elements` — UI element tree of the running game
 `game_command` · 15s · --root-path string, --include-hidden bool (default "false"), --include-disabled bool (default "true"), --max-depth int (default "10")
@@ -481,10 +486,10 @@ Response: the current `debug_collisions_hint` / `debug_paths_hint` / `debug_navi
 `spriteframes_add_animation` · 8s · **[write]** · --resource-path string (required), --name string (required), --speed float (default "5.0"), --loop bool (default "true")
 
 ### `resource spriteframes-add-frame` — Append a frame (whole texture or an atlas region) to a SpriteFrames animation
-`spriteframes_add_frame` · 8s · **[write]** · --resource-path string (required), --anim string (required), --texture string (required), --region string (`"x,y,w,h"` — builds an AtlasTexture frame; omit for the whole texture), --at-index int (default: append)
+`spriteframes_add_frame` · 8s · **[write]** · --resource-path string (required), --anim string (required), --texture string (required), --region string, --at-index int
 
 ### `resource spriteframes-from-sheet` — Batch-build SpriteFrames animations from a sprite sheet grid
-`spriteframes_from_sheet` · 8s · **[write]** · --resource-path string (required; created if missing), --texture string (required), --cell string (required, `"WxH"` e.g. `32x32`), --rows string (required, `"0:idle,1:walk"`), --fps float (default "8.0"), --loop bool (default "true")
+`spriteframes_from_sheet` · 8s · **[write]** · --resource-path string (required), --texture string (required), --cell string (required), --rows string (required), --fps float (default "8.0"), --loop bool (default "true")
 Animations named in --rows are rebuilt in place (idempotent); others are untouched. Example: `resource spriteframes-from-sheet --resource-path res://assets/hero.tres --texture res://assets/hero.png --cell 32x32 --rows "0:normal_down,1:normal_left" --fps 8`.
 
 ## api (1 op)
@@ -543,6 +548,7 @@ Animations named in --rows are rebuilt in place (idempotent); others are untouch
 
 ### `batch execute` — Run multiple plugin commands atomically (rollback on first error); use --file or --params
 `batch_execute` · 30s · **[write]** · --commands json, --undo bool (default "true")
+CLI-side flags (not wire params): `--file` string — JSON file containing an array of {"command": ..., "params": {...}}
 
 ## logs (2 ops)
 
@@ -550,6 +556,5 @@ Animations named in --rows are rebuilt in place (idempotent); others are untouch
 `clear_logs` · 8s · --clear-debugger-errors bool (default "false")
 
 ### `logs read` — Read plugin / game / editor / combined log buffers
-`get_logs` · 8s · --count int (default "50"), --offset int (default "0"), --source string (default "plugin"), --since-run-id string, --since-cursor int, --include-details bool (default "false"), --level string (`error`/`warn`/`info`; `warning` accepted), --grep string (case-sensitive substring), --tail int (last N matches; overrides --count/--offset)
+`get_logs` · 8s · --count int (default "50"), --offset int (default "0"), --source string (default "plugin"), --since-run-id string, --since-cursor int, --include-details bool (default "false"), --level string, --grep string, --tail int
 Server-side filtering: `--level`/`--grep`/`--tail` filter before windowing; filtered responses add `matched_count` (post-filter, pre-window size) while `total_count` keeps the raw buffer size. Example: `logs read --source game --level error --tail 20`. Incremental editor-log reads: pass `--since-cursor <n>` and continue from the response's `next_cursor`.
-

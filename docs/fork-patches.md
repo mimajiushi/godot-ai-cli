@@ -136,6 +136,33 @@ optional, older peers ignore/absent them.
   PNG/GIF post-processing), `editor screenshot --region` (local crop),
   `image grid-detect` (local sprite-sheet grid inference).
 
+## 9. Machine-regenerable docs surface (beta.10)
+
+CLI-only (no plugin change). Makes the skill's `references/commands.md` a
+generated artifact so a CLI update can never silently drift from the docs:
+
+- `internal/ops` — `OpSpec` gains `CLIFlags` (CLI-side-only flags declared
+  in the op table instead of hardcoded `cmd.Flags()` blocks in
+  `internal/cli/ops.go`) and `DocNote` (catalog-only prose: worked examples,
+  usage constraints; not part of `-h`). Cobra registration, `commands
+  --json`, and `commands --format md` all read the same table.
+- `internal/cli/commands.go` — `commands --json` adds `cli_flags` (flag,
+  kind, default, usage — always an array) and `response` per op; new
+  `--format text|json|md` flag (`--json` kept as a shorthand; contradictory
+  combos are a `USAGE_ERROR`).
+- `internal/cli/commands_md.go` — NEW: `--format md` emits the complete
+  op-catalog markdown (preamble constants + mechanically derived long-ops /
+  CLI-extras bullets + per-op entries with CLI-side flag lines, Response
+  notes, and DocNotes). The committed `references/commands.md` is a
+  byte-identical copy of this output; the workspace doc-coverage gate diffs
+  them, so prose edits go into the generator constants / op table, never
+  into the generated file.
+- `internal/update` — a successful `update` diffs the old binary's op table
+  against the new binary's `commands --json` and adds a `docs_hint` field
+  (`ops_added` / `ops_removed` + regeneration instructions) to the result
+  when the surface changed; an unqueryable new binary still yields the hint
+  with `ops_diff_error`. Version bumps without op changes stay silent.
+
 ## v3.2.5 sync notes
 
 The vendored base was a post-v3.2.4 upstream snapshot that already carried

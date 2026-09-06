@@ -182,6 +182,27 @@ func TestFindCompatibleDaemon(t *testing.T) {
 	}
 }
 
+// TestFindCompatibleDaemonPrefersExactMatch: with both a patch-older
+// compatible daemon and an exact-match daemon healthy, the hint must name
+// the exact match even when the older one is enumerated first — pointing
+// the user at a drifted daemon just re-arms the stale warnings.
+func TestFindCompatibleDaemonPrefersExactMatch(t *testing.T) {
+	dir := stubCacheDir(t)
+	older := startRecordedDaemon(t, dir, "3.2.8")
+	exact := startRecordedDaemon(t, dir, "3.2.9")
+	if older.HTTPPort() > exact.HTTPPort() {
+		t.Skipf("enumeration order is port-ascending; older (%d) must sort before exact (%d)", older.HTTPPort(), exact.HTTPPort())
+	}
+
+	alt, ok := findCompatibleDaemon(9999, "3.2.9")
+	if !ok {
+		t.Fatal("no compatible daemon found")
+	}
+	if alt["http_port"] != exact.HTTPPort() || alt["version"] != "3.2.9" {
+		t.Errorf("must prefer the exact 3.2.9 match over the 3.2.8 drift: alt = %v", alt)
+	}
+}
+
 // TestShutdownDaemonKeepEditors: the --upgrade-daemon teardown shuts the
 // old daemon down, reports the connected editor count, and never touches
 // the (mock) editor process — the plugin socket simply drops.

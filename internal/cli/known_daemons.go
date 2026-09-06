@@ -139,10 +139,13 @@ func semverCompatible(a, b string) bool {
 }
 
 // findCompatibleDaemon scans every known daemon except exceptPort and
-// returns the first HEALTHY one whose version is major.minor-compatible
+// returns the best HEALTHY one whose version is major.minor-compatible
 // with requestedVersion — the daemon a DAEMON_MISMATCH error should point
-// the user at. The result carries http_port / ws_port / version.
+// the user at. An exact version match is preferred over a merely
+// compatible one (a compatible-but-older daemon still shows stale
+// warnings). The result carries http_port / ws_port / version.
 func findCompatibleDaemon(exceptPort int, requestedVersion string) (map[string]any, bool) {
+	var compatible map[string]any
 	for _, rec := range enumerateKnownDaemons() {
 		if rec.HTTPPort == exceptPort {
 			continue
@@ -151,21 +154,33 @@ func findCompatibleDaemon(exceptPort int, requestedVersion string) (map[string]a
 		if !ok || !semverCompatible(version, requestedVersion) {
 			continue
 		}
-		wsPort := rec.WSPort
-		if status, ok := probeKnownDaemonGET(rec.HTTPPort, "/godot-ai/status"); ok {
-			// The live ws_port beats the record's (a stale pid file may
-			// predate a restart on other ports).
-			if n, ok := status["ws_port"].(float64); ok && n > 0 {
-				wsPort = int(n)
-			}
-		}
-		return map[string]any{
+		candidate := map[string]any{
 			"http_port": rec.HTTPPort,
-			"ws_port":   wsPort,
+			"ws_port":   knownDaemonWSPort(rec),
 			"version":   version,
-		}, true
+		}
+		if version == requestedVersion {
+			return candidate, true
+		}
+		if compatible == nil {
+			compatible = candidate
+		}
+	}
+	if compatible != nil {
+		return compatible, true
 	}
 	return nil, false
+}
+
+// knownDaemonWSPort resolves a daemon record's ws_port, preferring the live
+// status endpoint (a stale pid file may predate a restart on other ports).
+func knownDaemonWSPort(rec knownDaemonRecord) int {
+	if status, ok := probeKnownDaemonGET(rec.HTTPPort, "/godot-ai/status"); ok {
+		if n, ok := status["ws_port"].(float64); ok && n > 0 {
+			return int(n)
+		}
+	}
+	return rec.WSPort
 }
 
 // findProjectOnOtherDaemons is launch's double-open guard: it scans every

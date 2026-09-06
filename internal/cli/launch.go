@@ -248,12 +248,29 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		// Adopted or freshly spawned: an adopted daemon may carry a
 		// patch-level version drift (accepted by the major.minor adoption
 		// gate). Surface the stale hint instead of letting the version skew
-		// pass silently.
+		// pass silently — or, with --upgrade-daemon, actually swap the drifted
+		// daemon for the bundled build (same keep-editors flow as the
+		// DAEMON_MISMATCH branch above).
 		if running, ok := probeDaemonHealth(opts.httpPort); ok && running != "" &&
 			running != pluginmeta.PluginVersion() && semverCompatible(running, pluginmeta.PluginVersion()) {
-			warnings = append(warnings, fmt.Sprintf(
-				"adopted daemon runs version %s (this CLI bundles %s) — major.minor compatible, but the daemon keeps its OLD code; relaunch with --upgrade-daemon to switch it to the bundled build",
-				running, pluginmeta.PluginVersion()))
+			if opts.upgradeDaemon {
+				editors, uerr := shutdownDaemonKeepEditors(opts.httpPort)
+				if uerr != nil {
+					return jsonError(cmd, "DAEMON_UPGRADE_FAILED", uerr.Error(),
+						map[string]any{"http_port": opts.httpPort, "retryable": true})
+				}
+				warnings = append(warnings, fmt.Sprintf(
+					"old daemon (version %s) on http port %d shut down; %d editor(s) kept running — major.minor-compatible plugins reconnect to the new daemon automatically, incompatible ones need `godot-ai-cli plugin install --project <dir>` plus an editor restart",
+					running, opts.httpPort, editors))
+				if _, err := daemonctl.EnsureRunning(ctx, cfg); err != nil {
+					return jsonError(cmd, "DAEMON_START_FAILED",
+						fmt.Sprintf("old daemon stopped, but the new daemon did not come up: %v", err), nil)
+				}
+			} else {
+				warnings = append(warnings, fmt.Sprintf(
+					"adopted daemon runs version %s (this CLI bundles %s) — major.minor compatible, but the daemon keeps its OLD code; relaunch with --upgrade-daemon to switch it to the bundled build",
+					running, pluginmeta.PluginVersion()))
+			}
 		}
 	}
 
@@ -371,10 +388,18 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	// Reusing a session whose plugin drifted at patch level (accepted by
 	// the major.minor handshake gate) must surface the same stale hint
 	// status shows — the reused editor keeps running its OLD plugin code
-	// even after `plugin install` aligned the files on disk.
+	// even after `plugin install` aligned the files on disk. The stale flag
+	// is relative to the DAEMON's bundled version, so name that version as
+	// the align target (falling back to this CLI's when the probe fails) —
+	// passing the CLI's own bundled version renders nonsense like
+	// "plugin v3.2.9 ≠ bundled v3.2.9" when the daemon is an older build.
 	if session["plugin_stale"] == true {
+		daemonVersion := pluginmeta.PluginVersion()
+		if running, ok := probeDaemonHealth(opts.httpPort); ok && running != "" {
+			daemonVersion = running
+		}
 		warnings = append(warnings,
-			pluginStaleNote(fmt.Sprint(session["plugin_version"]), pluginmeta.PluginVersion()))
+			pluginStaleNote(fmt.Sprint(session["plugin_version"]), daemonVersion))
 	}
 
 	if warnings == nil {

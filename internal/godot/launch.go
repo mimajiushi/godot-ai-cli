@@ -19,6 +19,18 @@ type LaunchOptions struct {
 	ExtraArgs []string
 }
 
+// editorEnv builds the editor child-process environment: the inherited
+// environment plus GODOT_AI_CLI_LAUNCHED=1 so the plugin can tag its
+// handshake as CLI-spawned (launched_by="cli"), plus the headless opt-in
+// when requested.
+func editorEnv(headless bool) []string {
+	env := append(os.Environ(), "GODOT_AI_CLI_LAUNCHED=1")
+	if headless {
+		env = append(env, "GODOT_AI_ALLOW_HEADLESS=1")
+	}
+	return env
+}
+
 // LaunchEditor starts the Godot editor DETACHED from this process: the
 // editor survives CLI exit and terminal close. It returns the child pid.
 func LaunchEditor(opts LaunchOptions) (pid int, err error) {
@@ -32,10 +44,7 @@ func LaunchEditor(opts LaunchOptions) (pid int, err error) {
 	args = append(args, opts.ExtraArgs...)
 
 	cmd := exec.Command(opts.Binary, args...)
-	cmd.Env = os.Environ()
-	if opts.Headless {
-		cmd.Env = append(cmd.Env, "GODOT_AI_ALLOW_HEADLESS=1")
-	}
+	cmd.Env = editorEnv(opts.Headless)
 	// No stdio wiring: inherited handles would keep the CLI's console (and
 	// any pipe reader) alive for the editor's whole lifetime.
 	cmd.Stdin = nil

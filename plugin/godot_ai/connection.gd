@@ -588,12 +588,25 @@ func _build_handshake() -> Dictionary:
 		"readiness": _last_readiness,
 		"editor_pid": OS.get_process_id(),
 		"server_launch_mode": ClientConfigurator.get_server_launch_mode(),
+		## godot-ai-cli fork patch: who launched this editor process. The
+		## daemon records it as the session origin.
+		"launched_by": _launched_by(OS.get_environment("GODOT_AI_CLI_LAUNCHED")),
 	}
 	## Omit rather than send "" — the server treats an ABSENT token as a
 	## compat-accepted older plugin, but a PRESENT wrong one as hostile.
 	if not auth_token.is_empty():
 		payload["auth_token"] = auth_token
 	return payload
+
+
+## godot-ai-cli fork patch: pure decision helper for the handshake's
+## `launched_by` field — "cli" only when the CLI's `launch` injected
+## GODOT_AI_CLI_LAUNCHED=1 into this editor process; a manually opened
+## editor has no such marker and reports "user". Takes the env value as a
+## parameter so tests can drive both branches without mutating the process
+## environment.
+static func _launched_by(env_value: String) -> String:
+	return "cli" if env_value == "1" else "user"
 
 
 ## Classify one raw inbound frame. Shared by the normal dispatch path

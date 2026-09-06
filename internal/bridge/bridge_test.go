@@ -132,6 +132,30 @@ func TestHandshakeAcceptAndAckVersion(t *testing.T) {
 	}
 }
 
+// TestHandshakeOrigin pins the launched_by → Origin normalization: only an
+// explicit "cli" marks the session CLI-spawned; a missing field (pre-3.2.7
+// plugin) or an unrecognized value both normalize to "user".
+func TestHandshakeOrigin(t *testing.T) {
+	s := startServer(t)
+	cli := mockplugin.Dial(t, s.Addr(), map[string]any{"launched_by": "cli"})
+	legacy := mockplugin.Dial(t, s.Addr(), nil)
+	unknown := mockplugin.Dial(t, s.Addr(), map[string]any{"launched_by": "something-else"})
+
+	origins := map[string]string{}
+	for _, sess := range s.Sessions() {
+		origins[sess.ID] = sess.Origin
+	}
+	if got := origins[cli.SessionID]; got != "cli" {
+		t.Errorf("cli session Origin = %q, want cli", got)
+	}
+	if got := origins[legacy.SessionID]; got != "user" {
+		t.Errorf("legacy session Origin = %q, want user (missing launched_by)", got)
+	}
+	if got := origins[unknown.SessionID]; got != "user" {
+		t.Errorf("unknown-provenance session Origin = %q, want user", got)
+	}
+}
+
 func TestFirstFrameDeadline(t *testing.T) {
 	s := bridge.NewServer(testVersion)
 	s.HandshakeTimeout = 150 * time.Millisecond

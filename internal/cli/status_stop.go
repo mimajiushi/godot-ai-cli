@@ -70,7 +70,7 @@ Examples:
 			if err != nil {
 				return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
 			}
-			sessions, compatWarnings := enrichSessionsCompatibility(sessionsBody["sessions"])
+			sessions, compatWarnings := enrichSessions(sessionsBody["sessions"])
 			payload := map[string]any{
 				"status": "ok",
 				"daemon": map[string]any{
@@ -95,28 +95,34 @@ Examples:
 	return cmd
 }
 
-// newStopCommand asks connected editors to quit, then shuts the daemon
-// down. It never hard-kills anything.
+// newStopCommand asks CLI-launched editors to quit, then shuts the daemon
+// down. It never hard-kills anything; user-opened editors are kept unless
+// --all is given.
 func newStopCommand() *cobra.Command {
 	var httpPort int
 	var sessionID string
+	var quitAll bool
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Stop connected Godot editors and shut down the daemon",
+		Short: "Stop CLI-launched Godot editors and shut down the daemon",
 		Long: `stop performs a best-effort graceful teardown:
 
-  1. POST quit_editor to every connected session (each pinned by id — an
-     unpinned quit would only reach the active session)
+  1. POST quit_editor to every CLI-launched session (each pinned by id —
+     an unpinned quit would only reach the active session). Editors opened
+     MANUALLY (handshake origin "user", including pre-3.2.7 plugins that
+     carry no launched_by field) are kept running and reported as
+     kept_sessions; pass --all to quit every connected session like the
+     pre-3.2.7 behavior
   2. POST the daemon's shutdown endpoint
   3. Wait briefly for the daemon to exit
 
-With --session <id> it instead quits ONLY that editor session: the daemon
-and every other project's session keep running (useful when several
-projects share one daemon). The EditorSettings restore and the daemon
-port record stay with the full form. The result is "session_stopped" once
-the session actually leaves the daemon; when the editor stays connected
-(e.g. an unsaved-changes dialog blocks the quit) it is honestly reported
-as "quit_requested" with a warning instead.
+With --session <id> it instead quits ONLY that editor session (regardless
+of origin): the daemon and every other project's session keep running
+(useful when several projects share one daemon). The EditorSettings restore
+and the daemon port record stay with the full form. The result is
+"session_stopped" once the session actually leaves the daemon; when the
+editor stays connected (e.g. an unsaved-changes dialog blocks the quit) it
+is honestly reported as "quit_requested" with a warning instead.
 
 Port resolution matches status: --http-port flag > port recorded by the
 last launch/serve > default 8000 (the default is retried when the recorded
@@ -131,6 +137,7 @@ intentional.)
 
 Examples:
   godot-ai-cli stop
+  godot-ai-cli stop --all
   godot-ai-cli stop --http-port 9000
   godot-ai-cli stop --session my-project@1fad`,
 		Args: cobra.NoArgs,
@@ -177,8 +184,12 @@ Examples:
 
 			// Capture editor pids BEFORE quitting so we can sequence the
 			// settings restore after the editor's exit-time settings write.
+			// Kept (user-origin) editors count too: their exit-time write can
+			// clobber the restore, so the backup veto below must see them.
 			var editorPIDs []int
 			var sessionIDs []string
+			var quitSessions []map[string]any
+			var keptSessions []map[string]any
 			if sessionsBody, err := getDaemonJSON(port, "/godot-ai/cli/sessions"); err == nil {
 				if list, ok := sessionsBody["sessions"].([]any); ok {
 					for _, entry := range list {
@@ -186,8 +197,16 @@ Examples:
 							if pid, ok := sess["editor_pid"].(float64); ok && pid > 0 {
 								editorPIDs = append(editorPIDs, int(pid))
 							}
-							if sid, ok := sess["session_id"].(string); ok && sid != "" {
+							sid, _ := sess["session_id"].(string)
+							if sid == "" {
+								continue
+							}
+							origin := sessionOrigin(sess)
+							if quitAll || origin == "cli" {
 								sessionIDs = append(sessionIDs, sid)
+								quitSessions = append(quitSessions, describeSession(sess, origin))
+							} else {
+								keptSessions = append(keptSessions, describeSession(sess, origin))
 							}
 						}
 					}
@@ -199,9 +218,11 @@ Examples:
 			// session_id is given, so quitting takes one post per session —
 			// otherwise every non-active editor would be orphaned: still
 			// running, but disconnected from the now-dead daemon.
-			if len(sessionIDs) == 0 {
-				// Session list unreadable: fall back to one unpinned quit
-				// (reaches the active session) rather than quitting nothing.
+			if len(sessionIDs) == 0 && quitAll {
+				// --all with an unreadable/empty session list: fall back to
+				// one unpinned quit (reaches the active session) rather than
+				// quitting nothing. The default form has no such fallback —
+				// an unknown provenance must never be auto-quit.
 				sessionIDs = []string{""}
 			}
 			for _, sid := range sessionIDs {
@@ -239,6 +260,12 @@ Examples:
 
 			var warnings []string
 			payload := map[string]any{"status": "stopped"}
+			if len(quitSessions) > 0 {
+				payload["quit_sessions"] = quitSessions
+			}
+			if len(keptSessions) > 0 {
+				payload["kept_sessions"] = keptSessions
+			}
 
 			// Restore the global EditorSettings launch overrode. The editor
 			// rewrites EditorSettings on exit, so wait for the process to
@@ -285,6 +312,7 @@ Examples:
 	}
 	cmd.Flags().IntVar(&httpPort, "http-port", daemon.DefaultHTTPPort, "daemon HTTP port")
 	cmd.Flags().StringVar(&sessionID, "session", "", "quit only this editor session (daemon keeps running)")
+	cmd.Flags().BoolVar(&quitAll, "all", false, "quit every connected editor session, including user-opened editors (the pre-3.2.7 behavior)")
 	return cmd
 }
 
@@ -374,6 +402,27 @@ func findSessionID(raw any, sessionID string) map[string]any {
 	return nil
 }
 
+// sessionOrigin normalizes a session entry's daemon-reported origin: only
+// "cli" is trusted; a missing (old daemon, or a pre-3.2.7 plugin handshake)
+// or unrecognized value means "user" — stop never auto-quits a session it
+// cannot identify as CLI-spawned.
+func sessionOrigin(sess map[string]any) string {
+	if origin, _ := sess["origin"].(string); origin == "cli" {
+		return "cli"
+	}
+	return "user"
+}
+
+// describeSession renders one session entry for the stop payload's
+// quit_sessions / kept_sessions report arrays.
+func describeSession(sess map[string]any, origin string) map[string]any {
+	return map[string]any{
+		"session_id":   sess["session_id"],
+		"project_path": sess["project_path"],
+		"origin":       origin,
+	}
+}
+
 // errExit marks a failure whose JSON payload was already printed to stdout
 // (e.g. the daemon's own error envelope); execute exits 1 without emitting
 // a second envelope.
@@ -391,11 +440,14 @@ type reportedError struct{ err error }
 func (e *reportedError) Error() string { return e.err.Error() }
 func (e *reportedError) Unwrap() error { return e.err }
 
-// aliveEditorPIDs returns the subset of pids still running.
+// aliveEditorPIDs returns the subset of pids still running AS Godot
+// editors. Liveness alone is not enough: a recycled pid (Windows reassigns
+// them freely — a quit editor's pid was observed on svchost) must not veto
+// the settings restore, so each pid is verified by executable image.
 func aliveEditorPIDs(pids []int) []int {
 	var alive []int
 	for _, pid := range pids {
-		if godot.IsProcessRunning(pid) {
+		if godot.IsGodotEditorProcess(pid) {
 			alive = append(alive, pid)
 		}
 	}
@@ -414,12 +466,13 @@ func editorAliveWarnings(httpPort int, alive []int) []string {
 	return warnings
 }
 
-// enrichSessionsCompatibility annotates every session entry with
-// godot_compatible and — for unsupported or untestable editors — a
-// warning, so an incompatible editor never fails silently (the daemon
-// accepts sessions from any Godot version). It also rolls the warnings up
-// for the top-level warnings field.
-func enrichSessionsCompatibility(raw any) (any, []string) {
+// enrichSessions annotates every session entry with godot_compatible and —
+// for unsupported or untestable editors — a warning, so an incompatible
+// editor never fails silently (the daemon accepts sessions from any Godot
+// version). It also normalizes the daemon-reported origin and tags
+// user-opened editors with a note explaining that a full stop keeps them.
+// The compat warnings roll up for the top-level warnings field.
+func enrichSessions(raw any) (any, []string) {
 	list, ok := raw.([]any)
 	if !ok {
 		return raw, nil
@@ -437,6 +490,11 @@ func enrichSessionsCompatibility(raw any) (any, []string) {
 		if warning != "" {
 			sess["warning"] = warning
 			warnings = append(warnings, warning)
+		}
+		origin := sessionOrigin(sess)
+		sess["origin"] = origin
+		if origin == "user" {
+			sess["note"] = "user-opened editor — stop keeps it (use `stop --session <id>` or `stop --all` to quit it)"
 		}
 		out = append(out, sess)
 	}

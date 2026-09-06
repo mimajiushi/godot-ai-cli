@@ -108,6 +108,66 @@ func TestStatusReportsGodotCompatibility(t *testing.T) {
 	}
 }
 
+// TestStatusReportsOrigin: status surfaces each session's provenance — the
+// daemon-reported origin plus, for user-opened editors (including legacy
+// plugins without launched_by), a note that a full stop keeps them.
+func TestStatusReportsOrigin(t *testing.T) {
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "test"})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = d.Shutdown(ctx)
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	mockplugin.Dial(t, addr, map[string]any{"session_id": "cli@0001", "launched_by": "cli"})
+	mockplugin.Dial(t, addr, map[string]any{"session_id": "user@0002", "launched_by": "user"})
+	mockplugin.Dial(t, addr, map[string]any{"session_id": "legacy@0003"}) // no launched_by
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v\n%s", err, buf.String())
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	sessions, ok := out["sessions"].([]any)
+	if !ok || len(sessions) != 3 {
+		t.Fatalf("sessions = %v", out["sessions"])
+	}
+	byID := make(map[string]map[string]any, len(sessions))
+	for _, entry := range sessions {
+		s := entry.(map[string]any)
+		byID[s["session_id"].(string)] = s
+	}
+
+	cli := byID["cli@0001"]
+	if cli["origin"] != "cli" {
+		t.Errorf("cli session origin = %v, want cli", cli["origin"])
+	}
+	if _, noted := cli["note"]; noted {
+		t.Errorf("cli session unexpectedly noted: %v", cli["note"])
+	}
+	for _, id := range []string{"user@0002", "legacy@0003"} {
+		s := byID[id]
+		if s["origin"] != "user" {
+			t.Errorf("%s origin = %v, want user", id, s["origin"])
+		}
+		if note, _ := s["note"].(string); !strings.Contains(note, "stop keeps it") {
+			t.Errorf("%s note = %v, want a stop-keeps-it hint", id, s["note"])
+		}
+	}
+}
+
 // TestStatusNoWarningsWithoutSessions: without sessions the top-level
 // warnings field stays absent.
 func TestStatusNoWarningsWithoutSessions(t *testing.T) {

@@ -156,6 +156,32 @@ func TestSessionsEmpty(t *testing.T) {
 	}
 }
 
+// TestSessionsExposeOrigin: the sessions endpoint reports each session's
+// provenance — "cli" for a handshake with launched_by="cli", "user" for a
+// legacy handshake without the field.
+func TestSessionsExposeOrigin(t *testing.T) {
+	d := startDaemon(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	cli := mockplugin.Dial(t, addr, map[string]any{"launched_by": "cli"})
+	legacy := mockplugin.Dial(t, addr, nil)
+
+	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
+	if code != http.StatusOK {
+		t.Fatalf("status code = %d", code)
+	}
+	origins := map[string]any{}
+	for _, entry := range body["sessions"].([]any) {
+		s := entry.(map[string]any)
+		origins[s["session_id"].(string)] = s["origin"]
+	}
+	if got := origins[cli.SessionID]; got != "cli" {
+		t.Errorf("cli session origin = %v, want cli", got)
+	}
+	if got := origins[legacy.SessionID]; got != "user" {
+		t.Errorf("legacy session origin = %v, want user", got)
+	}
+}
+
 // postRaw performs a POST with an explicit Content-Type and decodes the
 // JSON response.
 func postRaw(t *testing.T, url, contentType, body string) (int, map[string]any) {

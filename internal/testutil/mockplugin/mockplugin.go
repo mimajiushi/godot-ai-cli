@@ -58,6 +58,10 @@ type Plugin struct {
 // Dial connects to ws://<addr>, sends the handshake, and reads the
 // handshake_ack. Passing nil handshake fields yields sane defaults with a
 // unique session id. It fails the test on any error.
+//
+// The defaults deliberately carry NO launched_by field (the pre-3.2.7
+// plugin shape, origin "user"); pass "launched_by": "cli" in the handshake
+// overlay to simulate a CLI-spawned editor.
 func Dial(t *testing.T, addr string, handshake map[string]any) *Plugin {
 	t.Helper()
 

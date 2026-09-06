@@ -21,6 +21,12 @@ type Handshake struct {
 	ProtocolVersion int    `json:"protocol_version"`
 	Readiness       string `json:"readiness"`
 	EditorPID       int    `json:"editor_pid"`
+	// LaunchedBy tags the editor's provenance: "cli" when the CLI spawned
+	// the editor process (launch exports GODOT_AI_CLI_LAUNCHED=1), "user"
+	// otherwise. Plugins before 3.2.7 omit the field entirely; the server
+	// normalizes a missing or unrecognized value to "user" — conservative:
+	// what we cannot identify we never auto-quit.
+	LaunchedBy string `json:"launched_by"`
 	// ServerLaunchMode and AuthToken are accepted for wire compatibility;
 	// the token is ignored (loopback-only trust boundary, compat gate).
 	ServerLaunchMode string `json:"server_launch_mode"`

@@ -42,10 +42,21 @@ func startTestDaemon(t *testing.T) *daemon.Daemon {
 // dialOkPlugin connects a mock plugin that answers every command with ok.
 func dialOkPlugin(t *testing.T, d *daemon.Daemon, sessionID, projectPath string) *mockplugin.Plugin {
 	t.Helper()
-	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	return dialOriginPlugin(t, d, sessionID, projectPath, "")
+}
+
+// dialOriginPlugin is dialOkPlugin with an explicit launched_by handshake
+// field ("" sends none — the pre-3.2.7 plugin shape, origin "user").
+func dialOriginPlugin(t *testing.T, d *daemon.Daemon, sessionID, projectPath, launchedBy string) *mockplugin.Plugin {
+	t.Helper()
+	handshake := map[string]any{
 		"session_id":   sessionID,
 		"project_path": projectPath,
-	})
+	}
+	if launchedBy != "" {
+		handshake["launched_by"] = launchedBy
+	}
+	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), handshake)
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{}}
 	})
@@ -67,15 +78,15 @@ func runStop(t *testing.T, args ...string) (map[string]any, error) {
 	return out, err
 }
 
-// TestStopQuitsEverySession: with several projects sharing one daemon, a
-// full stop must quit EVERY session's editor — an unpinned quit only
-// reaches the active session and would orphan the rest (disconnected
-// editors left running against a dead daemon).
+// TestStopQuitsEverySession: with several CLI-launched projects sharing one
+// daemon, a full stop must quit EVERY one of their sessions — an unpinned
+// quit only reaches the active session and would orphan the rest
+// (disconnected editors left running against a dead daemon).
 func TestStopQuitsEverySession(t *testing.T) {
 	isolateCacheDir(t)
 	d := startTestDaemon(t)
-	p1 := dialOkPlugin(t, d, "one@0001", "C:/p/one/")
-	p2 := dialOkPlugin(t, d, "two@0002", "C:/p/two/")
+	p1 := dialOriginPlugin(t, d, "one@0001", "C:/p/one/", "cli")
+	p2 := dialOriginPlugin(t, d, "two@0002", "C:/p/two/", "cli")
 	port := strconv.Itoa(d.HTTPPort())
 
 	out, err := runStop(t, "--http-port", port)
@@ -91,8 +102,111 @@ func TestStopQuitsEverySession(t *testing.T) {
 	if n := p2.Count("quit_editor"); n != 1 {
 		t.Errorf("session two received quit_editor x%d, want 1 — non-active session orphaned", n)
 	}
+	if _, kept := out["kept_sessions"]; kept {
+		t.Errorf("kept_sessions present for all-cli sessions: %v", out["kept_sessions"])
+	}
+	quit, _ := out["quit_sessions"].([]any)
+	if len(quit) != 2 {
+		t.Errorf("quit_sessions = %v, want 2 entries", out["quit_sessions"])
+	}
 	if daemonReachable(d.HTTPPort()) {
 		t.Error("daemon still reachable after stop")
+	}
+}
+
+// TestStopKeepsUserSessionsByDefault: a full stop must NOT quit editors the
+// user opened manually — neither a 3.2.7+ plugin reporting origin "user"
+// nor a pre-3.2.7 plugin whose handshake carries no launched_by at all.
+// Both are reported in kept_sessions; the daemon still shuts down.
+func TestStopKeepsUserSessionsByDefault(t *testing.T) {
+	isolateCacheDir(t)
+	d := startTestDaemon(t)
+	cli := dialOriginPlugin(t, d, "cli@0001", "C:/p/cli/", "cli")
+	user := dialOriginPlugin(t, d, "user@0002", "C:/p/user/", "user")
+	legacy := dialOkPlugin(t, d, "legacy@0003", "C:/p/legacy/") // no launched_by
+	port := strconv.Itoa(d.HTTPPort())
+
+	out, err := runStop(t, "--http-port", port)
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if out["status"] != "stopped" {
+		t.Errorf("out = %v, want stopped", out)
+	}
+	if n := cli.Count("quit_editor"); n != 1 {
+		t.Errorf("cli session received quit_editor x%d, want 1", n)
+	}
+	if n := user.Count("quit_editor"); n != 0 {
+		t.Errorf("user session received quit_editor x%d, want 0 — user editors are kept", n)
+	}
+	if n := legacy.Count("quit_editor"); n != 0 {
+		t.Errorf("legacy (no launched_by) session received quit_editor x%d, want 0", n)
+	}
+
+	kept, _ := out["kept_sessions"].([]any)
+	if len(kept) != 2 {
+		t.Fatalf("kept_sessions = %v, want 2 entries", out["kept_sessions"])
+	}
+	byID := map[string]map[string]any{}
+	for _, entry := range kept {
+		s, _ := entry.(map[string]any)
+		byID[fmt.Sprint(s["session_id"])] = s
+	}
+	for _, id := range []string{"user@0002", "legacy@0003"} {
+		s, ok := byID[id]
+		if !ok {
+			t.Errorf("kept_sessions missing %s: %v", id, kept)
+			continue
+		}
+		if s["origin"] != "user" {
+			t.Errorf("kept %s origin = %v, want user", id, s["origin"])
+		}
+		if s["project_path"] == "" {
+			t.Errorf("kept %s missing project_path: %v", id, s)
+		}
+	}
+	quit, _ := out["quit_sessions"].([]any)
+	if len(quit) != 1 {
+		t.Fatalf("quit_sessions = %v, want 1 entry", out["quit_sessions"])
+	}
+	if s, _ := quit[0].(map[string]any); s["session_id"] != "cli@0001" || s["origin"] != "cli" {
+		t.Errorf("quit_sessions[0] = %v, want cli@0001/cli", s)
+	}
+	if daemonReachable(d.HTTPPort()) {
+		t.Error("daemon still reachable after stop")
+	}
+}
+
+// TestStopAllQuitsEverySession: --all restores the pre-3.2.7 behavior —
+// every connected session gets the pinned quit, user-opened ones included.
+func TestStopAllQuitsEverySession(t *testing.T) {
+	isolateCacheDir(t)
+	d := startTestDaemon(t)
+	p1 := dialOriginPlugin(t, d, "one@0001", "C:/p/one/", "cli")
+	p2 := dialOriginPlugin(t, d, "two@0002", "C:/p/two/", "user")
+	p3 := dialOkPlugin(t, d, "three@0003", "C:/p/three/") // no launched_by
+	port := strconv.Itoa(d.HTTPPort())
+
+	out, err := runStop(t, "--http-port", port, "--all")
+	if err != nil {
+		t.Fatalf("stop --all: %v", err)
+	}
+	if out["status"] != "stopped" {
+		t.Errorf("out = %v, want stopped", out)
+	}
+	for name, p := range map[string]*mockplugin.Plugin{"one": p1, "two": p2, "three": p3} {
+		if n := p.Count("quit_editor"); n != 1 {
+			t.Errorf("session %s received quit_editor x%d, want 1 under --all", name, n)
+		}
+	}
+	if _, kept := out["kept_sessions"]; kept {
+		t.Errorf("kept_sessions present under --all: %v", out["kept_sessions"])
+	}
+	if quit, _ := out["quit_sessions"].([]any); len(quit) != 3 {
+		t.Errorf("quit_sessions = %v, want 3 entries", out["quit_sessions"])
+	}
+	if daemonReachable(d.HTTPPort()) {
+		t.Error("daemon still reachable after stop --all")
 	}
 }
 

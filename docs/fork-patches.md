@@ -21,16 +21,20 @@ The original public interface is kept as no-ops so callers (`plugin.gd`,
 `_drain_editor_setting_dict` is unchanged because it only touches local
 EditorSettings. Rationale: the fork's hard rule is *no telemetry, ever*.
 
-## 2. `utils/server_lifecycle.gd` — spawn early-return (~line 968)
+## 2. `utils/server_lifecycle.gd` — godot-ai-cli daemon spawn (~line 968)
 
 Upstream spawns its own Python MCP server when the port is free. The fork
-returns early, gated on `ForkConfig.external_daemon_mode()`: the Go daemon
-owns the WS/HTTP endpoints, and the plugin's connection node already retries
-the WebSocket with capped backoff, so a daemon that appears later is picked
-up without any spawn. The adoption branch above the patch stays intact — a
-running godot-ai-cli daemon is adopted exactly like an upstream compatible
-server. The gate is a function call so the analyzer does not flag the kept,
-dormant spawn sequence below as unreachable.
+instead prefers the godot-ai-cli Go daemon: the startup walk resolves the
+binary via `utils/cli_daemon.gd` (see §11) and, when one is found, spawns
+`godot-ai-cli serve --http-port <port> --ws-port <ws_port>` in place of the
+Python server (`_spawn_cli_daemon`, with its own `godot-ai-cli fork patch`
+comment). A plugin-spawned daemon is adopted by a later CLI launch
+(`EnsureRunning` matches version/ws_port), so a manually opened editor
+session stays reusable — a spawned Python server would collide with that
+launch as `FOREIGN_SERVER`. Only when no godot-ai-cli binary can be located
+does the walk fall back to the upstream Python spawn below (unchanged). The
+adoption branch above the patch stays intact — a running godot-ai-cli daemon
+is adopted exactly like an upstream compatible server.
 
 ## 3. `mcp_dock.gd` — UI changes and client-config gating
 
@@ -181,6 +185,55 @@ generated artifact so a CLI update can never silently drift from the docs:
   (`ops_added` / `ops_removed` + regeneration instructions) to the result
   when the surface changed; an unqueryable new binary still yields the hint
   with `ops_diff_error`. Version bumps without op changes stay silent.
+
+## 11. Session origin tracking and stop protection (beta.13)
+
+`plugin.cfg` version 3.2.6 → 3.2.7. Lets the CLI tell editors it spawned
+apart from ones the user opened manually, so a full `stop` no longer quits
+the user's own editor out from under them.
+
+- Plugin side: the handshake gains `launched_by` — `"cli"` when the editor
+  process carries the `GODOT_AI_CLI_LAUNCHED=1` environment marker (the
+  CLI's `launch` exports it on the editor spawn), `"user"` otherwise.
+- Daemon side (`internal/bridge`, `internal/daemon`): the handshake
+  envelope accepts the field; the session registry normalizes a missing
+  (pre-3.2.7 plugin) or unrecognized value to `"user"` — conservative:
+  unknown provenance is never treated as CLI-spawned — and
+  `/godot-ai/cli/sessions` exposes `origin` per session.
+- CLI side (`internal/cli/status_stop.go`, `internal/godot/launch.go`):
+  `launch` injects `GODOT_AI_CLI_LAUNCHED=1` into the editor child env;
+  `status` annotates user-origin sessions with a human-readable note; a
+  full `stop` now sends `quit_editor` ONLY to `origin == "cli"` sessions,
+  keeps the rest, and reports both groups as `quit_sessions` /
+  `kept_sessions` in the payload. `stop --all` restores the old
+  quit-everything behavior; `stop --session <id>` is unchanged (an explicit
+  kill regardless of origin). The daemon still shuts down either way — the
+  plugin's 60s reconnect adopts the next daemon, as before.
+- Plugin spawn path (`utils/cli_daemon.gd` — NEW file, plus the §2 patch in
+  `utils/server_lifecycle.gd`): when the startup walk finds the backend port
+  free, the fork now spawns the Go daemon itself instead of just waiting for
+  one. Binary lookup is two-tier, in order — `GODOT_AI_CLI_BIN` (explicit
+  override, honored only when it names an existing file so a stale value can
+  never shadow a working PATH), then a PATH scan for the platform exe name
+  (`godot-ai-cli.exe` on Windows, `godot-ai-cli` elsewhere; plain
+  `FileAccess` checks, no subprocess). The spawn is
+  `godot-ai-cli serve --http-port <port> --ws-port <ws_port>` via
+  `OS.create_process`, and only when no binary is found does the walk fall
+  back to the upstream Python spawn. `_spawn_cli_daemon` intentionally
+  diverges from the Python spawn in three places, all because the daemon is
+  not the Python server:
+  - **No env staging** — `GODOT_AI_OWNER_PID` / `GODOT_AI_PLUGIN_SPAWNED` /
+    `GODOT_AI_NO_IDLE_EXIT` / `GODOT_AI_WS_TOKEN` are Python-server envs the
+    daemon does not read, so the whole #691 mutation window is skipped.
+  - **The WS auth token is scrubbed, not regenerated** — the daemon accepts
+    token-less handshakes, and a stale staged token would 4003-loop (the
+    same reason external adoption drops it). Scrubbed BEFORE the
+    managed-server record write, which persists the token.
+  - **The plugin writes the pid-file itself** with the spawned PID — the
+    daemon has no `--pid-file` flag, and without a file the watch would end
+    its cold window with the "never published a pid-file" warning on every
+    healthy spawn (and a fast-exited daemon could misroute into the
+    `uvx --refresh` retry, which keys on an absent pid-file).
 
 ## v3.2.5 sync notes
 

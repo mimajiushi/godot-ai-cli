@@ -24,6 +24,7 @@ const PortResolver := preload("res://addons/godot_ai/utils/port_resolver.gd")
 const WindowsPortReservation := preload("res://addons/godot_ai/utils/windows_port_reservation.gd")
 const McpServerStateScript := preload("res://addons/godot_ai/utils/mcp_server_state.gd")
 const ForkConfig := preload("res://addons/godot_ai/utils/fork_config.gd")
+const CliDaemon := preload("res://addons/godot_ai/utils/cli_daemon.gd")
 const McpStartupPathScript := preload("res://addons/godot_ai/utils/mcp_startup_path.gd")
 const McpAdoptionLabelScript := preload("res://addons/godot_ai/utils/mcp_adoption_label.gd")
 const McpServerVersionCheckScript := preload("res://addons/godot_ai/utils/server_version_check.gd")
@@ -965,18 +966,17 @@ func _start_server_impl(async_gen: int) -> void:
 	_host._set_resolved_ws_port(_host._resolve_ws_port())
 	ws_port = _host._resolved_ws_port
 
-	## ---- godot-ai-cli fork patch (external-daemon mode) ----------------
-	## Upstream spawns its own Python MCP server here when the port is
-	## free. The fork never spawns anything: the godot-ai-cli Go daemon
-	## owns the WS/HTTP endpoints, and the plugin's connection node is
-	## already retrying the WebSocket with capped backoff, so a daemon
-	## that appears later is picked up without any spawn. Returning here
-	## keeps the adoption branch above intact (a running CLI daemon is
-	## adopted exactly like an upstream compatible server). Gated on a
-	## function call so the analyzer does not flag the (kept, dormant)
-	## spawn sequence below as unreachable.
-	if ForkConfig.external_daemon_mode():
-		print("MCP | godot-ai-cli fork: external-daemon mode — waiting for godot-ai-cli on ws://127.0.0.1:%d (no local server will be spawned)" % ws_port)
+	## ---- godot-ai-cli fork patch (godot-ai-cli daemon first) ------------
+	## Upstream spawns its own Python MCP server here when the port is free.
+	## The fork prefers the godot-ai-cli Go daemon: a plugin-spawned
+	## `godot-ai-cli serve` is adopted by a later CLI launch (EnsureRunning
+	## matches version/ws_port), so a manually opened editor session stays
+	## reusable — a spawned Python server would collide with that launch as
+	## FOREIGN_SERVER. Only when no godot-ai-cli binary can be located does
+	## the upstream Python spawn below run (unchanged).
+	var cli_bin := CliDaemon.find_bin()
+	if not cli_bin.is_empty():
+		_spawn_cli_daemon(cli_bin, port, ws_port, current_version)
 		return
 
 	_host._startup_trace_count("server_command_discovery")
@@ -1130,6 +1130,70 @@ func _start_server_impl(async_gen: int) -> void:
 		set_terminal_diagnosis(McpServerStateScript.CRASHED)
 		_startup_path = McpStartupPathScript.CRASHED
 		push_warning("MCP | failed to start server")
+
+
+## godot-ai-cli fork patch: spawn the Go daemon (`godot-ai-cli serve`) in
+## place of the upstream Python server, then do the same readiness
+## wait/marking the Python spawn below does — SPAWNING state, managed-server
+## record, 1 Hz watch. Deltas, all because the daemon is not the Python
+## server:
+##   - no env staging: GODOT_AI_OWNER_PID / GODOT_AI_PLUGIN_SPAWNED /
+##     GODOT_AI_NO_IDLE_EXIT / GODOT_AI_WS_TOKEN are Python-server envs the
+##     daemon does not read, so the whole #691 mutation window is skipped;
+##   - the WS auth token is scrubbed, not regenerated: the daemon accepts
+##     token-less handshakes, and a stale staged token would 4003-loop (the
+##     same reason external adoption drops it). Scrubbed BEFORE the record
+##     write, which persists the token;
+##   - the plugin writes the pid-file itself with the spawned PID: the
+##     daemon has no --pid-file flag, and without a file the watch would
+##     end its cold window with the "never published a pid-file" warning on
+##     every healthy spawn (and a fast-exited daemon could misroute into
+##     the uvx --refresh retry, which keys on an absent pid-file).
+func _spawn_cli_daemon(cli_bin: String, port: int, ws_port: int, current_version: String) -> void:
+	## Wipe any stale pid-file so a failed launch can't leave last
+	## session's PID for `_find_managed_pid` to read (same as Python).
+	_host._clear_pid_file()
+
+	## Same Windows port-reservation guard as the Python spawn below
+	## (#146): the daemon's bind fails just as silently inside a Hyper-V /
+	## WSL2 / Docker exclusion range.
+	if WindowsPortReservation.is_port_excluded(port):
+		_host._server_started_this_session = true
+		set_terminal_diagnosis(McpServerStateScript.PORT_EXCLUDED)
+		_startup_path = McpStartupPathScript.RESERVED
+		push_warning("MCP | port %d is reserved by Windows (Hyper-V / WSL2 / Docker)" % port)
+		return
+
+	_server_pid = OS.create_process(cli_bin, [
+		"serve", "--http-port", str(port), "--ws-port", str(ws_port),
+	], false)
+	var spawned_pid := int(_server_pid)
+
+	if spawned_pid > 0:
+		_server_spawn_ms = Time.get_ticks_msec()
+		_server_exit_ms = 0
+		_server_pid_published_elapsed_ms = 0
+		_spawn_dead_since_ms = 0
+		## Never keep-alive: teardown routes on this flag, and the daemon
+		## has no keep-alive env opt-outs to honor it with.
+		_server_keep_alive = false
+		_host._server_started_this_session = true
+		transition_state(McpServerStateScript.SPAWNING)
+		_host._set_ws_auth_token("")
+		_host._write_managed_server_record(spawned_pid, current_version, _server_keep_alive)
+		var pid_file := FileAccess.open(PortResolver.SERVER_PID_FILE, FileAccess.WRITE)
+		if pid_file != null:
+			pid_file.store_string(str(spawned_pid))
+			pid_file.close()
+		_startup_path = McpStartupPathScript.SPAWNED
+		print("MCP | started godot-ai-cli daemon (PID %d, v%s): %s serve --http-port %d --ws-port %d"
+			% [spawned_pid, current_version, cli_bin, port, ws_port])
+		_host._start_server_watch()
+	else:
+		_server_status_message = ""
+		set_terminal_diagnosis(McpServerStateScript.CRASHED)
+		_startup_path = McpStartupPathScript.CRASHED
+		push_warning("MCP | failed to start godot-ai-cli daemon")
 
 
 ## Is the watched spawn PID's death still explainable as a launcher handoff

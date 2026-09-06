@@ -49,6 +49,10 @@ type Session struct {
 	PluginVersion   string
 	ProtocolVersion int
 	EditorPID       int
+	// Origin is the normalized provenance from the handshake's launched_by
+	// field: "cli" for editors the CLI spawned, "user" for everything else
+	// (including pre-3.2.7 plugins that carry no launched_by field).
+	Origin string
 
 	mu        sync.RWMutex
 	readiness string
@@ -392,6 +396,17 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	_ = c.CloseNow()
 }
 
+// normalizeOrigin maps the handshake's launched_by provenance onto the
+// session origin. Only "cli" is trusted; a missing (pre-3.2.7 plugin) or
+// unrecognized value normalizes to "user", so a session we cannot identify
+// is never mistaken for a CLI-spawned editor.
+func normalizeOrigin(launchedBy string) string {
+	if launchedBy == "cli" {
+		return "cli"
+	}
+	return "user"
+}
+
 // registerSession adds the session and connection to the registry. It
 // returns false when the session_id is already registered (duplicate).
 func (s *Server) registerSession(hs *Handshake, wc *wsConn) bool {
@@ -410,6 +425,7 @@ func (s *Server) registerSession(hs *Handshake, wc *wsConn) bool {
 		PluginVersion:   hs.PluginVersion,
 		ProtocolVersion: hs.ProtocolVersion,
 		EditorPID:       hs.EditorPID,
+		Origin:          normalizeOrigin(hs.LaunchedBy),
 		readiness:       hs.Readiness,
 	}
 	s.sessions[hs.SessionID] = sess

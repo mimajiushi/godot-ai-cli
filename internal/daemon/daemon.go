@@ -286,6 +286,9 @@ func (d *Daemon) handleSessions(w http.ResponseWriter, _ *http.Request) {
 			"readiness":     s.Readiness(),
 			"editor_pid":    s.EditorPID,
 			"active":        s.ID == activeID,
+			// "cli" for editors launch spawned, "user" for manually opened
+			// ones (and pre-3.2.7 plugins) — stop protects the latter.
+			"origin": s.Origin,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})

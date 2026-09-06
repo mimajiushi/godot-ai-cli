@@ -10,9 +10,14 @@
 extends RefCounted
 
 
-## Always true in the fork: the godot-ai-cli Go daemon owns the backend
-## endpoints, so the plugin must never spawn its own (Python) server —
-## neither from the startup walk nor from the dock's dev-server buttons.
+## Always true in the fork for the DOCK/dev-server surfaces: the
+## godot-ai-cli Go daemon owns the backend endpoints, so the plugin must
+## never spawn the upstream Python dev server from the dock's dev-server
+## buttons, and the dev-mode toggle / Setup section stay hidden. The
+## startup walk is no longer gated on this: since 3.2.7 it spawns the Go
+## daemon itself when a godot-ai-cli binary is found (see the marked
+## `godot-ai-cli daemon first` patch in utils/server_lifecycle.gd),
+## falling back to the upstream Python spawn only when no binary exists.
 static func external_daemon_mode() -> bool:
 	return true
 

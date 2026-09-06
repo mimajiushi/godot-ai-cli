@@ -48,6 +48,26 @@ func DownscaleNearest(img image.Image, maxEdge int) image.Image {
 	return out
 }
 
+// UpscaleNearest magnifies img by an integer factor using nearest-neighbor
+// sampling — pixel art stays blocky-crisp, which is what a zoomed inspection
+// view wants (a smoothing resample would invent colors that are not in the
+// source). factor <= 1 returns img unchanged.
+func UpscaleNearest(img image.Image, factor int) image.Image {
+	if factor <= 1 {
+		return img
+	}
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	out := image.NewRGBA(image.Rect(0, 0, w*factor, h*factor))
+	for y := 0; y < h*factor; y++ {
+		sy := b.Min.Y + y/factor
+		for x := 0; x < w*factor; x++ {
+			out.Set(x, y, img.At(b.Min.X+x/factor, sy))
+		}
+	}
+	return out
+}
+
 // EncodeGIF writes frames as an animated GIF, quantizing each frame to the
 // Plan9 palette with Floyd-Steinberg dithering (std lib only — good enough
 // for debug playback). delaysMs carries per-frame delays in milliseconds.

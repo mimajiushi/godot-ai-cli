@@ -197,6 +197,12 @@ func _on_debug_message(message: String, data: Array) -> bool:
 		"game_command":
 			_handle_game_command(data)
 			return true
+		"focus":
+			## godot-ai-cli fork patch: project focus —— 把游戏窗口拉到前台。
+			## 已挂在 "mcp" 前缀 capture 下，无需额外注册 capture；break/冻结
+			## 时本消息可能不被处理（编辑器侧已在响应里如实标注）。
+			DisplayServer.window_move_to_foreground()
+			return true
 	return false
 
 
@@ -640,6 +646,14 @@ func _current_scene_root() -> Node:
 		if editor:
 			scene_root = editor.get_edited_scene_root()
 	return scene_root
+
+
+## godot-ai-cli fork patch: eval 临时节点的挂载点。优先运行场景根——eval
+## 代码贴着游戏场景执行（$NodeName 的语义与场景脚本一致，见文档示例）；
+## 场景根缺失（自定义主循环等）时退回 helper 自身，保持旧行为。
+func _eval_parent() -> Node:
+	var scene_root := _current_scene_root()
+	return scene_root if scene_root != null else self
 
 
 func _game_input_key(params: Dictionary) -> Dictionary:
@@ -1126,13 +1140,7 @@ func _handle_eval(data: Array) -> void:
 	_eval_token_counter += 1
 	var token := str(_eval_token_counter)
 	var run_fn := "_mcp_run_%s" % token
-	var script_source := (
-		"extends Node\n"
-		+ "func execute():\n"
-		+ "\treturn await %s()\n\n" % run_fn
-		+ "func %s():\n" % run_fn
-		+ _indent_eval_code(code)
-	)
+	var script_source := _build_eval_script_source(code, run_fn)
 
 	## Snapshot the logger's script-error seq BEFORE running so we only attribute
 	## errors raised by this eval. In a debug build a parse error aborts reload()
@@ -1172,7 +1180,10 @@ func _handle_eval(data: Array) -> void:
 	var temp_node := Node.new()
 	temp_node.set_script(script)
 	temp_node.process_mode = Node.PROCESS_MODE_ALWAYS
-	add_child(temp_node)
+	## godot-ai-cli fork patch: 挂到运行场景根下而不是 helper autoload 下，
+	## eval 代码才能贴着游戏场景执行（与文档示例的 $NodeName 用法一致）；
+	## 场景根缺失时退回 helper 自身。
+	_eval_parent().add_child(temp_node)
 
 	if not temp_node.has_method("execute"):
 		temp_node.queue_free()
@@ -1182,7 +1193,15 @@ func _handle_eval(data: Array) -> void:
 	## Register in-flight BEFORE running: a runtime error aborts execute() (and
 	## may unwind this function) before we could record it afterward, and the
 	## editor probe / poll loop need the entry to attribute and report the error.
-	_inflight_evals[request_id] = {"node": temp_node, "token": token, "baseline": baseline}
+	_inflight_evals[request_id] = {
+		"node": temp_node,
+		"token": token,
+		"baseline": baseline,
+		## godot-ai-cli fork patch: prints 捕获基线与开关一并记录，运行时错误/
+		## 守护错误路径回报已捕获 prints 时用。
+		"prints_baseline": prints_baseline,
+		"echo_prints": echo_prints,
+	}
 
 	## Drive execute() as a fire-and-forget coroutine that records its outcome
 	## into `holder`, then poll frames until it finishes or the deadline passes
@@ -1213,13 +1232,20 @@ func _handle_eval(data: Array) -> void:
 			return
 		_inflight_evals.erase(request_id)
 		if is_instance_valid(temp_node):
-			remove_child(temp_node)
+			## temp_node 的父节点是场景根而非 helper 自身，按实际父节点摘除。
+			var parent := temp_node.get_parent()
+			if parent != null:
+				parent.remove_child(temp_node)
+		## godot-ai-cli fork patch: 超时守护错误也尽力携带 eval 期间捕获的 prints。
+		var hung_prints: Array[String] = []
+		if echo_prints and _logger != null:
+			hung_prints = _logger.messages_since(prints_baseline)
 		_reply_eval_error(request_id,
 			("Eval exceeded %ds and was aborted — the code likely awaits "
 				+ "something that never completes (a signal that never fires, a timer on "
 				+ "a paused tree) or loops forever. Check logs_read(source='game').")
 				% int(EVAL_TIMEOUT_SEC),
-			ErrorCodes.EVAL_HUNG)
+			ErrorCodes.EVAL_HUNG, hung_prints, echo_prints)
 		return
 
 	## Clean finish.
@@ -1232,7 +1258,7 @@ func _handle_eval(data: Array) -> void:
 	var prints: Array[String] = []
 	if echo_prints and _logger != null:
 		prints = _logger.messages_since(prints_baseline)
-	_reply_eval_response(request_id, holder["value"], prints)
+	_reply_eval_response(request_id, holder["value"], prints, echo_prints)
 
 
 ## Run the compiled eval node's execute() and stash the result. Kept
@@ -1274,17 +1300,23 @@ var _last_eval_reply: Dictionary = {}
 ## `code` (optional) rides as a third payload element so the editor can map
 ## the reply to a specific error code instead of the generic INTERNAL_ERROR;
 ## the editor allowlists the value (see mcp_debugger_plugin._on_eval_error).
-func _reply_eval_error(request_id: String, message: String, code: String = "") -> void:
+## godot-ai-cli fork patch: echo_prints 开启时第 4 元素携带 eval 已捕获的
+## prints（空数组也发，prints 键常驻）；code 缺省时补空串占位保持元素位置。
+func _reply_eval_error(request_id: String, message: String, code: String = "", prints: Array[String] = [], echo_prints: bool = false) -> void:
 	_last_eval_reply = {"kind": "error", "request_id": request_id,
 		"message": message, "code": code}
+	if echo_prints:
+		_last_eval_reply["prints"] = prints
 	var payload := [request_id, message]
-	if not code.is_empty():
+	if not code.is_empty() or echo_prints:
 		payload.append(code)
+	if echo_prints:
+		payload.append(JSON.stringify(prints))
 	if EngineDebugger.is_active():
 		EngineDebugger.send_message("mcp:eval_error", payload)
 
 
-func _reply_eval_response(request_id: String, value: Variant, prints: Array[String] = []) -> void:
+func _reply_eval_response(request_id: String, value: Variant, prints: Array[String] = [], echo_prints: bool = false) -> void:
 	var serialized := JSON.stringify(_variant_to_json(value))
 	var serialized_bytes := serialized.to_utf8_buffer().size()
 	if serialized_bytes > EVAL_RESULT_MAX_BYTES:
@@ -1292,18 +1324,18 @@ func _reply_eval_response(request_id: String, value: Variant, prints: Array[Stri
 			("Eval result too large to return (%d bytes serialized, limit %d). "
 				+ "Return a smaller slice instead — e.g. counts, node paths, or a "
 				+ "truncated substring.") % [serialized_bytes, EVAL_RESULT_MAX_BYTES],
-			ErrorCodes.EVAL_RESULT_TOO_LARGE)
+			ErrorCodes.EVAL_RESULT_TOO_LARGE, prints, echo_prints)
 		return
 	_last_eval_reply = {"kind": "response", "request_id": request_id}
-	## godot-ai-cli fork patch: record prints on the testing seam regardless of
-	## the debugger channel, and carry them as a third payload element when set.
-	if not prints.is_empty():
+	## godot-ai-cli fork patch: echo_prints 开启时 prints 键常驻——空数组也
+	## 记录并作为第 3 元素发送；未开启时保持旧契约（不带 prints 键）。
+	if echo_prints:
 		_last_eval_reply["prints"] = prints
 	if EngineDebugger.is_active():
-		if prints.is_empty():
-			EngineDebugger.send_message("mcp:eval_response", [request_id, serialized])
-		else:
+		if echo_prints:
 			EngineDebugger.send_message("mcp:eval_response", [request_id, serialized, JSON.stringify(prints)])
+		else:
+			EngineDebugger.send_message("mcp:eval_response", [request_id, serialized])
 
 
 ## #490: if a logged script error past THIS eval's baseline carries its unique
@@ -1329,7 +1361,13 @@ func _try_report_eval_runtime_error(request_id: String) -> bool:
 	if node != null and is_instance_valid(node):
 		node.queue_free()
 	if EngineDebugger.is_active():
-		EngineDebugger.send_message("mcp:eval_runtime_error", [request_id, text])
+		## godot-ai-cli fork patch: echo_prints 时把 eval 崩溃前捕获的 prints
+		## （基线之后的 messages_since）作为第 3 元素一并上报。
+		if bool(entry.get("echo_prints", false)):
+			EngineDebugger.send_message("mcp:eval_runtime_error",
+				[request_id, text, JSON.stringify(_logger.messages_since(int(entry.get("prints_baseline", 0))))])
+		else:
+			EngineDebugger.send_message("mcp:eval_runtime_error", [request_id, text])
 	return true
 
 
@@ -1352,6 +1390,127 @@ func _indent_eval_code(code: String) -> String:
 	for line in lines:
 		out += "\t" + line + "\n"
 	return out
+
+
+## godot-ai-cli fork patch: __sn 辅助方法的源码，注入 eval 包装脚本末尾
+## （放在用户代码之后，用户代码的行号不受影响）。同时被测试复用以直接
+## 验证 __sn 语义——编辑器里端到端跑 _handle_eval 不可行（运行时编译的
+## 非 @tool 脚本是 placeholder），语义覆盖只能靠 @tool 副本直接调用。
+const _SN_HELPER_SOURCE := (
+	"# 解析 $NodeName 引用：优先运行场景根（编辑器内退回被编辑场景根，\n"
+	+ "# 与 _current_scene_root 同策略），再退回自身（保持原 get_node 语义）\n"
+	+ "func __sn(path: String) -> Node:\n"
+	+ "\tvar scene := get_tree().current_scene\n"
+	+ "\tif scene == null and Engine.is_editor_hint():\n"
+	+ "\t\tvar editor := Engine.get_singleton(&\"EditorInterface\")\n"
+	+ "\t\tif editor:\n"
+	+ "\t\t\tscene = editor.get_edited_scene_root()\n"
+	+ "\tif scene != null and scene.has_node(path):\n"
+	+ "\t\treturn scene.get_node(path)\n"
+	+ "\treturn get_node_or_null(path)\n"
+)
+
+
+## godot-ai-cli fork patch: 组装 eval 包装脚本。用户代码先过
+## _rewrite_dollar_refs（$NodeName → __sn("NodeName")），再缩进注入
+## _mcp_run_<token>；__sn 追加在末尾。
+func _build_eval_script_source(code: String, run_fn: String) -> String:
+	return (
+		"extends Node\n"
+		+ "func execute():\n"
+		+ "\treturn await %s()\n\n" % run_fn
+		+ "func %s():\n" % run_fn
+		+ _indent_eval_code(_rewrite_dollar_refs(code))
+		+ "\n" + _SN_HELPER_SOURCE
+	)
+
+
+## godot-ai-cli fork patch: 把 eval 用户代码里的 $NodeName 引用改写为
+## __sn("NodeName") 调用。eval 临时节点挂在场景根下，但 GDScript 的 $ 只
+## 查找执行节点自身的直接子节点（实测 Godot 4.7），永远找不到场景根的
+## 子节点；改写后由 __sn 优先在运行场景根解析（文档示例语义），找不到时
+## 退回节点自身相对查找（原 get_node 语义）。
+##
+## 逐字符状态机扫描，只处理"普通"状态的 $：字符串（单/双/三引号，含
+## 转义）与行注释内的 $ 原样保留；$"quoted" 形式（$ 后随引号）与 %Unique
+## 不动；$ 后非标识符字符不动。替换在同一行内完成，行号不变。
+static func _rewrite_dollar_refs(code: String) -> String:
+	# 扫描状态
+	const STATE_NORMAL := 0
+	const STATE_DQUOTE := 1   # "..." 内
+	const STATE_SQUOTE := 2   # '...' 内
+	const STATE_TRIPLE := 3   # """...""" / '''...''' 内
+	const STATE_COMMENT := 4  # # 行注释内
+	var out := ""
+	var state := STATE_NORMAL
+	var triple_quote := ""  # 三引号使用的是哪种引号字符
+	var i := 0
+	var n := code.length()
+	while i < n:
+		var c := code.substr(i, 1)
+		if state == STATE_NORMAL:
+			if c == "#":
+				state = STATE_COMMENT
+				out += c
+				i += 1
+			elif c == "\"" or c == "'":
+				# 三引号优先判定（连吃三个相同引号字符）
+				if i + 2 < n and code.substr(i + 1, 1) == c and code.substr(i + 2, 1) == c:
+					state = STATE_TRIPLE
+					triple_quote = c
+					out += c + c + c
+					i += 3
+				else:
+					state = STATE_DQUOTE if c == "\"" else STATE_SQUOTE
+					out += c
+					i += 1
+			elif c == "$" and i + 1 < n and _is_ident_start(code.substr(i + 1, 1)):
+				# $NodeName 引用：收集 [A-Za-z0-9_/] 组成路径 token 并改写
+				var j := i + 1
+				while j < n and _is_dollar_path_char(code.substr(j, 1)):
+					j += 1
+				out += "__sn(\"" + code.substr(i + 1, j - i - 1) + "\")"
+				i = j
+			else:
+				out += c
+				i += 1
+		elif state == STATE_DQUOTE or state == STATE_SQUOTE:
+			var quote := "\"" if state == STATE_DQUOTE else "'"
+			if c == "\\" and i + 1 < n:
+				# 转义字符对原样保留（\" 不终止字符串）
+				out += c + code.substr(i + 1, 1)
+				i += 2
+			elif c == quote:
+				state = STATE_NORMAL
+				out += c
+				i += 1
+			else:
+				out += c
+				i += 1
+		elif state == STATE_TRIPLE:
+			if c == triple_quote and i + 2 < n and code.substr(i + 1, 1) == c and code.substr(i + 2, 1) == c:
+				state = STATE_NORMAL
+				out += c + c + c
+				i += 3
+			else:
+				out += c
+				i += 1
+		else:  # STATE_COMMENT：原样复制到行尾
+			if c == "\n":
+				state = STATE_NORMAL
+			out += c
+			i += 1
+	return out
+
+
+## 标识符起始字符：[A-Za-z_]
+static func _is_ident_start(c: String) -> bool:
+	return (c >= "A" and c <= "Z") or (c >= "a" and c <= "z") or c == "_"
+
+
+## $ 路径 token 的合法字符：[A-Za-z0-9_/]
+static func _is_dollar_path_char(c: String) -> bool:
+	return _is_ident_start(c) or (c >= "0" and c <= "9") or c == "/"
 
 
 ## Serialize any Godot Variant to a JSON-safe dictionary/array/primitive.

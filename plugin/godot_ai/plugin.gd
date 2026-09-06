@@ -377,7 +377,7 @@ func _enter_tree() -> void:
 	_dispatcher.register_lazy_handler("spriteframes", HANDLERS_DIR + "spriteframes_handler.gd", [undo, _connection])
 	_dispatcher.register_lazy_handler("control_draw_recipe", HANDLERS_DIR + "control_draw_recipe_handler.gd", [undo])
 	_dispatcher.register_lazy_handler("tilemap", HANDLERS_DIR + "tilemap_handler.gd", [undo])
-	_dispatcher.register_lazy_handler("tileset", HANDLERS_DIR + "tileset_handler.gd", [])
+	_dispatcher.register_lazy_handler("tileset", HANDLERS_DIR + "tileset_handler.gd", [_connection])
 	_dispatcher.register_lazy_handler("gridmap", HANDLERS_DIR + "gridmap_handler.gd", [undo])
 	_dispatcher.register_lazy_handler("csg", HANDLERS_DIR + "csg_handler.gd", [undo])
 
@@ -417,6 +417,7 @@ func _enter_tree() -> void:
 	_dispatcher.register_lazy("run_project", "project", &"run_project")
 	_dispatcher.register_lazy("stop_project", "project", &"stop_project")
 	_dispatcher.register_lazy("project_continue", "project", &"continue_run")
+	_dispatcher.register_lazy("project_focus", "project", &"focus_game")
 	_dispatcher.register_lazy("search_filesystem", "project", &"search_filesystem")
 	## godot-ai-cli fork patch: MCP client-config wire commands are not
 	## registered in the fork — client configuration is a CLI/skill concern.
@@ -517,6 +518,8 @@ func _enter_tree() -> void:
 	_dispatcher.register_lazy("spriteframes_add_animation", "spriteframes", &"add_animation")
 	_dispatcher.register_lazy("spriteframes_add_frame", "spriteframes", &"add_frame")
 	_dispatcher.register_lazy("spriteframes_from_sheet", "spriteframes", &"from_sheet")
+	_dispatcher.register_lazy("resource_spriteframes_list_frames", "spriteframes", &"list_frames")
+	_dispatcher.register_lazy("resource_spriteframes_swap_frames", "spriteframes", &"swap_frames")
 	_dispatcher.register_lazy("control_draw_recipe", "control_draw_recipe", &"control_draw_recipe")
 	_dispatcher.register_lazy("tilemap_set_cell", "tilemap", &"set_cell")
 	_dispatcher.register_lazy("tilemap_set_cells_rect", "tilemap", &"set_cells_rect")
@@ -524,6 +527,8 @@ func _enter_tree() -> void:
 	_dispatcher.register_lazy("tilemap_get_cells", "tilemap", &"get_used_cells")
 	_dispatcher.register_lazy("tileset_get_atlas_tiles", "tileset", &"get_atlas_tiles")
 	_dispatcher.register_lazy("tileset_get_atlas_image", "tileset", &"get_atlas_image")
+	_dispatcher.register_lazy("tileset_add_physics_layer", "tileset", &"add_physics_layer")
+	_dispatcher.register_lazy("tileset_set_tile_collision", "tileset", &"set_tile_collision")
 	_dispatcher.register_lazy("gridmap_set_item", "gridmap", &"set_item")
 	_dispatcher.register_lazy("gridmap_fill", "gridmap", &"fill")
 	_dispatcher.register_lazy("gridmap_clear", "gridmap", &"clear_layer")

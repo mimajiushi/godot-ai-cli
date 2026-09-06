@@ -133,6 +133,17 @@ var _break_record_synthesized := false
 ## record carrying the break reason.
 const BREAK_FRAME_SCRAPE_DELAYS_SEC: Array[float] = [0.5, 2.0]
 
+## godot-ai-cli fork patch: eval 引发的运行时错误会把游戏停在 debugger
+## break，但 break 信号经调试通道异步到达——回复 eval 错误的同一帧
+## session.is_breaked() 往往还是 false（见 _capture 附近 #645 注释承认的
+## 异步时序），同帧同步自动 continue 因此漏发。改为事件驱动：错误回复时在
+## _eval_break_recovery 记下待恢复标记，note_debug_break 记录 break 时统一
+## 补发 continue；超时兜底清除，避免标记泄漏到之后无关的用户 break。
+const EVAL_BREAK_RECOVER_TIMEOUT_SEC := 2.0
+var _eval_break_recovery: Dictionary = {}
+## 测试/诊断探针：记录最近一次补发 continue 的上下文与是否真正发出。
+var _last_break_continue: Dictionary = {}
+
 
 
 func _init(log_buffer: McpLogBuffer = null, game_log_buffer: McpGameLogBuffer = null, editor_log_buffer: McpEditorLogBuffer = null, surfaced_error_tracker = null, vision_routing: VisionRoutingScript = null) -> void:
@@ -242,6 +253,9 @@ func end_game_run() -> void:
 	_ready_run_token = -1
 	_game_session_id = -1
 	clear_debug_break()
+	## 运行边界后的 break 属于新游戏进程，eval 恢复标记不能跨运行存活。
+	for rid in _eval_break_recovery.keys():
+		_cancel_eval_break_recovery(str(rid))
 	if _surfaced_error_tracker != null:
 		_surfaced_error_tracker.note_game_run_stopped()
 
@@ -463,6 +477,12 @@ func note_debug_break(can_debug: bool, reason: String) -> void:
 	_break_can_debug = can_debug
 	if not reason.is_empty():
 		_break_reason = reason
+	## godot-ai-cli fork patch: eval 错误后的待恢复标记在这里消费——break
+	## 多半就是那次 eval 造成的，且 can_debug 说明可以恢复，补发 continue。
+	if can_debug and not _eval_break_recovery.is_empty():
+		for rid in _eval_break_recovery.keys():
+			_cancel_eval_break_recovery(str(rid))
+		_send_break_continue("eval error recovery")
 	if not first_notice:
 		return
 	_break_run_token = _game_run_token
@@ -1225,6 +1245,11 @@ func _probe_then_eval(
 	run_token: int,
 	echo_prints: bool = false,
 ) -> void:
+	## godot-ai-cli fork patch: break 冻结的是游戏主循环，liveness 探针只会
+	## 白白超时——入口直接归因 break 并给出 CLI 恢复路径，不再只提聚焦窗口。
+	if _break_active:
+		_send_error_response(connection, request_id, _eval_break_not_ready_error())
+		return
 	if not _is_current_game_run(run_token) or not is_game_capture_ready():
 		_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
 			"The game run changed before game_eval could be checked — the game stopped or restarted. Retry against the current run.")
@@ -1261,6 +1286,10 @@ func _on_eval_liveness_timeout(request_id: String) -> void:
 	_clear_pending(request_id)
 	if connection == null or not is_instance_valid(connection):
 		return
+	## godot-ai-cli fork patch: break 冻结主循环时探针必然超时——归因 break。
+	if _break_active:
+		_send_error_response(connection, request_id, _eval_break_not_ready_error())
+		return
 	_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
 		("The game helper did not answer the liveness probe within %.0fms — the game may be backgrounded, frozen, stopped, or restarting. Focus the game window (or relaunch it) and retry."
 			% (EVAL_LIVENESS_WAIT_SEC * 1000.0)))
@@ -1288,6 +1317,11 @@ func _on_eval_liveness_response(data: Array) -> void:
 			"The game run changed while game_eval liveness was being checked — the game stopped or restarted. Retry against the current run.")
 		return
 	if not loop_live:
+		## godot-ai-cli fork patch: break 冻结主循环时 loop_live 恒为 false——
+		## 归因 break 并给出恢复路径；非 break 情况保留聚焦窗口提示。
+		if _break_active:
+			_send_error_response(connection, request_id, _eval_break_not_ready_error())
+			return
 		_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
 			"The game helper is registered but its main loop is not advancing — the game window may be backgrounded or the game may be frozen. Focus the game window (or relaunch it) and retry.")
 		return
@@ -1428,14 +1462,36 @@ func _on_eval_response(data: Array) -> void:
 		"source": "game",
 	}
 	## godot-ai-cli fork patch: the game side attaches the eval's captured
-	## print lines as a third payload element (only for echo_prints requests).
-	if data.size() > 2:
-		var prints_json := JSON.new()
-		if prints_json.parse(str(data[2])) == OK and prints_json.data is Array:
-			data_payload["prints"] = prints_json.data
+	## print lines as a third payload element (only for echo_prints requests;
+	## 空数组也发，保证 prints 键常驻）。
+	var prints = _parse_eval_prints(data, 2)
+	if prints != null:
+		data_payload["prints"] = prints
 	connection.send_deferred_response(request_id, {"data": data_payload})
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_response (%s)" % request_id)
+
+
+## godot-ai-cli fork patch: eval 专属 break 错误。归因沿用 #645 的 break
+## 状态跟踪，但恢复路径给 CLI 命令（project continue / stop+run），不再只
+## 提示聚焦窗口——break 冻结的是游戏主循环，聚焦解决不了。
+func _eval_break_not_ready_error() -> Dictionary:
+	var reason_suffix := (": %s" % _break_reason) if not _break_reason.is_empty() else ""
+	return ErrorCodes.make(ErrorCodes.EVAL_GAME_NOT_READY,
+		("The game is paused at a debugger break%s — run `godot-ai-cli project continue` to resume it, "
+			+ "or `project stop` + `project run` to restart.") % reason_suffix)
+
+
+## godot-ai-cli fork patch: 解析 eval 响应/错误消息里携带的 prints 元素
+## （JSON 字符串数组，游戏侧在 echo_prints 时发出，空数组也发）。
+## 索引越界或解析失败返回 null，表示该消息未携带 prints（旧契约）。
+func _parse_eval_prints(data: Array, index: int) -> Variant:
+	if data.size() <= index:
+		return null
+	var prints_json := JSON.new()
+	if prints_json.parse(str(data[index])) != OK or not (prints_json.data is Array):
+		return null
+	return prints_json.data
 
 
 ## #518: codes the game side may attach as mcp:eval_error's optional third
@@ -1464,9 +1520,18 @@ func _on_eval_error(data: Array) -> void:
 	var code := ErrorCodes.INTERNAL_ERROR
 	if data.size() > 2 and str(data[2]) in _GAME_EVAL_ERROR_CODES:
 		code = str(data[2])
-	_send_error(connection, request_id, code, message)
+	## godot-ai-cli fork patch: 游戏侧守护错误（EVAL_HUNG 等）的第 4 元素可
+	## 携带 eval 已捕获的 prints，随错误一并透传给调用方。
+	var err := ErrorCodes.make(code, message)
+	var prints = _parse_eval_prints(data, 3)
+	if prints != null:
+		err["error"]["prints"] = prints
+	_send_error_response(connection, request_id, err)
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_error (%s): %s" % [request_id, message])
+	## godot-ai-cli fork patch: 守护错误（EVAL_HUNG 等）也可能把游戏停在
+	## break——同样布防待恢复标记，break 到达时补发 continue。
+	_auto_continue_after_eval_error(request_id)
 
 
 ## #490: the game sends this at the top of _handle_eval, BEFORE reload() (so it
@@ -1547,7 +1612,13 @@ func _on_eval_runtime_error(data: Array) -> void:
 	if connection == null or not is_instance_valid(connection):
 		return
 	var msg := "Game eval raised a runtime error: %s" % message if not message.is_empty() else "Game eval raised a runtime error (no message captured). Check logs_read(source='game')."
-	_send_error(connection, request_id, ErrorCodes.EVAL_RUNTIME_ERROR, msg)
+	## godot-ai-cli fork patch: 游戏侧第 3 元素可携带 eval 崩溃前捕获的
+	## prints（echo_prints 时），随错误一并透传。
+	var err := ErrorCodes.make(ErrorCodes.EVAL_RUNTIME_ERROR, msg)
+	var prints = _parse_eval_prints(data, 2)
+	if prints != null:
+		err["error"]["prints"] = prints
+	_send_error_response(connection, request_id, err)
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_runtime_error (%s): %s" % [request_id, message])
 	_auto_continue_after_eval_error(request_id)
@@ -1558,13 +1629,49 @@ func _on_eval_runtime_error(data: Array) -> void:
 ## later eval (the shoot-2d report: parse error → status="break" → all
 ## subsequent evals return {"result":null}). The break was caused by OUR eval,
 ## not by user debugging — resume the game right after replying the error.
+##
+## 事件驱动版本：break 信号经调试通道异步到达，回复错误的同一帧
+## session.is_breaked() 还是 false，同步检查会漏发 continue。改为记下待恢复
+## 标记，由 note_debug_break 在 break 真正到达时补发；2s 超时兜底清除，
+## 避免误恢复之后无关的用户 break。
 func _auto_continue_after_eval_error(request_id: String) -> void:
+	## break 可能先于错误回复被记录（两条调试消息乱序到达）——立即补发。
+	if _break_active and _break_can_debug:
+		_send_break_continue("break already recorded (%s)" % request_id)
+		return
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+	_cancel_eval_break_recovery(request_id)
+	var timer := tree.create_timer(EVAL_BREAK_RECOVER_TIMEOUT_SEC)
+	var timeout_callable := func() -> void: _on_eval_break_recovery_timeout(request_id)
+	timer.timeout.connect(timeout_callable)
+	_eval_break_recovery[request_id] = {"timer": timer, "callable": timeout_callable}
+
+
+func _cancel_eval_break_recovery(request_id: String) -> void:
+	var entry: Dictionary = _eval_break_recovery.get(request_id, {})
+	_eval_break_recovery.erase(request_id)
+	var timer: SceneTreeTimer = entry.get("timer")
+	var cb: Callable = entry.get("callable", Callable())
+	if timer != null and timer.timeout.is_connected(cb):
+		timer.timeout.disconnect(cb)
+
+
+func _on_eval_break_recovery_timeout(request_id: String) -> void:
+	_eval_break_recovery.erase(request_id)
+	if _log_buffer:
+		_log_buffer.log("[debug] eval break recovery marker expired (%s)" % request_id)
+
+
+func _send_break_continue(context: String) -> void:
 	var session := _first_active_session()
-	if session == null or not session.is_breaked():
+	_last_break_continue = {"context": context, "sent": session != null}
+	if session == null:
 		return
 	session.send_message("continue", [])
 	if _log_buffer:
-		_log_buffer.log("[debug] auto-continue after eval error (%s)" % request_id)
+		_log_buffer.log("[debug] auto-continue after eval error (%s)" % context)
 
 
 ## godot-ai-cli fork patch: resume a game paused at a debugger break
@@ -1586,6 +1693,27 @@ func continue_game() -> Dictionary:
 		"continued": was_breaked,
 		"was_breaked": was_breaked,
 	}}
+
+
+## godot-ai-cli fork patch: bring the running game's window to the foreground
+## (CLI `project focus`). The game side answers "mcp:focus" with
+## DisplayServer.window_move_to_foreground(). A game parked at a debugger
+## break may not service the message until resumed — say so in the response.
+func focus_game() -> Dictionary:
+	var session := _first_active_session()
+	if session == null:
+		return ErrorCodes.make_not_ready(
+			ErrorCodes.SUB_EDITOR_GAME_NOT_RUNNING,
+			"Game is not running — start the project first", false,
+			"Start the game with project_run, then retry.")
+	session.send_message("mcp:focus", [])
+	if _log_buffer:
+		_log_buffer.log("[debug] project focus -> sent mcp:focus")
+	var data := {"focused": true}
+	if _break_active:
+		data["note"] = ("The game is paused at a debugger break; the focus message may not be "
+			+ "processed until it resumes (run `godot-ai-cli project continue` first).")
+	return {"data": data}
 
 
 ## #490: arm one probe tick for an in-flight eval. Re-arms itself each tick

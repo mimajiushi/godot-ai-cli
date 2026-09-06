@@ -6,6 +6,9 @@ package cli
 
 import (
 	"fmt"
+	"image"
+	"image/png"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +27,78 @@ func newImageCommand() *cobra.Command {
 	cmd.AddCommand(newImagePaletteCommand())
 	cmd.AddCommand(newImageProbeCommand())
 	cmd.AddCommand(newImageGridDetectCommand())
+	cmd.AddCommand(newImageViewCommand())
+	return cmd
+}
+
+// newImageViewCommand renders a zoomed (nearest-neighbor) view of a PNG —
+// the "eyeball this 16x16 pixel-art frame" step after a screenshot, where
+// the source is too small to inspect at 1x. Optional --region crops in
+// source-image pixels before the upscale.
+func newImageViewCommand() *cobra.Command {
+	var (
+		path    string
+		project string
+		scale   int
+		region  string
+		out     string
+	)
+	cmd := &cobra.Command{
+		Use:   "view --path <file> --out <file.png>",
+		Short: "Write an upscaled (nearest-neighbor) view of a PNG/JPEG for visual inspection",
+		Long: `image view crops an optional --region (source-image pixels) and then
+upscales by an integer --scale with nearest-neighbor sampling, so pixel-art
+frames stay crisp at inspection size. The result is written to --out as PNG.
+
+Examples:
+  godot-ai-cli image view --path shots/frame.png --out shots/frame_big.png
+  godot-ai-cli image view --path sheet.png --region 48,0,16,16 --scale 8 --out tile.png`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			resolved, err := resolveImagePath(path, project)
+			if err != nil {
+				return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
+			}
+			img, err := imganalysis.Load(resolved)
+			if err != nil {
+				return jsonError(cmd, "IMAGE_LOAD_FAILED", err.Error(), nil)
+			}
+			if region != "" {
+				x, y, w, h, err := parseRect(region)
+				if err != nil {
+					return jsonError(cmd, "INVALID_PARAMS",
+						fmt.Sprintf("--region %q: %v (want x,y,w,h, e.g. 48,0,16,16)", region, err), nil)
+				}
+				img, err = imganalysis.Crop(img, x, y, w, h)
+				if err != nil {
+					return jsonError(cmd, "INVALID_PARAMS", fmt.Sprintf("--region: %v", err), nil)
+				}
+			}
+			if scale < 1 {
+				return jsonError(cmd, "INVALID_PARAMS",
+					fmt.Sprintf("--scale must be >= 1, got %d", scale), nil)
+			}
+			view := imganalysis.UpscaleNearest(img, scale)
+			if err := writePNG(out, view); err != nil {
+				return jsonError(cmd, "IMAGE_WRITE_FAILED", err.Error(), nil)
+			}
+			b := view.Bounds()
+			return printJSON(cmd.OutOrStdout(), map[string]any{
+				"path":   path,
+				"out":    out,
+				"scale":  scale,
+				"region": region,
+				"size":   [2]int{b.Dx(), b.Dy()},
+			}, prettyOutput)
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", "", "image file (disk path or res://)")
+	cmd.Flags().StringVar(&project, "project", "", "Godot project dir for res:// paths (default: project of the last launch)")
+	cmd.Flags().IntVar(&scale, "scale", 4, "integer magnification factor (nearest-neighbor)")
+	cmd.Flags().StringVar(&region, "region", "", "crop first: x,y,w,h in source-image pixels")
+	cmd.Flags().StringVar(&out, "out", "", "output PNG path")
+	_ = cmd.MarkFlagRequired("path")
+	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }
 
@@ -227,4 +302,36 @@ func parsePair(raw, sep string) (int, int, error) {
 		return 0, 0, fmt.Errorf("%q is not an integer", parts[1])
 	}
 	return a, b, nil
+}
+
+// parseRect splits "x,y,w,h" into four ints.
+func parseRect(raw string) (x, y, w, h int, err error) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 4 {
+		return 0, 0, 0, 0, fmt.Errorf("want four comma-separated numbers, got %q", raw)
+	}
+	vals := make([]int, 4)
+	for i, p := range parts {
+		v, cerr := strconv.Atoi(strings.TrimSpace(p))
+		if cerr != nil {
+			return 0, 0, 0, 0, fmt.Errorf("%q is not an integer", p)
+		}
+		vals[i] = v
+	}
+	return vals[0], vals[1], vals[2], vals[3], nil
+}
+
+// writePNG encodes img as PNG to path, creating the parent directory.
+func writePNG(path string, img image.Image) error {
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
 }

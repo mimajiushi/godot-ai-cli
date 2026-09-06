@@ -72,6 +72,31 @@ func tilesetOps() []OpSpec {
 				pi("max-size", "max_size", false, "0", "Pixel cap for the returned image (0 = full size)"),
 			},
 		},
+		{
+			Domain: "tileset", Name: "add-physics-layer", PluginCommand: "tileset_add_physics_layer",
+			Summary:      "Add a physics layer to a TileSet",
+			Timeout:      DefaultTimeout, Write: true,
+			ResponseNote: `{"physics_layers_count"}`,
+			Params: []ParamSpec{
+				ps("resource", "resource", true, "", "res:// path of the TileSet .tres"),
+				pi("collision-layer", "collision_layer", false, "1", "Collision layer bits of the new physics layer"),
+				pi("collision-mask", "collision_mask", false, "1", "Collision mask bits of the new physics layer"),
+			},
+		},
+		{
+			Domain: "tileset", Name: "set-tile-collision", PluginCommand: "tileset_set_tile_collision",
+			Summary:      "Set a collision polygon on one atlas tile of a TileSet",
+			Timeout:      DefaultTimeout, Write: true,
+			ResponseNote: `{"points"}`,
+			DocNote:      "Example: `tileset set-tile-collision --resource res://tiles.tres --source 0 --atlas-coords 2,3 --points \"0,0 16,0 16,16 0,16\"` adds a full-tile square on physics layer 0.",
+			Params: []ParamSpec{
+				ps("resource", "resource", true, "", "res:// path of the TileSet .tres"),
+				pi("source", "source", true, "", "Atlas source id"),
+				ps("atlas-coords", "atlas_coords", true, "", `Tile atlas coordinates as "x,y"`),
+				ps("points", "points", true, "", `Polygon points as "x,y x,y ..." (at least 3)`),
+				pi("layer", "layer", false, "0", "Physics layer index"),
+			},
+		},
 	}
 }
 

@@ -109,6 +109,13 @@ func projectOps() []OpSpec {
 			ResponseNote: `{"continued","was_breaked"}`,
 			DocNote:      "A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.",
 		},
+		{
+			Domain: "project", Name: "focus", PluginCommand: "project_focus",
+			Summary:      "Bring the running game window to the foreground",
+			Timeout:      DefaultTimeout,
+			ResponseNote: `{"focused"}`,
+			DocNote:      "Uses DisplayServer.window_move_to_foreground — the recovery when eval reports the game's main loop not advancing because the game window lost focus. May not take effect while the game is parked at a debugger break; run `project continue` first in that case.",
+		},
 	}
 }
 

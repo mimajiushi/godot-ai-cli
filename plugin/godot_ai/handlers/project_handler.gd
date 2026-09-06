@@ -554,6 +554,16 @@ func continue_run(_params: Dictionary) -> Dictionary:
 	return _debugger_plugin.continue_game()
 
 
+## godot-ai-cli fork patch: bring the running game's window to the foreground
+## (CLI `project focus`) — convenience for backgrounded/frozen-game recovery
+## when the game itself is live. Delegates to the debugger plugin.
+func focus_game(_params: Dictionary) -> Dictionary:
+	if _debugger_plugin == null:
+		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
+			"Debugger bridge unavailable — plugin may not be fully initialised")
+	return _debugger_plugin.focus_game()
+
+
 func stop_project(params: Dictionary) -> Dictionary:
 	# Idempotent: a project that's already stopped satisfies the caller's intent.
 	# Returning INVALID_PARAMS here was the largest single source of fleet-wide

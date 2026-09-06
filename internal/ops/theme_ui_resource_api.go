@@ -277,6 +277,27 @@ func resourceOps() []OpSpec {
 				pb("loop", "loop", false, "true", "Whether the generated animations loop"),
 			},
 		},
+		{
+			Domain: "resource", Name: "spriteframes-list-frames", PluginCommand: "resource_spriteframes_list_frames",
+			Summary:      "List the frames of a SpriteFrames .tres",
+			Timeout:      DefaultTimeout,
+			ResponseNote: `{"animations"}`,
+			Params: []ParamSpec{
+				ps("resource", "resource", true, "", "res:// path of the SpriteFrames .tres"),
+				ps("animation", "animation", false, "", "Only this animation (default: all)"),
+			},
+		},
+		{
+			Domain: "resource", Name: "spriteframes-swap-frames", PluginCommand: "resource_spriteframes_swap_frames",
+			Summary:      "Swap the frame lists of two animations in a SpriteFrames .tres",
+			Timeout:      DefaultTimeout, Write: true,
+			ResponseNote: `{"swapped","frame_counts"}`,
+			Params: []ParamSpec{
+				ps("resource", "resource", true, "", "res:// path of the SpriteFrames .tres"),
+				ps("animation-a", "animation_a", true, "", "First animation name"),
+				ps("animation-b", "animation_b", true, "", "Second animation name"),
+			},
+		},
 	}
 }
 

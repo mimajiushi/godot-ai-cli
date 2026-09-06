@@ -115,6 +115,31 @@ func TestDownscaleNearest(t *testing.T) {
 	}
 }
 
+func TestUpscaleNearest(t *testing.T) {
+	// 2x1 source: red, blue — the factor must replicate source pixels as
+	// solid blocks, never blend.
+	src := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	src.SetRGBA(0, 0, color.RGBA{0xFF, 0, 0, 0xFF})
+	src.SetRGBA(1, 0, color.RGBA{0, 0, 0xFF, 0xFF})
+
+	if got := UpscaleNearest(src, 1); got.Bounds().Dx() != 2 {
+		t.Errorf("factor 1 must pass through, got %v", got.Bounds())
+	}
+	got := UpscaleNearest(src, 3)
+	if got.Bounds().Dx() != 6 || got.Bounds().Dy() != 3 {
+		t.Fatalf("upscaled size = %v, want 6x3", got.Bounds())
+	}
+	for x := 0; x < 6; x++ {
+		want := color.RGBA{0xFF, 0, 0, 0xFF}
+		if x >= 3 {
+			want = color.RGBA{0, 0, 0xFF, 0xFF}
+		}
+		if c := color.RGBAModel.Convert(got.At(x, 1)).(color.RGBA); c != want {
+			t.Errorf("pixel (%d,1) = %v, want %v", x, c, want)
+		}
+	}
+}
+
 func TestEncodeGIF(t *testing.T) {
 	f1 := sheetWithClusters(32, 32, 0)
 	f2 := sheetWithClusters(32, 32, 8)

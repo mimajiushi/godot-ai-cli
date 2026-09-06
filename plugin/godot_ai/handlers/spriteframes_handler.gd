@@ -74,9 +74,11 @@ func add_frame(params: Dictionary) -> Dictionary:
 	if frame_tex is Dictionary:
 		return frame_tex
 
-	## -1 appends; a non-negative index inserts there (SpriteFrames.add_frame).
+	## -1 appends; a non-negative index inserts there. 注意 4.x 签名为
+	## add_frame(anim, texture, duration, at_position)——duration 必须显式给
+	## 1.0，否则 at_index 会被误当作帧时长写进资源（list_frames 会读到 -1）。
 	var at_index := int(params.get("at_index", -1))
-	frames.add_frame(anim, frame_tex, at_index)
+	frames.add_frame(anim, frame_tex, 1.0, at_index)
 	return McpResourceIO.save_to_disk(frames, resource_path, true, "SpriteFrames", {
 		"animation": anim,
 		"frame_count": frames.get_frame_count(anim),
@@ -241,3 +243,126 @@ static func _parse_rect(s: String) -> Variant:
 			return null
 		nums.append(float(piece))
 	return Rect2(nums[0], nums[1], nums[2], nums[3])
+
+
+## godot-ai-cli fork patch: 列出 SpriteFrames 各动画的帧清单（只读）。
+##
+## params:
+##   resource   — res:// 路径的 .tres SpriteFrames（必填）
+##   animation  — 可选；缺省列出全部动画
+##
+## Returns: {"data": {"animations": {"<name>": {"speed_scale": f, "loop": b,
+##   "frames": [{"texture": "res://...", "region": [x,y,w,h] 或 null,
+##   "duration": f}]}}}} 或错误字典。
+func list_frames(params: Dictionary) -> Dictionary:
+	var resource_path := str(params.get("resource", ""))
+	if resource_path.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: resource")
+	var loaded = _load_spriteframes(resource_path)
+	if loaded is Dictionary:
+		return loaded
+	var frames: SpriteFrames = loaded
+
+	var anim_filter := str(params.get("animation", ""))
+	var animations := {}
+	for anim_name in frames.get_animation_names():
+		if not anim_filter.is_empty() and anim_name != anim_filter:
+			continue
+		var frame_list: Array = []
+		for i in range(frames.get_frame_count(anim_name)):
+			var tex := frames.get_frame_texture(anim_name, i)
+			frame_list.append({
+				"texture": _frame_texture_path(tex),
+				"region": _frame_region(tex),
+				"duration": frames.get_frame_duration(anim_name, i),
+			})
+		animations[anim_name] = {
+			"speed_scale": frames.get_animation_speed(anim_name),
+			"loop": frames.get_animation_loop(anim_name),
+			"frames": frame_list,
+		}
+	if not anim_filter.is_empty() and animations.is_empty():
+		return ErrorCodes.make(
+			ErrorCodes.VALUE_OUT_OF_RANGE,
+			"Animation '%s' not found in %s" % [anim_filter, resource_path]
+		)
+	return {"data": {"animations": animations}}
+
+
+## godot-ai-cli fork patch: 交换两个动画的帧列表（texture+duration 逐帧），
+## 各自 speed_scale/loop 保留。写操作，同样走 duplicate()+save_to_disk。
+##
+## params:
+##   resource     — res:// 路径的 .tres SpriteFrames（必填）
+##   animation_a  — 动画名 A（必填）
+##   animation_b  — 动画名 B（必填）
+##
+## Returns: {"data": {"swapped": [a, b], "frame_counts": {a: N, b: M}, ...}}
+##   或错误字典。
+func swap_frames(params: Dictionary) -> Dictionary:
+	var resource_path := str(params.get("resource", ""))
+	var anim_a := str(params.get("animation_a", ""))
+	var anim_b := str(params.get("animation_b", ""))
+	if resource_path.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: resource")
+	if anim_a.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: animation_a")
+	if anim_b.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: animation_b")
+
+	var loaded = _load_spriteframes(resource_path)
+	if loaded is Dictionary:
+		return loaded
+	var frames: SpriteFrames = loaded
+
+	for anim in [anim_a, anim_b]:
+		if not frames.has_animation(anim):
+			return ErrorCodes.make(
+				ErrorCodes.VALUE_OUT_OF_RANGE,
+				"Animation '%s' not found in %s" % [anim, resource_path]
+			)
+
+	## 逐帧快照两个动画（纹理引用共享即可——交换不涉及纹理本身修改）。
+	## 注意 add_frame 的 4.x 签名为 (anim, texture, duration, at_position)。
+	var frames_a := _snapshot_frames(frames, anim_a)
+	var frames_b := _snapshot_frames(frames, anim_b)
+	frames.clear(anim_a)
+	frames.clear(anim_b)
+	for f in frames_b:
+		frames.add_frame(anim_a, f["texture"], f["duration"], -1)
+	for f in frames_a:
+		frames.add_frame(anim_b, f["texture"], f["duration"], -1)
+
+	return McpResourceIO.save_to_disk(frames, resource_path, true, "SpriteFrames", {
+		"swapped": [anim_a, anim_b],
+		"frame_counts": {anim_a: frames_b.size(), anim_b: frames_a.size()},
+		"reason": "File save is persistent; edit the .tres file manually to revert",
+	}, _connection)
+
+
+## 快照一个动画的帧列表：[{"texture": Texture2D, "duration": float}, ...]
+static func _snapshot_frames(frames: SpriteFrames, anim: String) -> Array:
+	var out: Array = []
+	for i in range(frames.get_frame_count(anim)):
+		out.append({
+			"texture": frames.get_frame_texture(anim, i),
+			"duration": frames.get_frame_duration(anim, i),
+		})
+	return out
+
+
+## 帧纹理的展示路径：AtlasTexture 帧取其底层图集纹理路径。
+static func _frame_texture_path(tex: Texture2D) -> String:
+	if tex == null:
+		return ""
+	if tex is AtlasTexture and (tex as AtlasTexture).atlas != null:
+		return (tex as AtlasTexture).atlas.resource_path
+	return tex.resource_path
+
+
+## 帧纹理的 region：AtlasTexture → [x,y,w,h]，其余 → null。
+static func _frame_region(tex: Texture2D) -> Variant:
+	if tex is AtlasTexture:
+		var r := (tex as AtlasTexture).region
+		return [r.position.x, r.position.y, r.size.x, r.size.y]
+	return null

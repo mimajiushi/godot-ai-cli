@@ -108,6 +108,9 @@ var HandWiredLeaves = []string{
 	"image palette",     // local: pure-Go texture palette analysis, no daemon
 	"image probe",       // local: pure-Go pixel sampling, no daemon
 	"image grid-detect", // local: pure-Go sprite-sheet grid detection, no daemon
+	"image view",        // local: pure-Go nearest-neighbor upscale for inspection, no daemon
+	"tilemap dump",      // local: .tscn tile_map_data decode without opening the scene
+	"tilemap render",    // local: TileMapLayer → PNG composite without opening the scene
 }
 
 // InternalOnlySpec documents a registered plugin command that is

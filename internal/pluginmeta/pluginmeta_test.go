@@ -10,7 +10,7 @@ import (
 // plugin strict-checks it against its own plugin.cfg — pin the value so a
 // vendored-plugin bump without a server-side follow-up fails loudly.
 func TestPluginVersion(t *testing.T) {
-	if got := pluginmeta.PluginVersion(); got != "3.2.5" {
-		t.Fatalf("PluginVersion() = %q, want %q", got, "3.2.5")
+	if got := pluginmeta.PluginVersion(); got != "3.2.6" {
+		t.Fatalf("PluginVersion() = %q, want %q", got, "3.2.6")
 	}
 }

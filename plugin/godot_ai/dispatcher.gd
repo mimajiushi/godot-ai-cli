@@ -128,7 +128,7 @@ func clear_command_queue() -> void:
 ## error dict if the command is not registered. Used by batch_execute.
 func dispatch_direct(command: String, params: Dictionary) -> Dictionary:
 	if not has_command(command):
-		return ErrorCodes.make(ErrorCodes.UNKNOWN_COMMAND, "Unknown command: %s" % command)
+		return unknown_command_error(command)
 	## Strip the reserved deferred-reply key: only _dispatch may thread it.
 	## A caller-supplied _request_id (e.g. inside a batch_execute
 	## sub-command's params) would flip a deferred-capable handler into
@@ -144,6 +144,16 @@ func dispatch_direct(command: String, params: Dictionary) -> Dictionary:
 ## Whether a command is registered (eagerly or lazily).
 func has_command(command: String) -> bool:
 	return _handlers.has(command) or _lazy_commands.has(command)
+
+
+## godot-ai-cli fork patch: UNKNOWN_COMMAND 统一文案。命令在 CLI 目录里存在
+## 而编辑器侧未知时，多半是编辑器还跑着旧插件代码（插件经符号链接/缓存
+## 更新后必须重启编辑器进程才会生效）——把恢复路径直接写进错误信息。
+static func unknown_command_error(command: String) -> Dictionary:
+	return ErrorCodes.make(ErrorCodes.UNKNOWN_COMMAND,
+		("Unknown command: %s. If this command exists in the CLI directory but is unknown here, "
+			+ "the running editor is likely on stale plugin code — restart the editor "
+			+ "(editor quit + launch) to load the current plugin.") % command)
 
 
 ## Rank registered commands by similarity to `cmd_name` and return the top `limit`
@@ -240,7 +250,7 @@ func _dispatch(cmd: Dictionary) -> Dictionary:
 	if has_command(command):
 		result = _call_handler(command, params)
 	else:
-		result = ErrorCodes.make(ErrorCodes.UNKNOWN_COMMAND, "Unknown command: %s" % command)
+		result = unknown_command_error(command)
 
 	if result.get("_deferred", false):
 		## A handler may attach `_deferred_timeout_ms` to its deferred sentinel
@@ -342,7 +352,7 @@ func _call_handler(command: String, params: Dictionary) -> Dictionary:
 func _materialize_lazy_command(command: String) -> Dictionary:
 	var command_spec: Dictionary = _lazy_commands.get(command, {})
 	if command_spec.is_empty():
-		return ErrorCodes.make(ErrorCodes.UNKNOWN_COMMAND, "Unknown command: %s" % command)
+		return unknown_command_error(command)
 	var handler_key: String = command_spec["handler"]
 	var instance = _lazy_handler_cache.get(handler_key)
 	if instance == null:

@@ -45,6 +45,8 @@ func newDomainCommands() []*cobra.Command {
 			parent.AddCommand(newSessionListCommand(), newSessionActivateCommand())
 		case "custom":
 			parent.AddCommand(newCustomListCommand(), newCustomInvokeCommand())
+		case "tilemap":
+			parent.AddCommand(newTilemapDumpCommand(), newTilemapRenderCommand())
 		}
 		cmds = append(cmds, parent)
 	}

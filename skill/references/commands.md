@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --format md` (154 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --format md` (159 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --format md
@@ -27,7 +27,7 @@ Conventions applying to every op:
 - CLI-side extras not in the wire params: `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
 
-Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` (local texture palette analysis / pixel sampling / sprite-sheet grid detection — no editor needed), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
+Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` / `image view` (local texture palette analysis / pixel sampling / sprite-sheet grid detection / nearest-neighbor upscale for inspection — no editor needed), `tilemap dump` / `tilemap render` (local .tscn TileMapLayer decode / PNG composite — no editor needed), plus `launch` / `stop` / `status` / `serve` / `godot detect` / `godot use` / `plugin install` / `update` / `version` / `commands`.
 
 ## editor (9 ops)
 
@@ -148,12 +148,17 @@ Response: {"format","width","height","frames_drawn","image_base64"}; image_base6
 ### `script read` — Read a GDScript source file
 `read_script` · 8s · --path string (required)
 
-## project (6 ops)
+## project (7 ops)
 
 ### `project continue` — Resume a game paused at a debugger break (e.g. after a failed eval)
 `project_continue` · 8s · no flags
 Response: {"continued","was_breaked"}
 A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.
+
+### `project focus` — Bring the running game window to the foreground
+`project_focus` · 8s · no flags
+Response: {"focused"}
+Uses DisplayServer.window_move_to_foreground — the recovery when eval reports the game's main loop not advancing because the game window lost focus. May not take effect while the game is parked at a debugger break; run `project continue` first in that case.
 
 ### `project run` — Play the project and wait briefly for game liveness
 `run_project` · 8s · **[write]** · --mode string (default "main"), --scene string, --autosave bool (default "true")
@@ -450,7 +455,7 @@ Debug outlines ARE included in the game framebuffer capture; a capture flagged `
 ### `ui set-text` — Set the text of a Label/Button/RichTextLabel
 `set_text` · 8s · **[write]** · --path string (required), --text string (required)
 
-## resource (13 ops)
+## resource (15 ops)
 
 ### `resource assign` — Assign a resource to a node's property
 `assign_resource` · 8s · **[write]** · --path string (required), --property string (required), --resource-path string (required)
@@ -492,6 +497,14 @@ Debug outlines ARE included in the game framebuffer capture; a capture flagged `
 `spriteframes_from_sheet` · 8s · **[write]** · --resource-path string (required), --texture string (required), --cell string (required), --rows string (required), --fps float (default "8.0"), --loop bool (default "true")
 Animations named in --rows are rebuilt in place (idempotent); others are untouched. Example: `resource spriteframes-from-sheet --resource-path res://assets/hero.tres --texture res://assets/hero.png --cell 32x32 --rows "0:normal_down,1:normal_left" --fps 8`.
 
+### `resource spriteframes-list-frames` — List the frames of a SpriteFrames .tres
+`resource_spriteframes_list_frames` · 8s · --resource string (required), --animation string
+Response: {"animations"}
+
+### `resource spriteframes-swap-frames` — Swap the frame lists of two animations in a SpriteFrames .tres
+`resource_spriteframes_swap_frames` · 8s · **[write]** · --resource string (required), --animation-a string (required), --animation-b string (required)
+Response: {"swapped","frame_counts"}
+
 ## api (1 op)
 
 ### `api get-class` — Inspect ClassDB metadata for a Godot class (default: properties only)
@@ -511,13 +524,22 @@ Animations named in --rows are rebuilt in place (idempotent); others are untouch
 ### `tilemap set-cells-rect` — Fill a rectangle of cells with one tile
 `tilemap_set_cells_rect` · 8s · **[write]** · --path string (required), --source-id int (required), --atlas-col int (required), --atlas-row int (required), --rect-x int (required), --rect-y int (required), --rect-w int (required), --rect-h int (required)
 
-## tileset (2 ops)
+## tileset (4 ops)
+
+### `tileset add-physics-layer` — Add a physics layer to a TileSet
+`tileset_add_physics_layer` · 8s · **[write]** · --resource string (required), --collision-layer int (default "1"), --collision-mask int (default "1")
+Response: {"physics_layers_count"}
 
 ### `tileset get-atlas-image` — Read a TileSet atlas image
 `tileset_get_atlas_image` · 8s · --tileset-path string (required), --source-id int (required), --max-size int (default "0")
 
 ### `tileset get-atlas-tiles` — List the tiles of a TileSet atlas source
 `tileset_get_atlas_tiles` · 8s · --tileset-path string (required), --source-id int (required)
+
+### `tileset set-tile-collision` — Set a collision polygon on one atlas tile of a TileSet
+`tileset_set_tile_collision` · 8s · **[write]** · --resource string (required), --source int (required), --atlas-coords string (required), --points string (required), --layer int (default "0")
+Response: {"points"}
+Example: `tileset set-tile-collision --resource res://tiles.tres --source 0 --atlas-coords 2,3 --points "0,0 16,0 16,16 0,16"` adds a full-tile square on physics layer 0.
 
 ## gridmap (5 ops)
 

@@ -16,7 +16,7 @@ import (
 )
 
 // PluginVersion returns the version declared by the vendored godot_ai
-// editor plugin (e.g. "3.2.4").
+// editor plugin (e.g. "3.2.6").
 func PluginVersion() string {
 	return plugin.PluginVersion()
 }

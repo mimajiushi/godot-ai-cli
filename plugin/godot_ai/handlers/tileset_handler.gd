@@ -5,9 +5,11 @@ extends RefCounted
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
+var _connection: McpConnection
 
-func _init() -> void:
-	pass
+
+func _init(connection: McpConnection = null) -> void:
+	_connection = connection
 
 
 ## Query all occupied atlas tile positions for a single source.
@@ -176,3 +178,158 @@ func _resolve_atlas_source(params: Dictionary) -> Dictionary:
 		"source_id": source_id,
 		"src": src,
 	}
+
+
+## --- godot-ai-cli fork patch: TileSet 物理层写操作 ---
+##
+## 与 spriteframes_handler 同一写盘模式：load → duplicate() 后修改副本（避免
+## 污染缓存与已打开场景持有的 Resource）→ McpResourceIO.save_to_disk。
+
+
+## 为 TileSet 追加一个物理层并设置其 collision layer/mask。
+##
+## params:
+##   resource         — res:// 路径的 .tres TileSet（必填）
+##   collision_layer  — int，默认 1
+##   collision_mask   — int，默认 1
+##
+## Returns: {"data": {"physics_layers_count": int, ...}} 或错误字典。
+func add_physics_layer(params: Dictionary) -> Dictionary:
+	var resolved := _resolve_tileset(params)
+	if resolved.has("error"):
+		return resolved
+	var tileset: TileSet = resolved.tileset
+	tileset.add_physics_layer()
+	var layer_idx := tileset.get_physics_layers_count() - 1
+	tileset.set_physics_layer_collision_layer(layer_idx, int(params.get("collision_layer", 1)))
+	tileset.set_physics_layer_collision_mask(layer_idx, int(params.get("collision_mask", 1)))
+	return McpResourceIO.save_to_disk(tileset, resolved.resource_path, true, "TileSet", {
+		"physics_layers_count": tileset.get_physics_layers_count(),
+		"reason": "File save is persistent; edit the .tres file manually to revert",
+	}, _connection)
+
+
+## 为某个图集瓦片写入物理碰撞多边形（单多边形，覆盖式）。
+##
+## params:
+##   resource     — res:// 路径的 .tres TileSet（必填）
+##   source       — int，TileSet 原始 source id（必填）
+##   atlas_coords — "x,y" 字符串，图集坐标（必填）
+##   points       — "x,y x,y ..." 空格分隔的多边形顶点，至少 3 点（必填）
+##   layer        — int，物理层序号，默认 0
+##
+## Returns: {"data": {"points": int, ...}} 或错误字典。
+func set_tile_collision(params: Dictionary) -> Dictionary:
+	var resolved := _resolve_tileset(params)
+	if resolved.has("error"):
+		return resolved
+	var tileset: TileSet = resolved.tileset
+
+	if not params.has("source"):
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: source")
+	var source_id := int(params.get("source", -1))
+	if source_id < 0 or not tileset.has_source(source_id):
+		return ErrorCodes.make(
+			ErrorCodes.VALUE_OUT_OF_RANGE,
+			"source %d does not exist in TileSet %s" % [source_id, resolved.resource_path]
+		)
+	var src := tileset.get_source(source_id)
+	if not (src is TileSetAtlasSource):
+		var source_type := "null" if src == null else src.get_class()
+		return ErrorCodes.make(
+			ErrorCodes.WRONG_TYPE,
+			"Source %d is not a TileSetAtlasSource (got %s) — collision polygons need an atlas tile"
+				% [source_id, source_type]
+		)
+	var atlas_src := src as TileSetAtlasSource
+
+	var coords_str := str(params.get("atlas_coords", ""))
+	var coords = _parse_vector2i(coords_str)
+	if coords == null:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Invalid atlas_coords '%s' — want \"x,y\", e.g. 0,0" % coords_str
+		)
+	if not atlas_src.has_tile(coords):
+		return ErrorCodes.make(
+			ErrorCodes.VALUE_OUT_OF_RANGE,
+			"Tile %s does not exist in source %d" % [coords_str, source_id]
+		)
+
+	var points_str := str(params.get("points", ""))
+	var points = _parse_points(points_str)
+	if points == null:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Invalid points '%s' — want space-separated \"x,y x,y ...\" vertices" % points_str
+		)
+	if points.size() < 3:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Collision polygon needs at least 3 points, got %d" % points.size()
+		)
+
+	var layer := int(params.get("layer", 0))
+	if layer < 0 or layer >= tileset.get_physics_layers_count():
+		return ErrorCodes.make(
+			ErrorCodes.VALUE_OUT_OF_RANGE,
+			"Physics layer %d does not exist — add one first with tileset_add_physics_layer" % layer
+		)
+
+	var tile_data := atlas_src.get_tile_data(coords, 0)
+	tile_data.set_collision_polygons_count(layer, 1)
+	tile_data.set_collision_polygon_points(layer, 0, points)
+	return McpResourceIO.save_to_disk(tileset, resolved.resource_path, true, "TileSet", {
+		"points": points.size(),
+		"reason": "File save is persistent; edit the .tres file manually to revert",
+	}, _connection)
+
+
+## 加载并 duplicate() 一个 TileSet 供写操作修改。返回
+## {"tileset": TileSet, "resource_path": String} 或错误字典。
+func _resolve_tileset(params: Dictionary) -> Dictionary:
+	var resource_path := str(params.get("resource", ""))
+	if resource_path.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: resource")
+	var path_err = McpPathValidator.loadable_error(resource_path, "resource")
+	if path_err != null:
+		return path_err
+	if not ResourceLoader.exists(resource_path):
+		return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND, "TileSet resource not found: %s" % resource_path)
+	var loaded: Resource = ResourceLoader.load(resource_path)
+	if not (loaded is TileSet):
+		var loaded_type := "null" if loaded == null else loaded.get_class()
+		return ErrorCodes.make(
+			ErrorCodes.WRONG_TYPE,
+			"Resource at '%s' is not a TileSet (got %s)" % [resource_path, loaded_type]
+		)
+	return {"tileset": loaded.duplicate(), "resource_path": resource_path}
+
+
+## "x,y" → Vector2i；格式非法返回 null。
+static func _parse_vector2i(s: String) -> Variant:
+	var parts := s.split(",")
+	if parts.size() != 2:
+		return null
+	var x := parts[0].strip_edges()
+	var y := parts[1].strip_edges()
+	if not x.is_valid_int() or not y.is_valid_int():
+		return null
+	return Vector2i(int(x), int(y))
+
+
+## "x,y x,y ..." → PackedVector2Array；任一段非法返回 null。
+static func _parse_points(s: String) -> Variant:
+	var out := PackedVector2Array()
+	for pair in s.split(" ", false):
+		var parts := pair.split(",")
+		if parts.size() != 2:
+			return null
+		var x := parts[0].strip_edges()
+		var y := parts[1].strip_edges()
+		if not x.is_valid_float() or not y.is_valid_float():
+			return null
+		out.append(Vector2(float(x), float(y)))
+	if out.is_empty():
+		return null
+	return out

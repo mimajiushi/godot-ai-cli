@@ -136,6 +136,25 @@ optional, older peers ignore/absent them.
   PNG/GIF post-processing), `editor screenshot --region` (local crop),
   `image grid-detect` (local sprite-sheet grid inference).
 
+## 10. Tilemap file parsing, tile physics, and SpriteFrames/focus ops (beta.11)
+
+- `plugin.gd` + handlers — five new registered commands: `project_focus`
+  (CLI `project focus`; DisplayServer.window_move_to_foreground for a
+  focus-stalled game loop), `tileset_add_physics_layer` /
+  `tileset_set_tile_collision` (CLI `tileset add-physics-layer` /
+  `set-tile-collision`; TileSet physics layer + per-tile collision polygon),
+  `resource_spriteframes_list_frames` / `resource_spriteframes_swap_frames`
+  (CLI `resource spriteframes-list-frames` / `spriteframes-swap-frames`).
+- Plugin fix: `game_eval --echo-prints` now captures the lines of plain
+  `print(expr)` statements into `prints` (previously omitted), so the eval
+  DocNote example reflects real behavior. `plugin.cfg` version 3.2.5 → 3.2.6.
+- CLI-only (no plugin change): `tilemap dump` / `tilemap render`
+  (`internal/tilemapfile` — decodes TileMapLayer `tile_map_data`
+  PackedByteArray straight from the .tscn text and composites a map PNG from
+  the TileSet atlas, no editor needed), `image view`
+  (`internal/image.UpscaleNearest` — nearest-neighbor zoom for inspecting
+  saved frames).
+
 ## 9. Machine-regenerable docs surface (beta.10)
 
 CLI-only (no plugin change). Makes the skill's `references/commands.md` a

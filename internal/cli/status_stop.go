@@ -3,12 +3,14 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 	"github.com/mimajiushi/godot-ai-cli/internal/godot"
+	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
 
@@ -70,7 +72,7 @@ Examples:
 			if err != nil {
 				return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
 			}
-			sessions, compatWarnings := enrichSessions(sessionsBody["sessions"])
+			sessions, compatWarnings := enrichSessions(sessionsBody["sessions"], fmt.Sprint(statusBody["version"]))
 			payload := map[string]any{
 				"status": "ok",
 				"daemon": map[string]any{
@@ -469,10 +471,13 @@ func editorAliveWarnings(httpPort int, alive []int) []string {
 // enrichSessions annotates every session entry with godot_compatible and —
 // for unsupported or untestable editors — a warning, so an incompatible
 // editor never fails silently (the daemon accepts sessions from any Godot
-// version). It also normalizes the daemon-reported origin and tags
-// user-opened editors with a note explaining that a full stop keeps them.
-// The compat warnings roll up for the top-level warnings field.
-func enrichSessions(raw any) (any, []string) {
+// version). It also normalizes the daemon-reported origin, tags user-opened
+// editors with a note explaining that a full stop keeps them, and tags
+// plugin_stale sessions (patch-level version drift, accepted by the
+// major.minor handshake gate) with a note pointing at plugin install.
+// bundledVersion is the daemon-reported version used to name the align
+// target. The compat warnings roll up for the top-level warnings field.
+func enrichSessions(raw any, bundledVersion string) (any, []string) {
 	list, ok := raw.([]any)
 	if !ok {
 		return raw, nil
@@ -493,12 +498,41 @@ func enrichSessions(raw any) (any, []string) {
 		}
 		origin := sessionOrigin(sess)
 		sess["origin"] = origin
+		var notes []string
 		if origin == "user" {
-			sess["note"] = "user-opened editor — stop keeps it (use `stop --session <id>` or `stop --all` to quit it)"
+			notes = append(notes, "user-opened editor — stop keeps it (use `stop --session <id>` or `stop --all` to quit it)")
+		}
+		if sess["plugin_stale"] == true {
+			notes = append(notes, pluginStaleNote(fmt.Sprint(sess["plugin_version"]), bundledVersion))
+		}
+		if len(notes) > 0 {
+			sess["note"] = strings.Join(notes, "; ")
 		}
 		out = append(out, sess)
 	}
 	return out, warnings
+}
+
+// pluginStaleNote renders the per-session note / launch warning for a
+// session whose plugin version drifted from the daemon's bundled plugin at
+// patch level (the handshake accepted it as major.minor compatible). The
+// comparison sign is computed so a NEWER plugin (3.2.7 vs bundled 3.2.6)
+// never reads as "v3.2.7 < v3.2.6".
+func pluginStaleNote(pluginVersion, bundledVersion string) string {
+	sign := "≠"
+	if pv, perr := pluginmeta.ParseSemver(pluginVersion); perr == nil {
+		if bv, berr := pluginmeta.ParseSemver(bundledVersion); berr == nil {
+			switch pluginmeta.Compare(pv, bv) {
+			case -1:
+				sign = "<"
+			case 1:
+				sign = ">"
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"plugin v%s %s bundled v%s — run `godot-ai-cli plugin install --project <dir>` and restart the editor to pick up new ops",
+		pluginVersion, sign, bundledVersion)
 }
 
 // godotVersionCompatibility classifies the godot_version one session

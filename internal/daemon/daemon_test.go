@@ -182,6 +182,43 @@ func TestSessionsExposeOrigin(t *testing.T) {
 	}
 }
 
+// TestSessionsExposePluginStale: the sessions endpoint publishes
+// plugin_version for every session and plugin_stale only for sessions whose
+// handshake was accepted with a patch-level version drift (major.minor
+// compatible, patch unequal) — the flag is absent for aligned sessions.
+func TestSessionsExposePluginStale(t *testing.T) {
+	d := startDaemon(t) // daemon version testVersion = "3.2.5"
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	aligned := mockplugin.Dial(t, addr, nil) // default plugin_version == testVersion
+	stale := mockplugin.Dial(t, addr, map[string]any{"plugin_version": "3.2.7"})
+
+	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
+	if code != http.StatusOK {
+		t.Fatalf("status code = %d", code)
+	}
+	byID := map[string]map[string]any{}
+	for _, entry := range body["sessions"].([]any) {
+		s := entry.(map[string]any)
+		byID[s["session_id"].(string)] = s
+	}
+
+	a := byID[aligned.SessionID]
+	if a["plugin_version"] != testVersion {
+		t.Errorf("aligned session plugin_version = %v, want %s", a["plugin_version"], testVersion)
+	}
+	if _, present := a["plugin_stale"]; present {
+		t.Errorf("aligned session carries plugin_stale = %v, want the field absent", a["plugin_stale"])
+	}
+
+	st := byID[stale.SessionID]
+	if st["plugin_version"] != "3.2.7" {
+		t.Errorf("stale session plugin_version = %v, want 3.2.7", st["plugin_version"])
+	}
+	if st["plugin_stale"] != true {
+		t.Errorf("stale session plugin_stale = %v, want true", st["plugin_stale"])
+	}
+}
+
 // postRaw performs a POST with an explicit Content-Type and decodes the
 // JSON response.
 func postRaw(t *testing.T, url, contentType, body string) (int, map[string]any) {

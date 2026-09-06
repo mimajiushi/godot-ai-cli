@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 )
 
 const (
@@ -49,6 +51,11 @@ type Session struct {
 	PluginVersion   string
 	ProtocolVersion int
 	EditorPID       int
+	// PluginStale marks a handshake accepted with a patch-level version
+	// drift: compatible major.minor, unequal patch (e.g. plugin 3.2.6 vs
+	// bundled 3.2.7). The session works, but the plugin may miss ops the
+	// CLI advertises — status/launch surface it as a warning.
+	PluginStale bool
 	// Origin is the normalized provenance from the handshake's launched_by
 	// field: "cli" for editors the CLI spawned, "user" for everything else
 	// (including pre-3.2.7 plugins that carry no launched_by field).
@@ -358,18 +365,36 @@ func (s *Server) handleConn(c *websocket.Conn) {
 		return
 	}
 
+	// Version gate: major.minor must match the server's bundled plugin
+	// version. A patch-level drift is accepted and flagged stale; a
+	// malformed or minor/major-mismatched plugin version is rejected
+	// before the session is registered.
+	stale, rejectReason := s.checkPluginVersion(hs.PluginVersion)
+	if rejectReason != "" {
+		slog.Warn("bridge: rejecting handshake", "session", hs.SessionID, "reason", rejectReason)
+		_ = c.Close(websocket.StatusPolicyViolation, rejectReason)
+		return
+	}
+
 	wc := &wsConn{conn: c}
-	if !s.registerSession(&hs, wc) {
+	if !s.registerSession(&hs, wc, stale) {
 		_ = c.Close(closeCodeDuplicateSession, "session id already registered")
 		return
 	}
 
-	// Report the server version; the plugin strict-checks it against its
-	// own plugin.cfg version.
-	if err := wc.writeJSON(context.Background(), handshakeAck{
+	// Report the server version; the plugin checks it for major.minor
+	// compatibility against its own plugin.cfg version. A stale-accepted
+	// handshake also carries plugin_stale + bundled_plugin_version so the
+	// plugin can warn about the drift instead of failing.
+	ack := handshakeAck{
 		Type:          "handshake_ack",
 		ServerVersion: s.version,
-	}); err != nil {
+	}
+	if stale {
+		ack.PluginStale = true
+		ack.BundledPluginVersion = s.version
+	}
+	if err := wc.writeJSON(context.Background(), ack); err != nil {
 		slog.Warn("bridge: handshake_ack send failed", "session", hs.SessionID, "err", err)
 		s.unregisterSession(hs.SessionID)
 		_ = c.CloseNow()
@@ -396,6 +421,32 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	_ = c.CloseNow()
 }
 
+// checkPluginVersion applies the handshake version gate. It returns
+// stale=true for an accepted patch-level drift and a non-empty rejection
+// reason when the handshake must be refused (empty reason = accept).
+//
+// The gate keys on the server's OWN version only when it parses as
+// semver: production daemons always run with the vendored plugin.cfg
+// version, while tests/dev builds may pass a placeholder — a server that
+// cannot name its version accepts any well-formed plugin version.
+func (s *Server) checkPluginVersion(pluginVersion string) (stale bool, rejectReason string) {
+	pv, err := pluginmeta.ParseSemver(pluginVersion)
+	if err != nil {
+		return false, fmt.Sprintf("malformed plugin_version %q: the plugin must report a major.minor.patch version", pluginVersion)
+	}
+	sv, err := pluginmeta.ParseSemver(s.version)
+	if err != nil {
+		return false, ""
+	}
+	if !pluginmeta.Compatible(pv, sv) {
+		// The close reason rides a WebSocket close frame: 123 bytes max.
+		return false, fmt.Sprintf(
+			"incompatible plugin version %s (server %s): major.minor must match",
+			pluginVersion, s.version)
+	}
+	return pv != sv, ""
+}
+
 // normalizeOrigin maps the handshake's launched_by provenance onto the
 // session origin. Only "cli" is trusted; a missing (pre-3.2.7 plugin) or
 // unrecognized value normalizes to "user", so a session we cannot identify
@@ -409,7 +460,8 @@ func normalizeOrigin(launchedBy string) string {
 
 // registerSession adds the session and connection to the registry. It
 // returns false when the session_id is already registered (duplicate).
-func (s *Server) registerSession(hs *Handshake, wc *wsConn) bool {
+// stale carries the version gate's patch-drift verdict onto the session.
+func (s *Server) registerSession(hs *Handshake, wc *wsConn, stale bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -425,6 +477,7 @@ func (s *Server) registerSession(hs *Handshake, wc *wsConn) bool {
 		PluginVersion:   hs.PluginVersion,
 		ProtocolVersion: hs.ProtocolVersion,
 		EditorPID:       hs.EditorPID,
+		PluginStale:     stale,
 		Origin:          normalizeOrigin(hs.LaunchedBy),
 		readiness:       hs.Readiness,
 	}

@@ -80,6 +80,14 @@ var _auth_mismatch_closes := 0
 ## false alarm".
 var server_version := ""
 
+## daemon 在 handshake_ack 里携带的兼容标记（契约见 internal/bridge）：
+## plugin_stale=true 表示 daemon 判定本插件与它版本兼容但非精确相等
+## （patch 漂移，如插件 3.2.6 + daemon 3.2.7）——仅作展示/诊断，不再
+## 影响连接；bundled_plugin_version 是 daemon 捆绑的插件版本。旧版
+## daemon 不带这两个字段，保持默认 false/""。
+var server_plugin_stale := false
+var bundled_plugin_version := ""
+
 var dispatcher
 var log_buffer
 var surfaced_error_tracker
@@ -290,6 +298,8 @@ func disconnect_from_server() -> void:
 ## Also fires on plain reconnect-loop drops — correct either way.
 func _clear_on_disconnect() -> void:
 	server_version = ""
+	server_plugin_stale = false
+	bundled_plugin_version = ""
 	## Reset the spillover counter so a flood pattern from the previous
 	## connection doesn't pollute the next one's `logs_read` baseline.
 	_packet_spillover_total = 0
@@ -648,6 +658,9 @@ func _handle_message(raw: String) -> void:
 
 func _handle_handshake_ack(parsed: Dictionary) -> void:
 	server_version = str(parsed.get("server_version", ""))
+	## daemon 侧放宽后的软标记：兼容但 patch 不等时置位
+	server_plugin_stale = bool(parsed.get("plugin_stale", false))
+	bundled_plugin_version = str(parsed.get("bundled_plugin_version", ""))
 	## The server accepted our handshake — any token-mismatch streak is
 	## over; a later unrelated 4003 starts a fresh one.
 	_auth_mismatch_closes = 0

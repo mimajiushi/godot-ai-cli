@@ -168,6 +168,75 @@ func TestStatusReportsOrigin(t *testing.T) {
 	}
 }
 
+// TestStatusReportsPluginStale: a session accepted with a patch-level
+// plugin version drift gets a per-session note naming both versions and
+// the align path; an aligned session gets none.
+func TestStatusReportsPluginStale(t *testing.T) {
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "3.2.8"})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = d.Shutdown(ctx)
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	mockplugin.Dial(t, addr, map[string]any{"session_id": "aligned@0001", "plugin_version": "3.2.8", "launched_by": "cli"})
+	mockplugin.Dial(t, addr, map[string]any{"session_id": "stale@0002", "plugin_version": "3.2.6", "launched_by": "cli"})
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v\n%s", err, buf.String())
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	byID := map[string]map[string]any{}
+	for _, entry := range out["sessions"].([]any) {
+		s := entry.(map[string]any)
+		byID[s["session_id"].(string)] = s
+	}
+
+	stale := byID["stale@0002"]
+	if stale["plugin_stale"] != true {
+		t.Errorf("stale session plugin_stale = %v, want true", stale["plugin_stale"])
+	}
+	note, _ := stale["note"].(string)
+	if !strings.Contains(note, "plugin v3.2.6 < bundled v3.2.8") ||
+		!strings.Contains(note, "plugin install --project <dir>") {
+		t.Errorf("stale session note = %q, want version drift + align hint", note)
+	}
+
+	aligned := byID["aligned@0001"]
+	if _, noted := aligned["note"]; noted {
+		t.Errorf("aligned session unexpectedly noted: %v", aligned["note"])
+	}
+}
+
+// TestPluginStaleNote pins the note wording, including the direction sign
+// for a plugin NEWER than the daemon's bundled build (a patch-older
+// daemon), which must never render as "<".
+func TestPluginStaleNote(t *testing.T) {
+	if got := pluginStaleNote("3.2.6", "3.2.8"); !strings.Contains(got, "v3.2.6 < bundled v3.2.8") {
+		t.Errorf("older plugin note = %q", got)
+	}
+	if got := pluginStaleNote("3.2.8", "3.2.6"); !strings.Contains(got, "v3.2.8 > bundled v3.2.6") {
+		t.Errorf("newer plugin note = %q", got)
+	}
+	// An unparseable side degrades to a plain inequality sign, never "<".
+	if got := pluginStaleNote("garbage", "3.2.8"); !strings.Contains(got, "vgarbage ≠ bundled v3.2.8") {
+		t.Errorf("unparseable plugin note = %q", got)
+	}
+}
+
 // TestStatusNoWarningsWithoutSessions: without sessions the top-level
 // warnings field stays absent.
 func TestStatusNoWarningsWithoutSessions(t *testing.T) {

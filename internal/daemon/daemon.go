@@ -279,17 +279,24 @@ func (d *Daemon) handleSessions(w http.ResponseWriter, _ *http.Request) {
 	}
 	sessions := make([]map[string]any, 0)
 	for _, s := range d.bridge.Sessions() {
-		sessions = append(sessions, map[string]any{
-			"session_id":    s.ID,
-			"godot_version": s.GodotVersion,
-			"project_path":  s.ProjectPath,
-			"readiness":     s.Readiness(),
-			"editor_pid":    s.EditorPID,
-			"active":        s.ID == activeID,
+		entry := map[string]any{
+			"session_id":     s.ID,
+			"godot_version":  s.GodotVersion,
+			"project_path":   s.ProjectPath,
+			"readiness":      s.Readiness(),
+			"editor_pid":     s.EditorPID,
+			"active":         s.ID == activeID,
+			"plugin_version": s.PluginVersion,
 			// "cli" for editors launch spawned, "user" for manually opened
 			// ones (and pre-3.2.7 plugins) — stop protects the latter.
 			"origin": s.Origin,
-		})
+		}
+		// A patch-level version drift (accepted by the major.minor handshake
+		// gate) is published only when present — absent means aligned.
+		if s.PluginStale {
+			entry["plugin_stale"] = true
+		}
+		sessions = append(sessions, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }

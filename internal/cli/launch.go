@@ -349,6 +349,15 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		}
 	}
 
+	// Reusing a session whose plugin drifted at patch level (accepted by
+	// the major.minor handshake gate) must surface the same stale hint
+	// status shows — the reused editor keeps running its OLD plugin code
+	// even after `plugin install` aligned the files on disk.
+	if session["plugin_stale"] == true {
+		warnings = append(warnings,
+			pluginStaleNote(fmt.Sprint(session["plugin_version"]), pluginmeta.PluginVersion()))
+	}
+
 	if warnings == nil {
 		warnings = []string{}
 	}

@@ -28,6 +28,7 @@ const CliDaemon := preload("res://addons/godot_ai/utils/cli_daemon.gd")
 const McpStartupPathScript := preload("res://addons/godot_ai/utils/mcp_startup_path.gd")
 const McpAdoptionLabelScript := preload("res://addons/godot_ai/utils/mcp_adoption_label.gd")
 const McpServerVersionCheckScript := preload("res://addons/godot_ai/utils/server_version_check.gd")
+const VersionCompat := preload("res://addons/godot_ai/utils/version_compat.gd")
 
 # ---- State (owned here, was on plugin.gd through PR 5) ---------------
 
@@ -66,6 +67,9 @@ var _server_actual_name: String = ""
 
 ## Diagnostic + recovery flags surfaced to the dock via `get_status()`.
 var _server_status_message: String = ""
+## 兼容但 patch 漂移（3.2.6 ↔ 3.2.7）时的软警告文案，READY 状态下由
+## get_status_dict() 透出（version_note）；硬阻断 / 精确相等时为空。
+var _server_version_note: String = ""
 ## #647: when a post-crash probe pins the failure on a specific port held
 ## by a foreign process, this names that port (HTTP or WS) so the dock's
 ## status line and port-picker gating don't blame the wrong one. Zero when
@@ -266,6 +270,7 @@ func get_status_dict() -> Dictionary:
 		"actual_version": _server_actual_version,
 		"expected_version": _server_expected_version,
 		"message": _server_status_message,
+		"version_note": _server_version_note,
 		"can_recover_incompatible": _can_recover_incompatible,
 		"connection_blocked": _connection_blocked,
 		"conflict_port": _conflict_port,
@@ -286,14 +291,16 @@ func authorize_stale_recovery(rounds: int = 2) -> void:
 
 ## True when a spent round of stale-occupant recovery may target the live
 ## occupant: budget remains and the occupant is a VERIFIED godot-ai whose
-## version differs from ours. An empty version (foreign or unverified
-## occupant) never qualifies — those stay on the strong-proof-only path.
+## version is genuinely INCOMPATIBLE with ours (minor/major 不等或 dev 后缀
+## 错配——见 McpVersionCompat）。patch 级漂移（3.2.6 ↔ 3.2.7）是兼容连接，
+## 绝不因此杀掉一个正常服役的 daemon；空版本（foreign 或未验证 occupant）
+## 同样永远不够格——那些留在 strong-proof-only 路径上。
 func _stale_recovery_available(live_version: String, expected_version: String) -> bool:
 	if _stale_recovery_budget <= 0:
 		return false
 	if live_version.is_empty():
 		return false
-	return live_version != expected_version
+	return not VersionCompat.versions_compatible(live_version, expected_version)
 
 
 func get_server_pid() -> int:
@@ -426,6 +433,13 @@ func handle_server_version_verified(expected_version: String, version: String) -
 		## A verified compatible handshake ends any stale-recovery episode —
 		## leftover authorized rounds must not survive into a later walk.
 		_stale_recovery_budget = 0
+		## patch 级漂移（3.2.6 ↔ 3.2.7）：允许连接，仅记录软警告（dock 琥珀色
+		## 展示），不再硬阻断——3.2.6 插件 + 3.2.7 daemon 事故的修复核心。
+		if str(compatibility.get("reason", "")) == "exact":
+			_server_version_note = ""
+		else:
+			_server_version_note = VersionCompat.compatible_mismatch_note(version, expected)
+			push_warning("MCP | " + _server_version_note)
 		## Foreign-port and post-spawn handshakes both clear to READY
 		## on a successful handshake. Late re-arms from READY also land
 		## here and self-confirm.
@@ -477,22 +491,18 @@ func handle_server_version_unverified(expected_version: String) -> void:
 
 # ---- Compatibility / version helpers (pure) ---------------------------
 
-## Plugin and server speak a single, version-coupled protocol — new commands
-## and response fields are added together. Treating dev-mode mismatches as
-## "compatible" silently adopts a stale server whose code may differ from the
-## live source tree (e.g. another worktree on a different branch holding
-## port 8000). Strict match in all modes routes mismatches through
-## `recover_strong_port_occupant`, which kills the branded port-holder and
-## lets `start_server` spawn fresh against the current source.
+## 兼容判定委托给 McpVersionCompat——全插件单一口径（与 Go 侧
+## internal/pluginmeta 逐字一致）：major.minor 相等即兼容，patch 漂移
+## （3.2.6 ↔ 3.2.7）允许连接并标记软警告；minor/major 不等才拒绝。
+## dev/预发布后缀不参与放宽：带后缀的错配沿用旧的严格口径（不兼容），
+## 避免静默 adopt 一个代码可能与发布版不同的 dev 后端（例如另一个
+## worktree 的分支占着 8000 端口）。不兼容的错配仍走
+## `recover_strong_port_occupant` 杀掉品牌占用者并重新 spawn。
 static func _server_version_compatibility(
 	actual_version: String,
 	expected_version: String
 ) -> Dictionary:
-	if actual_version.is_empty():
-		return {"compatible": false, "reason": "unknown"}
-	if actual_version == expected_version:
-		return {"compatible": true, "reason": "exact"}
-	return {"compatible": false, "reason": "version_mismatch"}
+	return VersionCompat.compatibility(actual_version, expected_version)
 
 
 static func _server_status_compatibility(
@@ -560,6 +570,8 @@ func _set_incompatible_server(
 	_server_status_message = _incompatible_server_message(
 		live, expected_version, port, int(_host._resolved_ws_port)
 	)
+	## 硬阻断落地时清掉软警告——dock 只应展示其中一种。
+	_server_version_note = ""
 	## Conservative default until the off-thread proof lands: the dock
 	## paints "not recoverable" rather than offering a kill we have not
 	## yet proven ownership for.
@@ -643,14 +655,19 @@ static func _incompatible_server_message(
 		+ "HTTP and WS ports."
 	)
 	if not version.is_empty():
+		## minor/major 错配的硬阻断补上版本对齐指引（3.2.6/3.2.7 事故后）；
+		## 同版本仅 WS 端口错配时不加——那与版本无关。
+		var align_hint := ""
+		if version != expected_version:
+			align_hint = " To align versions: %s" % VersionCompat.incompatible_align_hint()
 		if actual_ws_port > 0 and actual_ws_port != expected_ws_port:
 			return (
 				"Port %d is occupied by godot-ai server v%s using WS port %d%s; "
-				+ "plugin expects v%s with WS port %d. %s"
-			) % [port, version, actual_ws_port, path_suffix, expected_version, expected_ws_port, repair]
+				+ "plugin expects v%s with WS port %d. %s%s"
+			) % [port, version, actual_ws_port, path_suffix, expected_version, expected_ws_port, repair, align_hint]
 		return (
-			"Port %d is occupied by godot-ai server v%s%s; plugin expects v%s. %s"
-		) % [port, version, path_suffix, expected_version, repair]
+			"Port %d is occupied by godot-ai server v%s%s; plugin expects v%s. %s%s"
+		) % [port, version, path_suffix, expected_version, repair, align_hint]
 	var status_code := int(live.get("status_code", 0))
 	if status_code > 0:
 		return (
@@ -890,6 +907,13 @@ func _start_server_impl(async_gen: int) -> void:
 			_server_actual_name = "godot-ai"
 			_server_actual_version = live_version
 			_can_recover_incompatible = false
+			## patch 级漂移的 adopt（3.2.6 插件 + 3.2.7 daemon）：兼容——记录
+			## 软警告并继续 adopt，不再走 INCOMPATIBLE 硬阻断。
+			if str(compatibility.get("reason", "")) == "exact":
+				_server_version_note = ""
+			else:
+				_server_version_note = VersionCompat.compatible_mismatch_note(live_version, current_version)
+				push_warning("MCP | " + _server_version_note)
 			## A matching version is compatibility evidence, not ownership
 			## evidence (#759/#764). A stale EditorSettings record can name a
 			## dead PID while an unrelated compatible server owns the port.
@@ -974,10 +998,27 @@ func _start_server_impl(async_gen: int) -> void:
 	## reusable — a spawned Python server would collide with that launch as
 	## FOREIGN_SERVER. Only when no godot-ai-cli binary can be located does
 	## the upstream Python spawn below run (unchanged).
+	##
+	## spawn 守卫（beta.13 事故回归）：PATH 里的二进制可能捆绑了与本插件
+	## 不同版本的插件代码，不加验证地 spawn 会主动制造错配 daemon。先离线
+	## 程执行 `<bin> -v` 解析 bundled plugin 版本，与本插件 plugin.cfg 版本
+	## 精确相等才 spawn；不等则跳过并落入下方既有的无 daemon 流程（不退而
+	## 去 spawn 版本更不靠谱的东西）。
 	var cli_bin := CliDaemon.find_bin()
 	if not cli_bin.is_empty():
-		_spawn_cli_daemon(cli_bin, port, ws_port, current_version)
-		return
+		var version_output: Variant = await _run_blocking(func() -> Variant:
+			return CliDaemon.probe_version_output(cli_bin)
+		)
+		if _async_stale(async_gen) or version_output == null:
+			return
+		if CliDaemon.should_spawn(str(version_output), current_version):
+			_spawn_cli_daemon(cli_bin, port, ws_port, current_version)
+			return
+		var bundled := CliDaemon.parse_bundled_plugin_version(str(version_output))
+		push_warning(
+			"MCP | found godot-ai-cli bundles plugin v%s ≠ this plugin v%s, not spawning"
+			% [bundled if not bundled.is_empty() else "(unparsable)", current_version]
+		)
 
 	_host._startup_trace_count("server_command_discovery")
 	## CLI-finder discovery shells out (which/where, login shell) on cache

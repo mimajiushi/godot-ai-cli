@@ -110,7 +110,7 @@ func versionTemplate() string {
   release source:      https://github.com/%s/%s
   protocol version:    %d
   supported Godot:     %s+ (%s+ recommended)
-  bundled plugin:      godot-ai v%s (forked, strict version match required)
+  bundled plugin:      godot-ai v%s (forked, major.minor must match)
   plugin command coverage: %d ops
 `, version.RepoOwner, version.RepoName, version.ProtocolVersion,
 		version.SupportedGodotMin, version.SupportedGodotRecommended,

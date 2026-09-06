@@ -78,7 +78,7 @@ Emitted by `update`. None of them modify the install — checksum/download failu
 | `DEFERRED_TIMEOUT` | A long plugin-side operation exceeded its deferred budget | Same handling as TRANSPORT_TIMEOUT. |
 | `INVALID_PARAMS` and family: `MISSING_REQUIRED_PARAM`, `WRONG_TYPE`, `VALUE_OUT_OF_RANGE`, `NODE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `PROPERTY_NOT_ON_CLASS` | Input problems — the first three are fixable input errors, the last three are structural lookups | Fix the flags; `api get-class --class-name X` lists real properties; `node find` / `filesystem search` locate real paths. |
 | `EDITED_SCENE_MISMATCH` | `--scene-file` guard tripped: another scene is being edited | `scene open` the intended scene or drop the guard. |
-| `UNKNOWN_COMMAND` | Plugin command name not registered | Check spelling against `commands --json` (`plugin_command` field). |
+| `UNKNOWN_COMMAND` | Plugin command name not registered — when the op IS in `commands --json`, the running editor's plugin is usually stale (see the plugin-version section below) | Check spelling against `commands --json` (`plugin_command` field); on a `plugin_stale` session, `plugin install --project <dir>` and restart the editor. |
 | `TEST_RUN_TIMEOUT` | Test run hit its abort ceiling; partial summary in `data` | `test results-get` returns the partial results. |
 | `EVAL_COMPILE_ERROR` / `EVAL_RUNTIME_ERROR` | `editor eval` code failed to compile / threw | Fix the eval snippet. |
 | `EVAL_GAME_NOT_READY` | Game helper not servicing evals though play mode is up | Wait for the game to finish booting; retry. |
@@ -87,6 +87,16 @@ Emitted by `update`. None of them modify the install — checksum/download failu
 | `GAME_HELPER_TIMEOUT` | Live game process failed to answer a game-side request | The game main loop is blocked/frozen; `project stop` and re-run. |
 | `INTERNAL_ERROR` | Unclassified plugin fault | `logs read --source plugin --include-details` for the stack. |
 | `SHUTDOWN_FAILED` | `stop` could not complete daemon shutdown | Teardown continued best-effort; check remaining processes manually. |
+
+## Plugin version compatibility (`plugin_stale`)
+
+The plugin↔daemon handshake is **major.minor compatible**, not exact-match: a 3.2.6 plugin talks to a 3.2.7 daemon (both directions). What happens per case:
+
+- **Patch drift (accepted)**: the session connects and carries `plugin_stale: true` in `status` / `session list`, plus a per-session note `plugin vX < bundled vY — run 'godot-ai-cli plugin install --project <dir>' and restart the editor to pick up new ops`; `launch` reusing such a session adds the same warning. The running editor keeps its OLD plugin code until restarted — ops added in the newer plugin answer `UNKNOWN_COMMAND` until then.
+- **Minor/major mismatch (refused)**: the daemon rejects the handshake (`incompatible plugin version …: major.minor must match`) and the plugin dock reports the server incompatible. Fix: align the project with `godot-ai-cli plugin install --project <dir>` and restart the editor, or update the CLI (`godot-ai-cli update`) so both sides share a major.minor.
+- **Malformed plugin version (refused)**: same rejection path; only real released plugin builds should ever hit it.
+
+The strict pre-3.2.8 behavior (exact equality both ways) is gone on purpose: every patch bump used to break every installed project at once.
 
 ## Port conflicts and the upstream Python godot-ai
 

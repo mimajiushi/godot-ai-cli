@@ -45,16 +45,16 @@ var parsedVersion = sync.OnceValue(func() string {
 		return v
 	}
 	// The vendored descriptor always carries a version; "unknown" only
-	// signals a corrupted embed and will fail the plugin's strict server
-	// version check loudly instead of silently.
+	// signals a corrupted embed and will fail the handshake version gate
+	// loudly instead of silently.
 	return "unknown"
 })
 
 // PluginVersion returns the version declared by the vendored godot_ai
-// editor plugin (e.g. "3.2.4"). The plugin enforces a STRICT equality
-// check between this and the server_version reported in the WebSocket
-// handshake_ack, so this is the single source of truth the bridge
-// advertises.
+// editor plugin (e.g. "3.2.8"). The handshake accepts any plugin whose
+// version is major.minor compatible with this one (patch drift is
+// accepted and flagged plugin_stale), so this is the single source of
+// truth the bridge advertises.
 func PluginVersion() string {
 	return parsedVersion()
 }

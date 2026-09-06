@@ -33,12 +33,22 @@ type Handshake struct {
 	AuthToken        string `json:"auth_token,omitempty"`
 }
 
-// handshakeAck is the server's answer to a valid Handshake. ServerVersion
-// MUST equal the plugin.cfg version: the plugin rejects the server on a
-// strict equality mismatch.
+// handshakeAck is the server's answer to a valid Handshake. The plugin
+// rejects the server when the versions are not major.minor compatible.
+// PluginStale/BundledPluginVersion are set only when the handshake was
+// accepted with a patch-level drift (e.g. plugin 3.2.6 vs server 3.2.7) —
+// they tell the plugin to warn instead of fail.
 type handshakeAck struct {
 	Type          string `json:"type"` // always "handshake_ack"
 	ServerVersion string `json:"server_version"`
+	// PluginStale marks an accepted handshake whose plugin version differs
+	// from the server's bundled plugin version (compatible major.minor,
+	// drifted patch). Omitted when the versions are identical.
+	PluginStale bool `json:"plugin_stale,omitempty"`
+	// BundledPluginVersion is the plugin build the server vendors; present
+	// whenever PluginStale is set so the plugin can name the target version
+	// in its warning without a second lookup.
+	BundledPluginVersion string `json:"bundled_plugin_version,omitempty"`
 }
 
 // eventFrame is a state event pushed by the plugin at any time.

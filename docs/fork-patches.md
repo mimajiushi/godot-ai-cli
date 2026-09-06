@@ -235,6 +235,48 @@ the user's own editor out from under them.
     healthy spawn (and a fast-exited daemon could misroute into the
     `uvx --refresh` retry, which keys on an absent pid-file).
 
+## 12. Relaxed handshake version gate: major.minor compatibility + `plugin_stale` (beta.14)
+
+`plugin.cfg` version 3.2.7 → 3.2.8. Replaces the plugin↔daemon **strict
+equality** version check with a **major.minor compatibility** rule on both
+sides, after a production incident: every patch-level bump (3.2.6 → 3.2.7)
+instantly made every already-installed project incompatible — the plugin
+dock hard-failed with "Incompatible server" and wedged.
+
+- Compatibility rule (single Go source: `internal/pluginmeta.ParseSemver` /
+  `Compatible`; mirrored in the plugin's
+  `utils/server_lifecycle.gd::_server_version_compatibility`):
+  `major == major && minor == minor`. Patch drifts freely in BOTH
+  directions (3.2.6 plugin ↔ 3.2.7 daemon); a minor or major mismatch is
+  still refused, and a malformed `plugin_version` is refused outright.
+- Daemon side (`internal/bridge`): accepted-but-unequal handshakes set
+  `Session.PluginStale = true`; the `handshake_ack` then carries
+  `plugin_stale: true` + `bundled_plugin_version` (both omitted when
+  aligned). Rejections close the socket with a policy-violation reason —
+  kept under the 123-byte WebSocket close-payload limit, so the detailed
+  guidance lives in docs/log lines, not the close frame. A server whose
+  own version is not semver (tests/dev placeholders) skips the gate
+  instead of rejecting everything.
+- Surfacing (`internal/daemon`, `internal/cli`): `/godot-ai/cli/sessions`
+  publishes `plugin_version` per session plus `plugin_stale: true` when
+  drifted; `status` adds the per-session note "plugin vX < bundled vY —
+  run `godot-ai-cli plugin install --project <dir>` and restart the editor
+  to pick up new ops" (sign computed, so a NEWER plugin never reads as
+  `<`); `launch` reusing a stale session emits the same warning.
+- Why the beta.11 stale-plugin protection survives the relaxation: the
+  drift window is now patch-only, and the two old failure modes each keep
+  a net — ops the running plugin lacks still answer `UNKNOWN_COMMAND`
+  (with a stale-plugin hint in troubleshooting), and `plugin_stale` makes
+  the drift visible in status/launch instead of silent. A minor bump (new
+  ops surface) still refuses the handshake, so a genuinely outdated plugin
+  can never run unnoticed.
+- Test matrix (`internal/bridge/bridge_test.go`,
+  `internal/daemon/daemon_test.go`, `internal/cli/status_test.go`,
+  `internal/pluginmeta`): equal / patch-older / patch-newer / minor /
+  major / malformed handshakes, sessions+status `plugin_stale` exposure,
+  and the note wording. Cross-version handshake coverage is now mandatory
+  — the incident was precisely the untested case.
+
 ## v3.2.5 sync notes
 
 The vendored base was a post-v3.2.4 upstream snapshot that already carried
@@ -265,5 +307,5 @@ Upstream-side follow-ups landed outside the vendored tree:
    `ForkConfig` gate — extend `fork_config.gd` instead.
 3. Keep dormant upstream code compiling (guards early-return, never delete),
    keep `plugin.cfg` `version` as the single version source (see
-   `docs/architecture.md` → Handshake and version strictness), and re-run
+   `docs/architecture.md` → Handshake and version compatibility), and re-run
    the smoke suite (`script/smoke-e2e.sh`, needs the workspace-only `../demo`).

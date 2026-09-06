@@ -52,14 +52,21 @@ Python backend:
   of order and are correlated purely by `request_id`; the `readiness` stamp
   on every response heals the server's cached session readiness.
 
-## Handshake and version strictness
+## Handshake and version compatibility
 
-The plugin enforces **strict equality** between its own `plugin.cfg` version
-and the `server_version` in `handshake_ack` — anything else is rejected as
-`version_mismatch`. The check lives plugin-side in
-`plugin/godot_ai/utils/server_lifecycle.gd::_server_version_compatibility`
-(exact match or incompatible, no ranges). The Go side therefore advertises
-the version parsed from the embedded `plugin.cfg`:
+Both sides of the handshake enforce **major.minor compatibility** between
+the plugin's `plugin.cfg` version and the server's version — exact equality
+is NOT required (since 3.2.8; see `docs/fork-patches.md` §12 for the
+incident that ended strict equality). A patch-level drift (3.2.6 ↔ 3.2.7)
+is accepted and flagged: the daemon marks the session `PluginStale`, sends
+`plugin_stale: true` + `bundled_plugin_version` in `handshake_ack`, and
+surfaces the drift via `/godot-ai/cli/sessions`, `status`, and `launch`
+warnings. A minor/major mismatch or a malformed version is rejected. The
+plugin-side check lives in
+`plugin/godot_ai/utils/server_lifecycle.gd::_server_version_compatibility`;
+the Go-side rule lives in `internal/pluginmeta` (`ParseSemver` /
+`Compatible`), the single source both the bridge gate and the CLI notes
+use. The advertised version flows
 `plugin.PluginVersion()` → `internal/pluginmeta` → `daemon.Config.Version`
 default → `bridge.NewServer(version)` → `handshake_ack.server_version`.
 `plugin.cfg` is the single source of truth; bumping it is the only version

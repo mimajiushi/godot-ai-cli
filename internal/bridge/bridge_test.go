@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -568,5 +569,107 @@ func TestDisconnectFailsInFlightCommand(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("in-flight command was not failed on disconnect")
+	}
+}
+
+// TestHandshakeVersionMatrix pins the major.minor compatibility gate the
+// 3.2.8 handshake relaxation introduced: equal versions and patch-level
+// drift (both directions) are accepted — drift flagged plugin_stale in the
+// ack and on the session — while minor/major mismatches and malformed
+// versions are rejected before any session registers.
+func TestHandshakeVersionMatrix(t *testing.T) {
+	s := startServer(t) // server version testVersion = "3.2.5"
+
+	t.Run("equal version accepted without stale", func(t *testing.T) {
+		p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": testVersion})
+		if _, present := p.Ack["plugin_stale"]; present {
+			t.Errorf("ack = %v, want no plugin_stale for an equal version", p.Ack)
+		}
+		for _, sess := range s.Sessions() {
+			if sess.ID == p.SessionID && sess.PluginStale {
+				t.Errorf("session %s PluginStale = true, want false", sess.ID)
+			}
+		}
+	})
+
+	t.Run("patch-newer plugin accepted stale", func(t *testing.T) {
+		p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": "3.2.7"})
+		if p.Ack["plugin_stale"] != true {
+			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
+		}
+		if got := p.Ack["bundled_plugin_version"]; got != testVersion {
+			t.Errorf("ack bundled_plugin_version = %v, want %s", got, testVersion)
+		}
+		for _, sess := range s.Sessions() {
+			if sess.ID == p.SessionID && !sess.PluginStale {
+				t.Errorf("session %s PluginStale = false, want true", sess.ID)
+			}
+		}
+	})
+
+	t.Run("patch-older plugin accepted stale", func(t *testing.T) {
+		p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": "3.2.0"})
+		if p.Ack["plugin_stale"] != true {
+			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
+		}
+	})
+
+	t.Run("minor mismatch rejected", func(t *testing.T) {
+		reason := mockplugin.DialRejected(t, s.Addr(), map[string]any{
+			"session_id": "rej-minor@0001", "plugin_version": "3.3.0"})
+		if !strings.Contains(reason, "incompatible plugin version") {
+			t.Errorf("close reason = %q, want an incompatible-version explanation", reason)
+		}
+	})
+
+	t.Run("major mismatch rejected", func(t *testing.T) {
+		reason := mockplugin.DialRejected(t, s.Addr(), map[string]any{
+			"session_id": "rej-major@0001", "plugin_version": "4.2.0"})
+		if !strings.Contains(reason, "incompatible plugin version") {
+			t.Errorf("close reason = %q, want an incompatible-version explanation", reason)
+		}
+	})
+
+	t.Run("malformed version rejected", func(t *testing.T) {
+		for v, id := range map[string]string{
+			"garbage": "rej-garbage@0001", "3.2": "rej-short@0001", "": "rej-empty@0001",
+		} {
+			reason := mockplugin.DialRejected(t, s.Addr(), map[string]any{
+				"session_id": id, "plugin_version": v})
+			if !strings.Contains(reason, "malformed plugin_version") {
+				t.Errorf("plugin_version %q: close reason = %q, want a malformed-version explanation", v, reason)
+			}
+		}
+	})
+
+	// Rejected handshakes must never register a session. (Accepted sessions
+	// may already be gone here — their subtest cleanups close the
+	// connections — so assert absence of the rejected ids, not a count.)
+	t.Run("rejections leave no sessions behind", func(t *testing.T) {
+		rejected := map[string]bool{
+			"rej-minor@0001": true, "rej-major@0001": true,
+			"rej-garbage@0001": true, "rej-short@0001": true, "rej-empty@0001": true,
+		}
+		for _, sess := range s.Sessions() {
+			if rejected[sess.ID] {
+				t.Errorf("rejected session %s registered anyway", sess.ID)
+			}
+		}
+	})
+}
+
+// TestHandshakeVersionGateSkipsUnversionedServer: a server built without a
+// semver version (tests/dev placeholders like "test") accepts any
+// well-formed plugin version instead of rejecting everything.
+func TestHandshakeVersionGateSkipsUnversionedServer(t *testing.T) {
+	s := bridge.NewServer("test")
+	if err := s.Start(0); err != nil {
+		t.Fatalf("bridge start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": "9.9.9"})
+	if _, present := p.Ack["plugin_stale"]; present {
+		t.Errorf("ack = %v, want no plugin_stale from an unversioned server", p.Ack)
 	}
 }

@@ -8,7 +8,7 @@ import (
 
 // The version output must surface every compatibility-relevant version:
 // the CLI itself, the supported Godot range, and the bundled plugin
-// (upstream godot-ai) version the daemon strictly matches against.
+// (upstream godot-ai) version the daemon checks handshakes against.
 func TestVersionOutputContainsCompatibilityInfo(t *testing.T) {
 	cmd := NewRootCommand()
 	buf := &bytes.Buffer{}
@@ -21,7 +21,7 @@ func TestVersionOutputContainsCompatibilityInfo(t *testing.T) {
 	for _, want := range []string{
 		"godot-ai-cli version",
 		"supported Godot:     4.5+ (4.7+ recommended)",
-		"bundled plugin:      godot-ai v3.2.7",
+		"bundled plugin:      godot-ai v3.2.8",
 		"protocol version:    1",
 		"plugin command coverage:",
 	} {

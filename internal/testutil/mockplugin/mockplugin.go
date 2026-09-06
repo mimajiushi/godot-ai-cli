@@ -7,6 +7,7 @@ package mockplugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -61,8 +62,71 @@ type Plugin struct {
 //
 // The defaults deliberately carry NO launched_by field (the pre-3.2.7
 // plugin shape, origin "user"); pass "launched_by": "cli" in the handshake
-// overlay to simulate a CLI-spawned editor.
+// overlay to simulate a CLI-spawned editor. The plugin version is overridable
+// the same way ("plugin_version": "...") for handshake version-matrix tests.
 func Dial(t *testing.T, addr string, handshake map[string]any) *Plugin {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, handshake, payload := dialAndHandshake(t, addr, handshake)
+	p := &Plugin{
+		t:         t,
+		Conn:      conn,
+		SessionID: handshake["session_id"].(string),
+		stamp:     handshake["readiness"].(string),
+		loopDone:  make(chan struct{}),
+	}
+
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatalf("mockplugin: send handshake: %v", err)
+	}
+
+	_, ackFrame, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("mockplugin: read handshake_ack: %v", err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(ackFrame, &ack); err != nil {
+		t.Fatalf("mockplugin: parse handshake_ack: %v", err)
+	}
+	p.Ack = ack
+
+	go p.readLoop()
+	t.Cleanup(p.Close)
+	return p
+}
+
+// DialRejected sends the handshake and asserts the server closes the
+// connection WITHOUT a handshake_ack (the version-gate / malformed-handshake
+// path). It returns the close reason and fails the test when an ack arrives.
+func DialRejected(t *testing.T, addr string, handshake map[string]any) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, payload := dialAndHandshake(t, addr, handshake)
+	t.Cleanup(func() { _ = conn.CloseNow() })
+
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatalf("mockplugin: send handshake: %v", err)
+	}
+	_, frame, err := conn.Read(ctx)
+	if err == nil {
+		t.Fatalf("mockplugin: expected rejection, got frame %s", frame)
+	}
+	var cerr websocket.CloseError
+	if errors.As(err, &cerr) {
+		return cerr.Reason
+	}
+	t.Fatalf("mockplugin: rejection read error is not a close frame: %v", err)
+	return ""
+}
+
+// dialAndHandshake opens the connection and builds the handshake payload
+// with defaults applied. It returns the effective handshake map (defaults
+// filled) so callers can read back the session id / readiness.
+func dialAndHandshake(t *testing.T, addr string, handshake map[string]any) (*websocket.Conn, map[string]any, []byte) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -94,30 +158,7 @@ func Dial(t *testing.T, addr string, handshake map[string]any) *Plugin {
 	if err != nil {
 		t.Fatalf("mockplugin: marshal handshake: %v", err)
 	}
-	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
-		t.Fatalf("mockplugin: send handshake: %v", err)
-	}
-
-	_, ackFrame, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("mockplugin: read handshake_ack: %v", err)
-	}
-	var ack map[string]any
-	if err := json.Unmarshal(ackFrame, &ack); err != nil {
-		t.Fatalf("mockplugin: parse handshake_ack: %v", err)
-	}
-
-	p := &Plugin{
-		t:         t,
-		Conn:      conn,
-		Ack:       ack,
-		SessionID: handshake["session_id"].(string),
-		stamp:     handshake["readiness"].(string),
-		loopDone:  make(chan struct{}),
-	}
-	go p.readLoop()
-	t.Cleanup(p.Close)
-	return p
+	return conn, handshake, payload
 }
 
 // SetResponder installs the command responder.

@@ -40,6 +40,7 @@ const ToolCatalog := preload("res://addons/godot_ai/tool_catalog.gd")
 const LogViewerScript := preload("res://addons/godot_ai/dock_panels/log_viewer.gd")
 const PortPickerPanelScript := preload("res://addons/godot_ai/dock_panels/port_picker_panel.gd")
 const VisionRoutingScript := preload("res://addons/godot_ai/vision_routing.gd")
+const VersionCompat := preload("res://addons/godot_ai/utils/version_compat.gd")
 
 const DEV_MODE_SETTING := "godot_ai/dev_mode"
 ## "Change the port + reconfigure your clients" guide. Surfaced from the crash
@@ -1745,6 +1746,12 @@ func _refresh_server_version_label(server_status: Dictionary = {}) -> void:
 		text = "godot-ai == %s  (expected %s)" % [server_ver, expected_ver]
 		var is_incompatible: bool = state == ServerStateScript.INCOMPATIBLE
 		color = Color.RED if is_incompatible else COLOR_AMBER
+		## 兼容但 patch 漂移（3.2.6 插件 + 3.2.7 daemon 场景）：软警告替代
+		## 裸的 expected 提示——允许连接，只提示对齐版本。
+		if not is_incompatible and VersionCompat.versions_compatible(server_ver, expected_ver):
+			var note := VersionCompat.compatible_mismatch_note(server_ver, expected_ver)
+			if not note.is_empty():
+				text = note
 		var has_managed_proof: bool = (
 			_plugin != null
 			and _plugin.has_method("can_restart_managed_server")

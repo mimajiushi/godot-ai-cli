@@ -52,10 +52,14 @@ func (e *ForeignServerError) Error() string {
 }
 
 // DaemonMismatchError reports that an existing godot-ai-cli daemon answers
-// on the requested HTTP port but runs with a different WS port or plugin
-// version than requested. Adopting it would make the plugin reject the
-// handshake (ws_port_mismatch / version mismatch), so the caller must stop
-// the running daemon first instead of silently inheriting its config.
+// on the requested HTTP port but runs with a different WS port or an
+// INCOMPATIBLE plugin version (major.minor differs) than requested.
+// Adopting it would make the plugin reject the handshake
+// (ws_port_mismatch / version mismatch), so the caller must stop the
+// running daemon first instead of silently inheriting its config. A
+// patch-level version drift is NOT a mismatch: the daemon is adopted and
+// the caller surfaces a stale hint (same major.minor rule as the
+// plugin↔daemon handshake).
 type DaemonMismatchError struct {
 	HTTPPort         int
 	RunningWSPort    int
@@ -160,9 +164,11 @@ func foreignOccupantError(state probeState, httpPort int, name string) error {
 // EnsureRunning guarantees a compatible daemon answers on cfg.HTTPPort.
 //
 // If our daemon already runs (status name "godot-ai" AND a healthy
-// /godot-ai/cli/health) it is adopted — but only when its ws_port and
-// version match the requested configuration; a mismatch yields a
-// DaemonMismatchError because adopting it would break the plugin handshake.
+// /godot-ai/cli/health) it is adopted — but only when its ws_port matches
+// and its version is major.minor-compatible with the requested
+// configuration; a mismatch yields a DaemonMismatchError because adopting
+// it would break the plugin handshake. A patch-level version drift is
+// adopted (the CLI warns about the staleness instead).
 // A godot-ai-named server WITHOUT the /cli API is the upstream Python
 // backend and yields a ForeignServerError; any other occupant yields a
 // generic refusal. Neither is ever killed. Only a truly unreachable port
@@ -223,13 +229,16 @@ func EnsureRunning(ctx context.Context, cfg daemon.Config) (bool, error) {
 	}
 }
 
-// adoptionMismatch rejects adopting a running daemon whose WS port or
-// plugin version differs from the requested configuration. Fields the
+// adoptionMismatch rejects adopting a running daemon whose WS port differs
+// from the requested configuration, or whose plugin version is INCOMPATIBLE
+// (major.minor drift — the same gate the plugin handshake enforces). A
+// patch-level version drift is adopted: the CLI surfaces a stale hint
+// instead of hard-failing every launch after a CLI update. Fields the
 // daemon does not advertise (0 / "") cannot prove a mismatch and are
 // tolerated.
 func adoptionMismatch(httpPort, wsPort int, version string, info probeInfo) error {
 	wsMismatch := info.wsPort != 0 && info.wsPort != wsPort
-	versionMismatch := info.version != "" && info.version != version
+	versionMismatch := !versionCompatible(info.version, version)
 	if !wsMismatch && !versionMismatch {
 		return nil
 	}
@@ -240,6 +249,24 @@ func adoptionMismatch(httpPort, wsPort int, version string, info probeInfo) erro
 		RunningVersion:   info.version,
 		RequestedVersion: version,
 	}
+}
+
+// versionCompatible reports whether a running daemon's advertised version
+// may be adopted for a launch requesting version `requested`: identical or
+// major.minor-equal (patch drift freely accepted, mirroring the plugin
+// handshake gate). An unadvertised ("") version cannot prove a mismatch and
+// is tolerated; an UNPARSEABLE side keeps the legacy exact-equality refusal
+// — the version gate must never guess.
+func versionCompatible(running, requested string) bool {
+	if running == "" || running == requested {
+		return true
+	}
+	r, rerr := pluginmeta.ParseSemver(running)
+	q, qerr := pluginmeta.ParseSemver(requested)
+	if rerr != nil || qerr != nil {
+		return false
+	}
+	return pluginmeta.Compatible(r, q)
 }
 
 // probeStatus GETs /godot-ai/status. answered reports whether ANY HTTP

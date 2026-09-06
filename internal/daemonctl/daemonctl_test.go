@@ -234,9 +234,9 @@ func TestEnsureRunningAdoptWSPortMismatch(t *testing.T) {
 	}
 }
 
-// TestEnsureRunningAdoptVersionMismatch: a running OUR daemon with a
-// different plugin version must not be adopted — the plugin enforces
-// strict version equality in the handshake.
+// TestEnsureRunningAdoptVersionMismatch: a running OUR daemon whose plugin
+// version is major.minor-INCOMPATIBLE must not be adopted — the plugin
+// handshake enforces the same gate.
 func TestEnsureRunningAdoptVersionMismatch(t *testing.T) {
 	httpPort, wsPort := freePort(t), freePort(t)
 	d, err := daemon.Start(context.Background(), daemon.Config{
@@ -259,5 +259,84 @@ func TestEnsureRunningAdoptVersionMismatch(t *testing.T) {
 	}
 	if mismatchErr.RunningVersion != "3.2.4" || mismatchErr.RequestedVersion != "9.9.9" {
 		t.Errorf("mismatch detail = %+v, want running 3.2.4 requested 9.9.9", mismatchErr)
+	}
+}
+
+// TestEnsureRunningAdoptPatchDrift: a patch-level version drift (3.2.4
+// running vs 3.2.5 requested) is major.minor-COMPATIBLE — the daemon is
+// adopted, no spawn, no mismatch error. This is the beta.15 relaxation:
+// after a CLI patch update, already-running daemons keep serving instead of
+// hard-failing every launch.
+func TestEnsureRunningAdoptPatchDrift(t *testing.T) {
+	httpPort, wsPort := freePort(t), freePort(t)
+	d, err := daemon.Start(context.Background(), daemon.Config{
+		HTTPPort: httpPort, WSPort: wsPort, Version: "3.2.4",
+	})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	spawned := false
+	restore := stubSpawn(t, func(int, int) error { spawned = true; return nil })
+	defer restore()
+
+	running, err := daemonctl.EnsureRunning(context.Background(), daemon.Config{
+		HTTPPort: httpPort, WSPort: wsPort, Version: "3.2.5",
+	})
+	if err != nil || !running {
+		t.Fatalf("patch-drift daemon must be adopted: EnsureRunning = %v, %v", running, err)
+	}
+	if spawned {
+		t.Error("must not spawn when a compatible daemon occupies the port")
+	}
+}
+
+// TestEnsureRunningAdoptMinorDriftRejected: a minor-level drift (3.2.4
+// running vs 3.3.0 requested) is INCOMPATIBLE — same rejection as a major
+// drift.
+func TestEnsureRunningAdoptMinorDriftRejected(t *testing.T) {
+	httpPort, wsPort := freePort(t), freePort(t)
+	d, err := daemon.Start(context.Background(), daemon.Config{
+		HTTPPort: httpPort, WSPort: wsPort, Version: "3.2.4",
+	})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	restore := stubSpawn(t, func(int, int) error { return nil })
+	defer restore()
+
+	_, err = daemonctl.EnsureRunning(context.Background(), daemon.Config{
+		HTTPPort: httpPort, WSPort: wsPort, Version: "3.3.0",
+	})
+	var mismatchErr *daemonctl.DaemonMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("err = %v (%T), want DaemonMismatchError", err, err)
+	}
+}
+
+// TestVersionCompatible pins the adoption table directly: equal and
+// patch-drift adopt, minor/major drift and unparseable sides refuse, an
+// unadvertised running version is tolerated.
+func TestVersionCompatible(t *testing.T) {
+	cases := []struct {
+		running, requested string
+		want               bool
+	}{
+		{"3.2.8", "3.2.8", true},
+		{"3.2.8", "3.2.9", true},
+		{"3.2.9", "3.2.8", true},
+		{"3.2.8", "3.3.0", false},
+		{"3.2.8", "4.2.0", false},
+		{"", "3.2.8", true},         // not advertised: tolerated
+		{"garbage", "3.2.8", false}, // unparseable: legacy exact-equality refusal
+		{"3.2.8", "garbage", false},
+	}
+	for _, c := range cases {
+		if got := daemonctl.VersionCompatibleForTest(c.running, c.requested); got != c.want {
+			t.Errorf("versionCompatible(%q, %q) = %v, want %v", c.running, c.requested, got, c.want)
+		}
 	}
 }

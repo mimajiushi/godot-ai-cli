@@ -111,11 +111,15 @@ checks GitHub Releases and offers to update in place.
   project with `session activate <id>` or an op's `--session` flag, and end
   one project with `stop --session <id>` (plain `stop` quits ALL connected
   editors). Custom ports (`--http-port/--ws-port`) start an isolated second
-  daemon; because the port override lives in the single shared global
-  EditorSettings file, only one custom-port OVERRIDE SET may be live at a
-  time — launching on DIFFERENT ports while one is active fails with
-  `SETTINGS_OVERRIDE_ACTIVE`, but several projects may share one
-  custom-port daemon exactly like the default one.
+  daemon; since 3.2.9 each launch pins its ports in the project's own
+  `.godot/godot_ai_ports.json` (the plugin resolves project file >
+  EditorSettings > default), so several custom-port daemons run side by
+  side without touching the shared global EditorSettings. If an editor for
+  the same project is already connected to ANOTHER daemon, launch fails
+  with `EDITOR_ALREADY_OPEN` instead of double-opening — join it with
+  `--http-port <port>`, or migrate the old daemon in place with
+  `launch --upgrade-daemon` (shuts the old daemon down WITHOUT quitting any
+  editor; compatible plugins reconnect automatically).
 - **Shut down:** `godot-ai-cli stop` asks the editor to quit and stops the
   daemon.
 

@@ -309,3 +309,62 @@ Upstream-side follow-ups landed outside the vendored tree:
    keep `plugin.cfg` `version` as the single version source (see
    `docs/architecture.md` → Handshake and version compatibility), and re-run
    the smoke suite (`script/smoke-e2e.sh`, needs the workspace-only `../demo`).
+
+## 13. Multi-daemon coexistence: per-project port pinning, `--upgrade-daemon`, double-open guard (beta.16)
+
+`plugin.cfg` version 3.2.8 → 3.2.9. Fixes the upgrade deadlock reported from
+the field: with several daemons coexisting (different versions/ports), a
+user-opened editor connected to an OLD daemon left `launch` with exactly one
+documented way out — a full `stop`, which quits the user's editors — and a
+custom-port relaunch instead DOUBLE-OPENED the same project because nothing
+detected the already-running editor.
+
+- Per-project port pinning (`internal/godot/project_ports.go` — NEW,
+  `internal/cli/launch.go`): launch no longer writes `godot_ai/http_port` /
+  `godot_ai/ws_port` / the managed-server record into the GLOBAL
+  EditorSettings. Before spawning the editor it writes
+  `<project>/.godot/godot_ai_ports.json` (`{"http_port":N,"ws_port":M}` —
+  default ports too, for determinism); the plugin resolves ports as
+  **project file > EditorSettings > default** (plugin-side patch in
+  `utils/server_lifecycle.gd`). The global settings are never mutated, so
+  parallel daemons on different ports no longer cross-wire projects, and
+  `SETTINGS_OVERRIDE_ACTIVE` stops blocking new launches (the gate was the
+  old "one shared override set" rule; two concurrent launches are still
+  serialized by the global launch lock, and the same-project race is now
+  caught by the double-open guard). The backup/restore machinery stays for
+  LEGACY pre-3.2.9 leftovers: `stop` restores a pending backup exactly as
+  before, and a launch that finds one warns instead of stacking.
+- `--upgrade-daemon` (`internal/cli/launch.go`,
+  `internal/cli/known_daemons.go` — NEW): on `DAEMON_MISMATCH`, the CLI POSTs
+  the old daemon's `/godot-ai/cli/shutdown` DIRECTLY — deliberately skipping
+  the `quit_editor` round a full `stop` performs — waits for the port to
+  free, spawns the new daemon on the same ports, and continues the launch.
+  Every editor process survives; the launch warning reports how many were
+  kept and reminds that major.minor-compatible plugins reconnect by
+  themselves while incompatible ones need `plugin install` + a restart.
+- `DAEMON_MISMATCH` probe hint: before erroring, launch scans every known
+  daemon (per-port pid files `daemon-<port>.json` + `last-daemon.json`,
+  ~300ms probes) for a HEALTHY major.minor-compatible one and names it in
+  `error.data.same_version_daemon` (`http_port`/`ws_port`/`version`) with a
+  `use --http-port <p>` message hint.
+- Double-open guard (`EDITOR_ALREADY_OPEN`): before spawning an editor —
+  when the current daemon has no session for the project — launch queries
+  every OTHER known daemon's `/godot-ai/cli/sessions` and refuses the spawn
+  when another daemon already hosts this project, naming `editor_pid` /
+  `daemon_http_port` / `daemon_version` / `session_id` and the join/migrate
+  paths. `--force-spawn` is the explicit escape (help text names the
+  scene-lock/save-overwrite risk). Probe failures never block the launch
+  (best-effort, warning).
+- Adoption gate relaxation (`internal/daemonctl`): `EnsureRunning` now
+  adopts a daemon whose version is major.minor-COMPATIBLE (reusing
+  `pluginmeta.ParseSemver`/`Compatible`) instead of demanding exact
+  equality — a CLI patch update no longer hard-fails every launch while an
+  old daemon runs. A patch drift is adopted with a stale launch warning;
+  ws_port drift and minor/major drift still produce `DAEMON_MISMATCH`.
+- `status` fleet view: the payload gains `known_daemons` — every recorded
+  daemon probed live (running: version/pid/ports/session projects, marked
+  `current` on the resolved one; dead record: `running:false` with the
+  recorded identity). `ports_override_active` is now true when a per-project
+  port file OR a legacy global override exists. `stop` removes each session
+  project's port pin (only while it still points at the stopped daemon's
+  port; reported as `project_ports_cleared`).

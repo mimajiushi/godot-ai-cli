@@ -96,10 +96,13 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
   该工程的编辑器作为一个新会话打开并置为活动；操作默认落在活动会话——用
   `session activate <id>` 或操作的 `--session` 标志切换目标工程，用
   `stop --session <id>` 只结束一个工程（裸 `stop` 会退出所有已连接的编辑器）。
-  自定义端口（`--http-port`/`--ws-port`）会拉起独立的第二个 daemon；但端口覆盖写在
-  全局共享的 EditorSettings 里，所以同一时间只能存活一套自定义端口覆盖——在一套
-  激活期间用不同端口 launch 会以 `SETTINGS_OVERRIDE_ACTIVE` 失败；而多个工程可以像
-  默认端口一样共用同一个自定义端口 daemon。
+  自定义端口（`--http-port`/`--ws-port`）会拉起独立的第二个 daemon；自 3.2.9 起，
+  每次 launch 把端口钉在工程自己的 `.godot/godot_ai_ports.json` 里（插件按
+  工程文件 > EditorSettings > 默认值 的顺序解析），多个自定义端口 daemon 可以并排
+  共存，不再改写全局共享的 EditorSettings。若同工程的编辑器已经连着另一个
+  daemon，launch 会以 `EDITOR_ALREADY_OPEN` 拒绝双开——用 `--http-port <端口>`
+  接入该 daemon 复用会话，或用 `launch --upgrade-daemon` 原地迁移旧 daemon
+  （只关旧 daemon、不退出任何编辑器，兼容插件会自动重连）。
 - **关闭：** `godot-ai-cli stop` 会让编辑器退出并停止 daemon。
 
 ### 给 Agent 装 skill

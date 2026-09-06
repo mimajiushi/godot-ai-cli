@@ -86,20 +86,29 @@ semantics:
   `EDITOR_NOT_READY` (`sub_code: EDITOR_IMPORTING`); a live `playing` fails
   non-retryable (`sub_code: EDITOR_PLAYING`) with a hint to stop the game.
 
-## EditorSettings backup/restore
+## Port pinning (per project) and the legacy EditorSettings backup/restore
 
-`launch` rewrites the user's **global** EditorSettings
-(keys `godot_ai/http_port`, `godot_ai/ws_port`, `godot_ai/managed_server_*`)
-so the plugin finds the daemon — always when custom ports are requested, and
-on default ports when live port overrides or a trusted managed-server record
-point at other ports (`settingsMutationNeeded` in `internal/cli/launch.go`,
-fed by `godot.ReadPluginPorts`). Every mutation is preceded by a backup at
-`<user cache dir>/godot-ai-cli/launch-backup-<httpPort>.json`
-(`internal/godot/launch_backup.go`), and `stop` restores **byte-identically**:
-pre-existing keys get their original `key = value` line written back in
-place, added keys are removed, and a settings file created from scratch is
-deleted again. Restore first checks the recorded editor PIDs — a surviving
-editor would re-save the overridden settings on exit and resurrect them.
+Since 3.2.9 `launch` pins the daemon ports **per project**: before spawning
+the editor it writes `<project>/.godot/godot_ai_ports.json`
+(`{"http_port":N,"ws_port":M}`, default ports included —
+`internal/godot/project_ports.go`), and the plugin resolves ports as
+*project file → EditorSettings → default*. The global EditorSettings is
+never mutated, so parallel daemons on different ports no longer cross-wire
+projects. `stop` removes the pin (only while it still points at the stopped
+daemon's port).
+
+Launches from before 3.2.9 instead rewrote the user's **global**
+EditorSettings (keys `godot_ai/http_port`, `godot_ai/ws_port`,
+`godot_ai/managed_server_*`). Every such mutation was preceded by a backup
+at `<user cache dir>/godot-ai-cli/launch-backup-<httpPort>.json`
+(`internal/godot/launch_backup.go`), and `stop` still restores those
+leftovers **byte-identically**: pre-existing keys get their original
+`key = value` line written back in place, added keys are removed, and a
+settings file created from scratch is deleted again. Restore first checks
+the recorded editor PIDs — a surviving editor would re-save the overridden
+settings on exit and resurrect them. A current `launch` that finds a
+pending backup warns (the project file wins for its own editor) instead of
+refusing with `SETTINGS_OVERRIDE_ACTIVE`.
 
 ## Port memory
 
@@ -111,3 +120,7 @@ editor would re-save the overridden settings on exit and resurrect them.
 only: stale or corrupt files are silently tolerated, and the daemon
 additionally writes a per-port PID file `daemon-<httpPort>.json` (same
 directory) so `status` can distinguish "no daemon" from "stale PID file".
+The pid files plus the last-daemon record double as the KNOWN-DAEMON
+registry (`internal/cli/known_daemons.go`): `status` probes all of them
+into `known_daemons`, and `launch` scans them for the `DAEMON_MISMATCH`
+compatible-daemon hint and the `EDITOR_ALREADY_OPEN` double-open guard.

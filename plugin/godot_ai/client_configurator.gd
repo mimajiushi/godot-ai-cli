@@ -9,6 +9,8 @@ extends RefCounted
 ##   - owns server-side identifiers (SERVER_NAME, HTTP/WS port helpers)
 ##   - registers the EditorSettings port overrides and resolves the live
 ##     port/URL via `http_port()` / `ws_port()` / `http_url()`
+##     (godot-ai-cli fork: 项目文件 .godot/godot_ai_ports.json 优先于
+##     EditorSettings，见 `_resolved_ports`)
 ##   - keeps server-launch discovery (.venv → uvx → system godot-ai)
 ##   - exposes string-id wrappers around configure / check_status / remove /
 ##     manual_command so callers don't need to touch the registry directly
@@ -27,19 +29,25 @@ const ManualCommand := preload("res://addons/godot_ai/clients/_manual_command.gd
 const CliFinder := preload("res://addons/godot_ai/clients/_cli_finder.gd")
 const WindowsPortReservation := preload("res://addons/godot_ai/utils/windows_port_reservation.gd")
 const PortResolver := preload("res://addons/godot_ai/utils/port_resolver.gd")
+## godot-ai-cli fork：项目级端口钉值解析（res://.godot/godot_ai_ports.json
+## > EditorSettings > 默认），见 port_pins.gd 头注。
+const PortPins := preload("res://addons/godot_ai/utils/port_pins.gd")
 
 const SERVER_NAME := "godot-ai"
 
-## Fallback ports. Live port selection goes through `http_port()` / `ws_port()`,
-## which read overrides from EditorSettings first. Users on Windows whose 8000
-## is grabbed by Hyper-V / WSL2 / Docker can pick a different port in
-## Editor Settings > Plugins > godot_ai without touching code. See #146 for
-## the Windows-reservation diagnostics this is the escape hatch for.
+## Fallback ports. Live port selection goes through `http_port()` / `ws_port()`.
+## godot-ai-cli fork 的解析顺序：项目文件 .godot/godot_ai_ports.json
+## （launch 写入，两键齐全且合法才生效）> EditorSettings 覆盖 > 默认。
+## Users on Windows whose 8000 is grabbed by Hyper-V / WSL2 / Docker can
+## pick a different port in Editor Settings > Plugins > godot_ai without
+## touching code. See #146 for the Windows-reservation diagnostics this is
+## the escape hatch for.
 const DEFAULT_HTTP_PORT := 8000
 const DEFAULT_WS_PORT := 9500
 const STARTUP_TRACE_ENV := "GODOT_AI_STARTUP_TRACE"
-const MIN_PORT := 1024
-const MAX_PORT := 65535
+## 端口合法区间与 PortPins 保持同一来源，杜绝两处常量漂移。
+const MIN_PORT := PortPins.MIN_PORT
+const MAX_PORT := PortPins.MAX_PORT
 ## Cap on `can_bind_local_port` probes per `suggest_free_port` call so a
 ## pathological run of occupied ports can't stall the (cold-path) caller.
 ## 64 localhost binds are sub-millisecond; finding a free port realistically
@@ -73,14 +81,31 @@ const _WINDOWS_STDIO_BOOTSTRAP := (
 )
 
 
-## Active HTTP port: user override (if in range) or `DEFAULT_HTTP_PORT`.
+## Active HTTP port: project pin file > EditorSettings override (if in
+## range) > `DEFAULT_HTTP_PORT`. 见 `_resolved_ports` 的 fork 说明。
 static func http_port() -> int:
-	return _read_port_setting(McpSettings.SETTING_HTTP_PORT, DEFAULT_HTTP_PORT)
+	return int(_resolved_ports()["http_port"])
 
 
-## Active WebSocket port: user override (if in range) or `DEFAULT_WS_PORT`.
+## Active WebSocket port: same resolution order as `http_port()`.
 static func ws_port() -> int:
-	return _read_port_setting(SETTING_WS_PORT, DEFAULT_WS_PORT)
+	return int(_resolved_ports()["ws_port"])
+
+
+## godot-ai-cli fork patch：端口解析项目化。launch 把钉值写进项目文件
+## .godot/godot_ai_ports.json（stop 删除），不再写全局 EditorSettings，
+## 多项目多 daemon 并存时互不污染。项目文件两键齐全且合法才整体生效；
+## 缺失/损坏/键不全静默回落 EditorSettings，再回落默认值。
+## 所有端口读取点（ws 拨号、adoption probe、cli_daemon spawn 参数、
+## managed-server 记录）都经 `http_port()`/`ws_port()` 收口到这里。
+static func _resolved_ports() -> Dictionary:
+	return PortPins.resolve_ports(
+		PortPins.read_project_pins(),
+		_read_port_setting(McpSettings.SETTING_HTTP_PORT, 0),
+		_read_port_setting(SETTING_WS_PORT, 0),
+		DEFAULT_HTTP_PORT,
+		DEFAULT_WS_PORT
+	)
 
 
 static func http_url() -> String:

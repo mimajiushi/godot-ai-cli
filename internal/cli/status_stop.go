@@ -27,7 +27,10 @@ func newStatusCommand() *cobra.Command {
 		Use:   "status",
 		Short: "Show the daemon status and connected Godot editor sessions",
 		Long: `status probes the local godot-ai daemon and prints one JSON object
-describing the daemon and every connected Godot editor session.
+describing the daemon and every connected Godot editor session. It also
+lists EVERY recorded daemon on this machine (known_daemons, probed live:
+running daemons report version/ports/session projects, dead records report
+running:false), so a multi-daemon setup is visible in one call.
 
 Port resolution: an explicit --http-port flag wins; otherwise the port the
 last launch/serve recorded (last-daemon.json in the user cache dir) is
@@ -82,10 +85,16 @@ Examples:
 					"pid":       statusBody["pid"],
 				},
 				"sessions": sessions,
-				// A launch backup for this port means the global
-				// EditorSettings are temporarily overridden; `stop`
-				// restores them.
-				"ports_override_active": fileExists(godot.LaunchBackupPath(port)),
+				// Port pinning is per project since 3.2.9: true when any
+				// connected session's project (or the recorded launch
+				// project) carries .godot/godot_ai_ports.json, or a legacy
+				// pre-3.2.9 global EditorSettings override (launch backup)
+				// is still active for this port — `stop` cleans up both.
+				"ports_override_active": portsOverrideActive(port, sessionsBody["sessions"]),
+				// Every recorded daemon on this machine, probed live — a
+				// multi-daemon setup (old versions, parallel ports) is
+				// visible in one call, not just the resolved port's daemon.
+				"known_daemons": knownDaemonsReport(port),
 			}
 			if len(compatWarnings) > 0 {
 				payload["warnings"] = compatWarnings
@@ -117,6 +126,9 @@ func newStopCommand() *cobra.Command {
      pre-3.2.7 behavior
   2. POST the daemon's shutdown endpoint
   3. Wait briefly for the daemon to exit
+  4. Remove the per-project port pins (<project>/.godot/godot_ai_ports.json)
+     that still point at this daemon, and restore any legacy global
+     EditorSettings overrides a pre-3.2.9 launch left behind
 
 With --session <id> it instead quits ONLY that editor session (regardless
 of origin): the daemon and every other project's session keep running
@@ -165,6 +177,19 @@ Examples:
 				// explicit flag port, else the recorded one).
 				primary := tried[0]
 				payload := map[string]any{"status": "not_running", "ports_tried": tried}
+				// A per-project port pin can also outlive its daemon
+				// (crashed daemon, killed process): clear it when the
+				// recorded project still points at the primary port.
+				if rec, ok := readLastDaemon(); ok && rec.Project != "" {
+					if cleared, w := clearProjectPortPins(primary, []string{rec.Project}, nil); len(cleared) > 0 || len(w) > 0 {
+						if len(cleared) > 0 {
+							payload["project_ports_cleared"] = cleared
+						}
+						if len(w) > 0 {
+							payload["warnings"] = w
+						}
+					}
+				}
 				if alive := aliveEditorPIDs(godot.BackupEditorPIDs(primary)); len(alive) > 0 {
 					payload["warnings"] = editorAliveWarnings(primary, alive)
 					return printJSON(out, payload, false)
@@ -192,12 +217,16 @@ Examples:
 			var sessionIDs []string
 			var quitSessions []map[string]any
 			var keptSessions []map[string]any
+			var sessionProjects []string
 			if sessionsBody, err := getDaemonJSON(port, "/godot-ai/cli/sessions"); err == nil {
 				if list, ok := sessionsBody["sessions"].([]any); ok {
 					for _, entry := range list {
 						if sess, ok := entry.(map[string]any); ok {
 							if pid, ok := sess["editor_pid"].(float64); ok && pid > 0 {
 								editorPIDs = append(editorPIDs, int(pid))
+							}
+							if pp, _ := sess["project_path"].(string); pp != "" {
+								sessionProjects = append(sessionProjects, pp)
 							}
 							sid, _ := sess["session_id"].(string)
 							if sid == "" {
@@ -256,7 +285,9 @@ Examples:
 			// Forget the recorded last-daemon identity when this stop
 			// actually shut THAT daemon down — an explicit --http-port for
 			// another daemon, or a daemon that survived, keeps the record.
+			var recordedProject string
 			if rec, ok := readLastDaemon(); ok && rec.HTTPPort == port && !daemonReachable(port) {
+				recordedProject = rec.Project
 				_ = removeLastDaemon()
 			}
 
@@ -267,6 +298,23 @@ Examples:
 			}
 			if len(keptSessions) > 0 {
 				payload["kept_sessions"] = keptSessions
+			}
+
+			// Remove the per-project port pins (3.2.9+) this daemon's
+			// editors were launched with. Only files still pointing at THIS
+			// daemon's port are deleted — a pin rewritten by a newer launch
+			// on another daemon is left alone.
+			if !daemonReachable(port) {
+				projects := sessionProjects
+				if recordedProject != "" {
+					projects = append(projects, recordedProject)
+				}
+				if cleared, w := clearProjectPortPins(port, projects, nil); len(cleared) > 0 || len(w) > 0 {
+					if len(cleared) > 0 {
+						payload["project_ports_cleared"] = cleared
+					}
+					warnings = append(warnings, w...)
+				}
 			}
 
 			// Restore the global EditorSettings launch overrode. The editor
@@ -316,6 +364,57 @@ Examples:
 	cmd.Flags().StringVar(&sessionID, "session", "", "quit only this editor session (daemon keeps running)")
 	cmd.Flags().BoolVar(&quitAll, "all", false, "quit every connected editor session, including user-opened editors (the pre-3.2.7 behavior)")
 	return cmd
+}
+
+// portsOverrideActive implements status's ports_override_active semantics:
+// true when ANY port pin is in effect — a per-project
+// .godot/godot_ai_ports.json on a connected session's project (or on the
+// recorded last-launch project), or a legacy pre-3.2.9 global
+// EditorSettings override (a launch backup still pending for this port).
+func portsOverrideActive(httpPort int, sessionsRaw any) bool {
+	if fileExists(godot.LaunchBackupPath(httpPort)) {
+		return true
+	}
+	if list, ok := sessionsRaw.([]any); ok {
+		for _, entry := range list {
+			sess, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if pp, _ := sess["project_path"].(string); pp != "" && godot.HasProjectPorts(pp) {
+				return true
+			}
+		}
+	}
+	if rec, ok := readLastDaemon(); ok && rec.HTTPPort == httpPort && rec.Project != "" {
+		if godot.HasProjectPorts(rec.Project) {
+			return true
+		}
+	}
+	return false
+}
+
+// clearProjectPortPins removes the per-project port file for every project
+// whose editor was connected to the daemon being stopped (plus the recorded
+// launch project). RemoveProjectPorts deletes only a file still pointing at
+// THIS daemon's port, so a pin rewritten by a newer launch on another
+// daemon survives. Failures are warnings, never stop-blockers.
+func clearProjectPortPins(httpPort int, projects []string, warnings []string) (cleared []string, out []string) {
+	seen := map[string]bool{}
+	for _, project := range projects {
+		if project == "" || seen[project] {
+			continue
+		}
+		seen[project] = true
+		removed, err := godot.RemoveProjectPorts(project, httpPort)
+		switch {
+		case err != nil:
+			warnings = append(warnings, fmt.Sprintf("remove port pin for %s: %v", project, err))
+		case removed:
+			cleared = append(cleared, project)
+		}
+	}
+	return cleared, warnings
 }
 
 // sessionGoneTimeout bounds how long stop --session waits for the quitting

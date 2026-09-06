@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
+	"github.com/mimajiushi/godot-ai-cli/internal/godot"
 	"github.com/mimajiushi/godot-ai-cli/internal/testutil/mockplugin"
 )
 
@@ -294,5 +295,207 @@ func TestGodotVersionCompatibility(t *testing.T) {
 				t.Errorf("warning = %q, wantWarning %v", warning, c.wantWarning)
 			}
 		})
+	}
+}
+
+// TestStatusKnownDaemons: status lists EVERY recorded daemon, probed live —
+// a second running daemon shows running:true with its live version/ports and
+// session projects; a dead record shows running:false with the recorded
+// identity. The resolved daemon is marked current:true.
+func TestStatusKnownDaemons(t *testing.T) {
+	dir := stubCacheDir(t)
+
+	// The daemon status resolves to (explicit --http-port).
+	d1, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "3.2.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d1.Shutdown(context.Background()) })
+	writeDaemonRecord(t, dir, d1.HTTPPort(), d1.WSPort(), "3.2.9")
+
+	// A second, older daemon hosting one session for another project.
+	d2, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "3.2.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d2.Shutdown(context.Background()) })
+	writeDaemonRecord(t, dir, d2.HTTPPort(), d2.WSPort(), "3.2.8")
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d2.WSPort()), map[string]any{
+		"session_id": "other@0001", "project_path": "/other/project/",
+	})
+
+	// A dead record (crashed daemon leftover).
+	writeDaemonRecord(t, dir, 1, 1, "3.2.7")
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d1.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v\n%s", err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+
+	known, ok := out["known_daemons"].([]any)
+	if !ok || len(known) != 3 {
+		t.Fatalf("known_daemons = %v", out["known_daemons"])
+	}
+	byPort := map[int]map[string]any{}
+	for _, entry := range known {
+		e := entry.(map[string]any)
+		byPort[int(e["http_port"].(float64))] = e
+	}
+
+	cur := byPort[d1.HTTPPort()]
+	if cur["running"] != true || cur["current"] != true || cur["version"] != "3.2.9" {
+		t.Errorf("current daemon entry = %v", cur)
+	}
+	if projects, _ := cur["projects"].([]any); len(projects) != 0 {
+		t.Errorf("current daemon projects = %v, want empty", cur["projects"])
+	}
+
+	old := byPort[d2.HTTPPort()]
+	if old["running"] != true || old["version"] != "3.2.8" {
+		t.Errorf("second daemon entry = %v", old)
+	}
+	if _, isCurrent := old["current"]; isCurrent {
+		t.Errorf("second daemon must not be marked current: %v", old)
+	}
+	projects, _ := old["projects"].([]any)
+	if len(projects) != 1 || projects[0] != "/other/project/" {
+		t.Errorf("second daemon projects = %v", old["projects"])
+	}
+
+	dead := byPort[1]
+	if dead["running"] != false || dead["version"] != "3.2.7" {
+		t.Errorf("dead daemon entry = %v, want running:false with recorded version", dead)
+	}
+}
+
+// TestStatusPortsOverrideActiveViaProjectFile: with per-project pinning the
+// override signal comes from .godot/godot_ai_ports.json on a connected
+// session's project — no legacy global backup involved.
+func TestStatusPortsOverrideActiveViaProjectFile(t *testing.T) {
+	stubCacheDir(t)
+	projectDir := t.TempDir()
+
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	runStatus := func() map[string]any {
+		cmd := NewRootCommand()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d.HTTPPort())})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("status: %v\n%s", err, buf.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+		}
+		return out
+	}
+
+	if out := runStatus(); out["ports_override_active"] != false {
+		t.Errorf("ports_override_active = %v without any pin", out["ports_override_active"])
+	}
+
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+		"session_id": "pinned@0001", "project_path": projectDir + "/",
+	})
+	if err := godot.WriteProjectPorts(projectDir, d.HTTPPort(), d.WSPort()); err != nil {
+		t.Fatal(err)
+	}
+	if out := runStatus(); out["ports_override_active"] != true {
+		t.Errorf("ports_override_active = %v with a project port file", out["ports_override_active"])
+	}
+}
+
+// TestStopClearsProjectPortPins: a full stop deletes the per-project port
+// file of each connected session's project (only while it still points at
+// the stopped daemon's port) and reports the cleared projects.
+func TestStopClearsProjectPortPins(t *testing.T) {
+	stubCacheDir(t)
+	projectDir := t.TempDir()
+
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No cleanup shutdown: stop IS the shutdown under test.
+
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+		"session_id": "pinned@0001", "project_path": projectDir + "/", "launched_by": "user",
+	})
+	if err := godot.WriteProjectPorts(projectDir, d.HTTPPort(), d.WSPort()); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"stop", "--http-port", itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("stop output is not JSON: %v\n%s", err, buf.String())
+	}
+	cleared, _ := out["project_ports_cleared"].([]any)
+	if len(cleared) != 1 || cleared[0] != projectDir+"/" {
+		t.Errorf("project_ports_cleared = %v, want [%s/]", cleared, projectDir)
+	}
+	if godot.HasProjectPorts(projectDir) {
+		t.Error("port pin still present after stop")
+	}
+}
+
+// TestStopKeepsRepinnedPortFile: a port file rewritten by a NEWER launch on
+// another daemon's ports must survive the old daemon's stop.
+func TestStopKeepsRepinnedPortFile(t *testing.T) {
+	stubCacheDir(t)
+	projectDir := t.TempDir()
+
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+		"session_id": "pinned@0001", "project_path": projectDir + "/", "launched_by": "user",
+	})
+	// The pin points at a DIFFERENT daemon now (newer launch elsewhere).
+	if err := godot.WriteProjectPorts(projectDir, 29999, 29998); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"stop", "--http-port", itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("stop output is not JSON: %v\n%s", err, buf.String())
+	}
+	if _, present := out["project_ports_cleared"]; present {
+		t.Errorf("repinned file must not be reported cleared: %v", out["project_ports_cleared"])
+	}
+	ports, ok := godot.ReadProjectPorts(projectDir)
+	if !ok || ports.HTTPPort != 29999 {
+		t.Errorf("repinned port file lost: %+v, %v", ports, ok)
 	}
 }

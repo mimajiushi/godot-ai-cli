@@ -104,10 +104,10 @@ func projectOps() []OpSpec {
 		},
 		{
 			Domain: "project", Name: "continue", PluginCommand: "project_continue",
-			Summary: "Resume a game paused at a debugger break (e.g. after a failed eval)",
-			Timeout: DefaultTimeout,
+			Summary:      "Resume a game paused at a debugger break (e.g. after a failed eval)",
+			Timeout:      DefaultTimeout,
 			ResponseNote: `{"continued","was_breaked"}`,
-			DocNote:     "A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.",
+			DocNote:      "A failed eval that parked the game at a debugger break already auto-resumes; use this for breaks the game hit on its own.",
 		},
 	}
 }

@@ -41,15 +41,15 @@ func TestCommandsMarkdownCatalog(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"`editor record` 75s",                        // derived long-ops bullet
-		"`editor screenshot` also accepts `--out`",   // derived CLI-extras bullet
-		"`batch execute` also accepts `--file`",      // derived CLI-extras bullet
-		"CLI-side flags (not wire params): `--out`",  // per-op CLI flags line
-		"`--assert` string[]",                        // stringArray kind label
-		"**[write]**",                                // write gate marker
-		"Eval code constraints:",                     // editor eval DocNote
-		"matched_count",                              // logs read DocNote
-		"## api (1 op)",                              // singular pluralization
+		"`editor record` 75s",                       // derived long-ops bullet
+		"`editor screenshot` also accepts `--out`",  // derived CLI-extras bullet
+		"`batch execute` also accepts `--file`",     // derived CLI-extras bullet
+		"CLI-side flags (not wire params): `--out`", // per-op CLI flags line
+		"`--assert` string[]",                       // stringArray kind label
+		"**[write]**",                               // write gate marker
+		"Eval code constraints:",                    // editor eval DocNote
+		"matched_count",                             // logs read DocNote
+		"## api (1 op)",                             // singular pluralization
 		"## batch (1 op)",
 	} {
 		if !strings.Contains(out, want) {

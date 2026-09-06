@@ -1106,6 +1106,21 @@ func _send_error(connection: McpConnection, request_id: String, code: String, me
 	_send_error_response(connection, request_id, ErrorCodes.make(code, message))
 
 
+## #645 同帧回复竞态的统一规避：deferred 请求的注册发生在 handler 返回
+## 之后，同步回复会被当作过期请求丢弃（connection.gd 的 "dropped late
+## response"）。等一帧再回复；测试注入 _eval_ready_frame_waiter 同步推进。
+func _send_error_next_frame(connection: McpConnection, request_id: String, err: Dictionary) -> void:
+	if _eval_ready_frame_waiter.is_valid():
+		await _eval_ready_frame_waiter.call()
+	else:
+		var tree := Engine.get_main_loop() as SceneTree
+		if tree == null:
+			_send_error_response(connection, request_id, err)
+			return
+		await tree.process_frame
+	_send_error_response(connection, request_id, err)
+
+
 func _send_error_response(connection: McpConnection, request_id: String, err: Dictionary) -> void:
 	if connection == null or not is_instance_valid(connection):
 		return
@@ -1245,19 +1260,26 @@ func _probe_then_eval(
 	run_token: int,
 	echo_prints: bool = false,
 ) -> void:
+	## #645 同帧回复竞态：本函数会被 game_eval handler 同步调用（capture
+	## ready 时），此处的即时回复发生在调度器注册 deferred 请求之前，会被
+	## 当作过期请求丢弃（客户端只能干等 15s TRANSPORT_TIMEOUT）——所有
+	## 提前返回的错误统一走 _send_error_next_frame 延迟一帧回复。
+	##
 	## godot-ai-cli fork patch: break 冻结的是游戏主循环，liveness 探针只会
 	## 白白超时——入口直接归因 break 并给出 CLI 恢复路径，不再只提聚焦窗口。
-	if _break_active:
-		_send_error_response(connection, request_id, _eval_break_not_ready_error())
+	## 查 _is_game_breaked() 而非仅 _break_active：headless 下 break 信号
+	## 可能永不到达，需 session.is_breaked() 同步兜底。
+	if _is_game_breaked():
+		_send_error_next_frame(connection, request_id, _eval_break_not_ready_error())
 		return
 	if not _is_current_game_run(run_token) or not is_game_capture_ready():
-		_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
-			"The game run changed before game_eval could be checked — the game stopped or restarted. Retry against the current run.")
+		_send_error_next_frame(connection, request_id, ErrorCodes.make(ErrorCodes.EVAL_GAME_NOT_READY,
+			"The game run changed before game_eval could be checked — the game stopped or restarted. Retry against the current run."))
 		return
 	var session: EditorDebuggerSession = _first_active_session()
 	if session == null:
-		_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
-			"Game-side capture registered but its debugger session is no longer active — the game likely just stopped or is restarting. Confirm it is running and retry.")
+		_send_error_next_frame(connection, request_id, ErrorCodes.make(ErrorCodes.EVAL_GAME_NOT_READY,
+			"Game-side capture registered but its debugger session is no longer active — the game likely just stopped or is restarting. Confirm it is running and retry."))
 		return
 
 	var timer := tree.create_timer(EVAL_LIVENESS_WAIT_SEC)
@@ -1286,8 +1308,9 @@ func _on_eval_liveness_timeout(request_id: String) -> void:
 	_clear_pending(request_id)
 	if connection == null or not is_instance_valid(connection):
 		return
-	## godot-ai-cli fork patch: break 冻结主循环时探针必然超时——归因 break。
-	if _break_active:
+	## godot-ai-cli fork patch: break 冻结主循环时探针必然超时——归因 break
+	## （含 headless 下的 session.is_breaked() 同步兜底）。
+	if _is_game_breaked():
 		_send_error_response(connection, request_id, _eval_break_not_ready_error())
 		return
 	_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
@@ -1318,8 +1341,9 @@ func _on_eval_liveness_response(data: Array) -> void:
 		return
 	if not loop_live:
 		## godot-ai-cli fork patch: break 冻结主循环时 loop_live 恒为 false——
-		## 归因 break 并给出恢复路径；非 break 情况保留聚焦窗口提示。
-		if _break_active:
+		## 归因 break 并给出恢复路径（含 headless 下的 session.is_breaked()
+		## 同步兜底）；非 break 情况保留聚焦窗口提示。
+		if _is_game_breaked():
 			_send_error_response(connection, request_id, _eval_break_not_ready_error())
 			return
 		_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
@@ -1630,14 +1654,19 @@ func _on_eval_runtime_error(data: Array) -> void:
 ## subsequent evals return {"result":null}). The break was caused by OUR eval,
 ## not by user debugging — resume the game right after replying the error.
 ##
-## 事件驱动版本：break 信号经调试通道异步到达，回复错误的同一帧
-## session.is_breaked() 还是 false，同步检查会漏发 continue。改为记下待恢复
-## 标记，由 note_debug_break 在 break 真正到达时补发；2s 超时兜底清除，
-## 避免误恢复之后无关的用户 break。
+## 两层并存的自动恢复：
+## - 同步兜底（beta.10 原路径）：直接查 session.is_breaked()，不依赖 break
+##   信号——headless 编辑器没有 ScriptEditorDebugger UI，break 信号可能
+##   永不到达，纯事件驱动会让恢复与 break 归因全部落空（live 回归）。
+## - 事件驱动：未 break 时记下待恢复标记，由 note_debug_break 在 break
+##   真正到达时补发；2s 超时兜底再查一次 session 后清除，
+##   避免误恢复之后无关的用户 break。
 func _auto_continue_after_eval_error(request_id: String) -> void:
-	## break 可能先于错误回复被记录（两条调试消息乱序到达）——立即补发。
-	if _break_active and _break_can_debug:
-		_send_break_continue("break already recorded (%s)" % request_id)
+	## 已 break（信号已记录或 session 直接可查）立即补发，不等信号。
+	## can_debug 未知时宽容处理：is_breaked() 为 true 即可发——eval 引发的
+	## 运行时 break 本来就可 continue。
+	if _is_game_breaked():
+		_send_break_continue("session breaked (%s)" % request_id)
 		return
 	var tree := Engine.get_main_loop() as SceneTree
 	if tree == null:
@@ -1660,7 +1689,11 @@ func _cancel_eval_break_recovery(request_id: String) -> void:
 
 func _on_eval_break_recovery_timeout(request_id: String) -> void:
 	_eval_break_recovery.erase(request_id)
-	if _log_buffer:
+	## 兜底补发：break 信号始终未到时（headless），到期前最后查一次
+	## session 状态，确实 break 则补发 continue 再清标记。
+	if _is_game_breaked():
+		_send_break_continue("recovery timeout (%s)" % request_id)
+	elif _log_buffer:
 		_log_buffer.log("[debug] eval break recovery marker expired (%s)" % request_id)
 
 
@@ -1672,6 +1705,28 @@ func _send_break_continue(context: String) -> void:
 	session.send_message("continue", [])
 	if _log_buffer:
 		_log_buffer.log("[debug] auto-continue after eval error (%s)" % context)
+
+
+## 测试缝：替代"任一活跃 session 报告 breaked"的查询。生产留空走真实
+## 查询（单测环境没有游戏 session，无法直接制造 is_breaked()=true）。
+var _session_breaked_probe: Callable = Callable()
+
+
+## godot-ai-cli fork patch: 游戏是否停在 debugger break。_break_active 依赖
+## break 信号（headless 编辑器没有 ScriptEditorDebugger UI，信号可能永不
+## 到达），因此同时直接查活跃 session 的 is_breaked() 作同步兜底——任一
+## 命中即视为 break。
+func _is_game_breaked() -> bool:
+	if _break_active:
+		return true
+	return _session_reports_breaked()
+
+
+func _session_reports_breaked() -> bool:
+	if _session_breaked_probe.is_valid():
+		return bool(_session_breaked_probe.call())
+	var session := _first_active_session()
+	return session != null and session.is_breaked()
 
 
 ## godot-ai-cli fork patch: resume a game paused at a debugger break

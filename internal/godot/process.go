@@ -46,7 +46,9 @@ func isGodotEditorPID(pid int, imageName func(int) (string, error)) bool {
 // ships capitalized Windows binaries. Prefix-adjacent tools (godotenv and
 // friends) deliberately do not count.
 func looksLikeGodotEditorImage(image string) bool {
-	base := strings.ToLower(filepath.Base(image))
+	// Image paths may use Windows separators on any host (tests, logs), so
+	// normalize before taking the base name.
+	base := strings.ToLower(filepath.Base(strings.ReplaceAll(image, "\\", "/")))
 	base = strings.TrimSuffix(base, ".exe")
 	rest := strings.TrimPrefix(base, "godot")
 	if rest == base {

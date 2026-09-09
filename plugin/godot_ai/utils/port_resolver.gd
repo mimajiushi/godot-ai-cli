@@ -338,22 +338,10 @@ static func resolve_ws_port(configured: int, max_port: int, log_buffer = null) -
 	return resolved
 
 
-## Trust the cached ws_port from the managed record only when the record
-## is current ownership proof — i.e. record version matches the installed
-## plugin. Otherwise a stale record from an older install (e.g. a 9500
-## value pre-Windows-reservation collision) would mislead the
-## compatibility check into killing an unrelated external process. #259.
-static func resolved_ws_port_for_existing_server(
-	record_ws_port: int,
-	record_version: String,
-	current_version: String,
-	fresh_resolved: int
-) -> int:
-	if record_ws_port <= 0:
-		return fresh_resolved
-	if current_version.is_empty() or record_version != current_version:
-		return fresh_resolved
-	return record_ws_port
+## NOTE：曾经的 `resolved_ws_port_for_existing_server`（managed 记录 ws_port
+## 优先于实时解析）已随 D1 修复移除——"插件期望的端口"统一收口在
+## `ClientConfigurator._resolved_ports`（项目端口文件 > EditorSettings >
+## 默认），managed 记录仅作所有权证据，不再作端口期望来源。
 
 
 static func resolve_ws_port_from_output(

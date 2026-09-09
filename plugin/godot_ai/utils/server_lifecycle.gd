@@ -433,6 +433,14 @@ func handle_server_version_verified(expected_version: String, version: String) -
 		## A verified compatible handshake ends any stale-recovery episode —
 		## leftover authorized rounds must not survive into a later walk.
 		_stale_recovery_budget = 0
+		## D1 修复：被阻断（INCOMPATIBLE / 占用者误判）的连接靠退避重连循环
+		## 自愈——兼容握手到达时必须同步解除阻断，否则 socket 虽通，
+		## connect_blocked 残留会让下一次断线后再也不拨号。
+		if _connection_blocked:
+			_connection_blocked = false
+			if _host._connection != null:
+				_host._connection.connect_blocked = false
+				_host._connection.connect_block_reason = ""
 		## patch 级漂移（3.2.6 ↔ 3.2.7）：允许连接，仅记录软警告（dock 琥珀色
 		## 展示），不再硬阻断——3.2.6 插件 + 3.2.7 daemon 事故的修复核心。
 		if str(compatibility.get("reason", "")) == "exact":
@@ -877,13 +885,13 @@ func _start_server_impl(async_gen: int) -> void:
 	if port_in_use:
 		var record: Dictionary = _host._read_managed_server_record()
 		var record_version := str(record.get("version", ""))
-		var record_ws_port := int(record.get("ws_port", 0))
-		_host._set_resolved_ws_port(PortResolver.resolved_ws_port_for_existing_server(
-			record_ws_port,
-			record_version,
-			current_version,
-			int(_host._resolve_ws_port())
-		))
+		## D1 修复：期望 WS 端口一律走 `_resolve_ws_port()`——经
+		## `ClientConfigurator._resolved_ports`（项目端口文件 > EditorSettings
+		## > 默认）再叠 Windows 保留段重映射；managed 记录里的 ws_port 旧钉值
+		## 不再参与期望端口判定（记录仅作所有权证据：pid/version/token）。
+		## 旧行为下"曾 managed-spawn 写下 9510 钉值 + 项目端口文件指向 9560"
+		## 会把正确的 daemon 误判成 WS 端口错配的占用者并硬阻断、零重试停摆。
+		_host._set_resolved_ws_port(int(_host._resolve_ws_port()))
 		ws_port = int(_host._resolved_ws_port)
 		## Untyped first: a cancelled walk gets null back (see _run_blocking)
 		## and must reach the staleness check before any typed cast.

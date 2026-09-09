@@ -1302,21 +1302,6 @@ func _resolve_ws_port() -> int:
 	)
 
 
-## Test-compat shim — characterization tests call this static directly.
-static func _resolved_ws_port_for_existing_server(
-	record_ws_port: int,
-	record_version: String,
-	current_version: String,
-	fresh_resolved: int
-) -> int:
-	return PortResolver.resolved_ws_port_for_existing_server(
-		record_ws_port,
-		record_version,
-		current_version,
-		fresh_resolved,
-	)
-
-
 static func _resolve_ws_port_from_output(
 	configured_port: int,
 	netsh_output: String,
@@ -2189,3 +2174,11 @@ func _on_custom_tools_changed() -> void:
 func _on_connection_state_changed(is_open: bool) -> void:
 	if is_open and _custom_tool_registry != null:
 		_on_custom_tools_changed()
+	## D1 修复：被阻断（connect_blocked）的连接走退避重连循环，每次连通
+	## 都要重新武装版本检查——否则兼容握手无人消费，阻断永远解不开。
+	if (
+		is_open
+		and _lifecycle != null
+		and _lifecycle.is_connection_blocked()
+	):
+		_arm_server_version_check()

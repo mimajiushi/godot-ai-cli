@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -290,5 +291,114 @@ func TestDaemonMismatchErrorNamesCompatibleDaemon(t *testing.T) {
 	data = out["error"].(map[string]any)["data"].(map[string]any)
 	if _, present := data["same_version_daemon"]; present {
 		t.Errorf("same_version_daemon present without a compatible daemon: %v", data)
+	}
+}
+
+// withKeptEditorReconnectTiming shrinks the post-upgrade reconnect wait so
+// the spawn-decision tests stay fast; restores the production timing on
+// cleanup (package-global swap — these tests must NOT run in parallel).
+func withKeptEditorReconnectTiming(t *testing.T, grace, poll time.Duration) {
+	t.Helper()
+	oldGrace, oldPoll := keptEditorReconnectGrace, keptEditorReconnectPoll
+	keptEditorReconnectGrace, keptEditorReconnectPoll = grace, poll
+	t.Cleanup(func() {
+		keptEditorReconnectGrace, keptEditorReconnectPoll = oldGrace, oldPoll
+	})
+}
+
+// sessionsStubServer serves /godot-ai/cli/sessions: empty for the first
+// emptyRounds polls, then the reconnected kept-editor session (a negative
+// emptyRounds stays empty forever).
+func sessionsStubServer(t *testing.T, emptyRounds int32, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/godot-ai/cli/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		if n := calls.Add(1); emptyRounds < 0 || n <= emptyRounds {
+			_, _ = w.Write([]byte(`{"sessions":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"sessions":[{"session_id":"kept@0001","project_path":"/my/project/","editor_pid":36816}]}`))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestSpawnDecisionWaitsForKeptEditorReconnect (defect D2): after an
+// --upgrade-daemon swap the kept editor's session takes a few poll rounds
+// to reappear (plugin reconnect backoff). The spawn decision must wait it
+// out and hand step 5 the REUSED session — acting on the transient empty
+// list is exactly the double-open D2 reported from the field.
+func TestSpawnDecisionWaitsForKeptEditorReconnect(t *testing.T) {
+	var calls atomic.Int32
+	server := sessionsStubServer(t, 2, &calls) // two empty rounds, then the reconnect lands
+	withKeptEditorReconnectTiming(t, 5*time.Second, 10*time.Millisecond)
+
+	list, warning, err := sessionsForSpawnDecision(context.Background(), testServerPort(t, server), "/my/project", true)
+	if err != nil {
+		t.Fatalf("sessionsForSpawnDecision: %v", err)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want none — the session reconnected inside the grace", warning)
+	}
+	sess := findProjectSession(list, "/my/project")
+	if sess == nil {
+		t.Fatal("the reconnected session must reach step 5 — it suppresses the spawn (reuse, not double-open)")
+	}
+	if sess["session_id"] != "kept@0001" {
+		t.Errorf("session_id = %v", sess["session_id"])
+	}
+	if got := calls.Load(); got < 3 {
+		t.Errorf("polled %d times, want at least 3 — the wait must actually wait out the empty rounds", got)
+	}
+}
+
+// TestSpawnDecisionKeptEditorGraceExpires: kept editors that never
+// reconnect within the grace yield the warning plus the last (empty) list,
+// so launch continues into the normal spawn / EDITOR_ALREADY_OPEN flow
+// instead of hanging on a dead editor.
+func TestSpawnDecisionKeptEditorGraceExpires(t *testing.T) {
+	var calls atomic.Int32
+	server := sessionsStubServer(t, -1, &calls) // never reconnects
+	withKeptEditorReconnectTiming(t, 200*time.Millisecond, 20*time.Millisecond)
+
+	start := time.Now()
+	list, warning, err := sessionsForSpawnDecision(context.Background(), testServerPort(t, server), "/my/project", true)
+	if err != nil {
+		t.Fatalf("sessionsForSpawnDecision: %v", err)
+	}
+	if !strings.Contains(warning, "kept editors did not reconnect within") {
+		t.Errorf("warning = %q, want the reconnect-grace expiry note", warning)
+	}
+	if len(list) != 0 {
+		t.Errorf("list = %v, want the last empty list so the spawn flow continues", list)
+	}
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Errorf("returned after %s, before the 200ms grace expired", elapsed)
+	}
+}
+
+// TestSpawnDecisionNoAwaitWithoutUpgrade: a plain launch (no kept editors)
+// must not pay the reconnect wait — one query, the empty list as-is, no
+// warning.
+func TestSpawnDecisionNoAwaitWithoutUpgrade(t *testing.T) {
+	var calls atomic.Int32
+	server := sessionsStubServer(t, -1, &calls)
+	withKeptEditorReconnectTiming(t, 5*time.Second, 10*time.Millisecond)
+
+	list, warning, err := sessionsForSpawnDecision(context.Background(), testServerPort(t, server), "/my/project", false)
+	if err != nil {
+		t.Fatalf("sessionsForSpawnDecision: %v", err)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want none on the non-upgrade path", warning)
+	}
+	if len(list) != 0 {
+		t.Errorf("list = %v, want the empty list as-is", list)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("polled %d times, want exactly 1 — no waiting without an upgrade", got)
 	}
 }

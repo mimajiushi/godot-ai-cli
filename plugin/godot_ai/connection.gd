@@ -132,8 +132,10 @@ func _ready() -> void:
 	## timeout + reconnect with no error naming the size.
 	_peer.inbound_buffer_size = OUTBOUND_BUFFER_LIMIT_BYTES
 	if connect_blocked:
+		## D1 修复：不再 set_process(false) 永久停摆——保持 _process 活跃，
+		## CLOSED 退避分支会把首个 tick 交给 `_attempt_reconnect`，被阻断的
+		## 连接由此进入与正常断线相同的 RECONNECT_DELAYS 退避重连循环。
 		_log_blocked_notice_once()
-		set_process(false)
 		return
 	_connect_to_server()
 	_hook_editor_signals()
@@ -333,17 +335,26 @@ func _connect_to_server() -> void:
 
 
 func _attempt_reconnect() -> void:
-	if connect_blocked:
-		_log_blocked_notice_once()
-		set_process(false)
-		return
 	var delay := _reconnect_delay_for_attempt(_reconnect_attempt)
 	_reconnect_attempt += 1
 	_reconnect_timer = delay
-	_log_reconnect_transition(
-		"connecting to server (attempt %d)" % _reconnect_attempt,
-		_reconnect_attempt,
-	)
+	if connect_blocked:
+		## D1 修复：INCOMPATIBLE / foreign occupant 判定后不得
+		## set_process(false) 零重试永久停摆。保持退避循环继续拨号：每次
+		## 连通都会重新武装版本检查（plugin._on_connection_established），
+		## 占用者一旦换成兼容 daemon（或原判定系误判）即在握手时解除阻断
+		## 并转 READY。退避封顶 60s，对真正不兼容的占用者每分钟最多一次
+		## 握手，代价可接受。
+		_log_blocked_notice_once()
+		_log_reconnect_transition(
+			"connecting to server (attempt %d, blocked verdict pending re-verify)" % _reconnect_attempt,
+			_reconnect_attempt,
+		)
+	else:
+		_log_reconnect_transition(
+			"connecting to server (attempt %d)" % _reconnect_attempt,
+			_reconnect_attempt,
+		)
 	## Always create a fresh WebSocketPeer before reconnecting. A peer that has
 	## reached STATE_CLOSED is terminal; reusing it can leave the editor stuck in
 	## a quiet reconnect loop after the server restarts.

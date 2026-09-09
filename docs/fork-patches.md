@@ -368,6 +368,22 @@ detected the already-running editor.
   port file OR a legacy global override exists. `stop` removes each session
   project's port pin (only while it still points at the stopped daemon's
   port; reported as `project_ports_cleared`).
+- **D2 fix (3.2.10 → 3.2.11)**: the `--upgrade-daemon` swap used to query
+  `/godot-ai/cli/sessions` IMMEDIATELY after the new daemon came up — the
+  kept editors' plugins reconnect asynchronously (backoff), so the query
+  saw an empty list and launch SPAWNED A DUPLICATE editor for a project
+  whose editor was alive (field-reproduced: the reconnected editor pid
+  36816 and the freshly spawned pid 14748 coexisted — exactly the
+  double-open `EDITOR_ALREADY_OPEN` exists to prevent). Both upgrade
+  branches (the `DAEMON_MISMATCH` branch and the adopted-daemon patch-drift
+  branch) now record the kept-editor count, and step 5 goes through
+  `sessionsForSpawnDecision` (`internal/cli/launch.go`): with kept editors
+  it re-polls the session list every 500ms until this project's session
+  reappears or a 15s grace expires (both injectable package vars for
+  tests). A hit within the window is the normal reuse path (no spawn);
+  an expiry adds a "kept editors did not reconnect within Ns" warning and
+  continues into the unchanged spawn / `EDITOR_ALREADY_OPEN` flow. Plain
+  launches (no kept editors) pay no wait — one query, as before.
 
 ## 14. Node-reference assignment in `set_property`, `open_scene` stale-disk warning (beta.18)
 

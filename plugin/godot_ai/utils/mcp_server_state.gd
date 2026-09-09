@@ -36,8 +36,11 @@ const SPAWNING := 1
 const READY := 3
 ## Live server on the HTTP port returned a version that doesn't match
 ## what this plugin expects, OR returned no `handshake_ack` inside the
-## timeout. Connection is blocked; recovery requires a kill+respawn
-## click via `recover_incompatible_server`.
+## timeout. Connection enters the blocked reconnect backoff loop (D1:
+## no more permanent zero-retry stall); recovery is either a kill+respawn
+## click via `recover_incompatible_server`, or self-heal — a later
+## reconnect whose handshake verifies compatible clears the block and
+## transitions back to READY.
 const INCOMPATIBLE := 4
 ## Spawned process exited inside the SPAWN_GRACE_MS window. Python
 ## traceback went to Godot's output log. Terminal — reload the plugin
@@ -142,6 +145,11 @@ static func can_transition(from: int, to: int) -> bool:
 	## legal out of it. Already covered by the stop checks above.
 	if from == GUARDED:
 		return false
+	## D1 自愈出口：INCOMPATIBLE 下连接仍在退避重连，一次兼容握手
+	## （占用者已换成兼容 daemon，或原判定系误判）即转回 READY。其余
+	## terminal 诊断仍保持 first-writer-wins 冻结。
+	if from == INCOMPATIBLE and to == READY:
+		return true
 	## Terminal diagnoses freeze further forward transitions. Recovery
 	## goes through STOPPING (covered above), so any other target is
 	## rejected — this is the first-writer-wins contract.

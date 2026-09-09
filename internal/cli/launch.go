@@ -85,7 +85,9 @@ projects. stop deletes the file again.
 When the port is held by an OLD daemon (DAEMON_MISMATCH):
   - re-run with --upgrade-daemon to shut the old daemon down WITHOUT
     quitting any editor (compatible plugins reconnect to the new daemon
-    automatically), or
+    automatically); after the swap launch waits (up to 15s) for the kept
+    editors to reconnect and reuses their sessions instead of spawning a
+    duplicate editor, or
   - point launch at a compatible already-running daemon with --http-port
     (the error's data.same_version_daemon names one when found).
 When another daemon already hosts an editor for THIS project, launch fails
@@ -123,6 +125,16 @@ Examples:
 	_ = cmd.MarkFlagRequired("project")
 	return cmd
 }
+
+// keptEditorReconnectGrace / keptEditorReconnectPoll bound the wait after
+// an --upgrade-daemon swap: the kept editors' plugins reconnect to the new
+// daemon asynchronously (with backoff), so the session list can be empty
+// for a few seconds even though this project's editor is alive. Package
+// vars so tests can shrink the wait.
+var (
+	keptEditorReconnectGrace = 15 * time.Second
+	keptEditorReconnectPoll  = 500 * time.Millisecond
+)
 
 // launchOptions collects the launch flags.
 type launchOptions struct {
@@ -208,6 +220,9 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// keptEditors counts the editors an --upgrade-daemon swap preserved;
+	// step 5 waits for their sessions to reconnect before deciding to spawn.
+	keptEditors := 0
 	var inProcess *daemon.Daemon
 	if opts.foreground {
 		inProcess, err = daemon.Start(ctx, cfg)
@@ -241,6 +256,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 				return jsonError(cmd, "DAEMON_START_FAILED",
 					fmt.Sprintf("old daemon stopped, but the new daemon did not come up: %v", err), nil)
 			}
+			keptEditors = editors
 		default:
 			return jsonError(cmd, "DAEMON_START_FAILED", err.Error(), nil)
 		}
@@ -266,6 +282,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 					return jsonError(cmd, "DAEMON_START_FAILED",
 						fmt.Sprintf("old daemon stopped, but the new daemon did not come up: %v", err), nil)
 				}
+				keptEditors = editors
 			} else {
 				warnings = append(warnings, fmt.Sprintf(
 					"adopted daemon runs version %s (this CLI bundles %s) — major.minor compatible, but the daemon keeps its OLD code; relaunch with --upgrade-daemon to switch it to the bundled build",
@@ -288,14 +305,17 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	// Step 5: launch the editor unless a session for THIS project is already
 	// connected. Other projects' sessions may share this daemon — they must
 	// neither suppress our editor launch nor be mistaken for our session.
-	sessions, err := getDaemonJSON(opts.httpPort, "/godot-ai/cli/sessions")
+	// After an --upgrade-daemon swap the kept editors reconnect
+	// asynchronously (the plugin retries with backoff), so an immediate
+	// query can come back empty even though this project's editor is alive;
+	// awaitKept waits out that reconnect window instead of double-opening
+	// the editor the swap deliberately preserved (defect D2).
+	sessionList, waitWarning, err := sessionsForSpawnDecision(ctx, opts.httpPort, projectDir, keptEditors > 0)
 	if err != nil {
 		return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
 	}
-	sessionList, ok := sessions["sessions"].([]any)
-	if !ok {
-		return jsonError(cmd, "DAEMON_UNREACHABLE",
-			"unexpected /godot-ai/cli/sessions payload shape (missing sessions array)", nil)
+	if waitWarning != "" {
+		warnings = append(warnings, waitWarning)
 	}
 	editorPID := 0
 	if findProjectSession(sessionList, projectDir) == nil {
@@ -541,4 +561,41 @@ func findProjectSession(list []any, projectDir string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// sessionsForSpawnDecision fetches the daemon's session list for the
+// step-5 spawn decision. With awaitKept set (an --upgrade-daemon swap just
+// kept editors running) it re-polls every keptEditorReconnectPoll until a
+// session for projectDir reappears or keptEditorReconnectGrace expires —
+// the kept editors' plugins reconnect asynchronously, and acting on the
+// transient empty list would spawn a duplicate editor (defect D2). A grace
+// expiry or an interrupt is NOT an error: the last list comes back with a
+// warning and the caller continues into the normal spawn /
+// EDITOR_ALREADY_OPEN flow.
+func sessionsForSpawnDecision(ctx context.Context, httpPort int, projectDir string, awaitKept bool) ([]any, string, error) {
+	deadline := time.Now().Add(keptEditorReconnectGrace)
+	for {
+		sessions, err := getDaemonJSON(httpPort, "/godot-ai/cli/sessions")
+		if err != nil {
+			return nil, "", err
+		}
+		list, ok := sessions["sessions"].([]any)
+		if !ok {
+			return nil, "", errors.New("unexpected /godot-ai/cli/sessions payload shape (missing sessions array)")
+		}
+		if !awaitKept || findProjectSession(list, projectDir) != nil {
+			return list, "", nil
+		}
+		reconnectWarning := fmt.Sprintf(
+			"kept editors did not reconnect within %s — continuing without them; if this project's editor is still alive it keeps retrying, and a later launch reuses its session once connected",
+			keptEditorReconnectGrace)
+		if time.Now().After(deadline) {
+			return list, reconnectWarning, nil
+		}
+		select {
+		case <-ctx.Done():
+			return list, reconnectWarning, nil
+		case <-time.After(keptEditorReconnectPoll):
+		}
+	}
 }

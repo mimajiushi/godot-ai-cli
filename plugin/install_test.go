@@ -21,8 +21,8 @@ func newProject(t *testing.T, projectGodot string) string {
 }
 
 func TestPluginVersion(t *testing.T) {
-	if got := plugin.PluginVersion(); got != "3.2.10" {
-		t.Fatalf("PluginVersion() = %q, want 3.2.10", got)
+	if got := plugin.PluginVersion(); got != "3.2.11" {
+		t.Fatalf("PluginVersion() = %q, want 3.2.11", got)
 	}
 }
 

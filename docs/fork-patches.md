@@ -379,7 +379,7 @@ detected the already-running editor.
   branch) now record the kept-editor count, and step 5 goes through
   `sessionsForSpawnDecision` (`internal/cli/launch.go`): with kept editors
   it re-polls the session list every 500ms until this project's session
-  reappears or a 15s grace expires (both injectable package vars for
+  reappears or a 75s grace expires (both injectable package vars for
   tests). A hit within the window is the normal reuse path (no spawn);
   an expiry adds a "kept editors did not reconnect within Ns" warning and
   continues into the unchanged spawn / `EDITOR_ALREADY_OPEN` flow. Plain

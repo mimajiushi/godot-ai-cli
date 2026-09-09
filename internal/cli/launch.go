@@ -85,7 +85,7 @@ projects. stop deletes the file again.
 When the port is held by an OLD daemon (DAEMON_MISMATCH):
   - re-run with --upgrade-daemon to shut the old daemon down WITHOUT
     quitting any editor (compatible plugins reconnect to the new daemon
-    automatically); after the swap launch waits (up to 15s) for the kept
+    automatically); after the swap launch waits (up to 75s) for the kept
     editors to reconnect and reuses their sessions instead of spawning a
     duplicate editor, or
   - point launch at a compatible already-running daemon with --http-port
@@ -130,10 +130,14 @@ Examples:
 // keptEditorReconnectGrace / keptEditorReconnectPoll bound the wait after
 // an --upgrade-daemon swap: the kept editors' plugins reconnect to the new
 // daemon asynchronously (with backoff), so the session list can be empty
-// for a few seconds even though this project's editor is alive. Package
-// vars so tests can shrink the wait.
+// for a while even though this project's editor is alive. The grace must
+// cover the plugin's reconnect backoff cap (60s) plus margin: the editor's
+// backoff schedule is anchored to when it noticed the OLD daemon die, so
+// by the time the new daemon is healthy the editor may already be sitting
+// in a long sleep slot (15s proved too short — RS-021 replay on beta.20).
+// Package vars so tests can shrink the wait.
 var (
-	keptEditorReconnectGrace = 15 * time.Second
+	keptEditorReconnectGrace = 75 * time.Second
 	keptEditorReconnectPoll  = 500 * time.Millisecond
 )
 

@@ -106,6 +106,7 @@ Examples:
 				godotBin:      godotBin,
 				httpPort:      httpPort,
 				wsPort:        wsPort,
+				wsPortSet:     cmd.Flags().Changed("ws-port"),
 				wait:          time.Duration(waitSec) * time.Second,
 				foreground:    foreground,
 				upgradeDaemon: upgradeDaemon,
@@ -143,6 +144,7 @@ type launchOptions struct {
 	godotBin      string
 	httpPort      int
 	wsPort        int
+	wsPortSet     bool // true only when --ws-port was passed explicitly
 	wait          time.Duration
 	foreground    bool
 	upgradeDaemon bool
@@ -243,7 +245,15 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 			}
 			// --upgrade-daemon: shut the OLD daemon down without quitting
 			// any editor, then bring the new daemon up on the same ports
-			// and continue the launch normally.
+			// and continue the launch normally. Without an explicit
+			// --ws-port the replacement inherits the old daemon's ACTUAL
+			// WS port: the kept editors' plugins (and this project's port
+			// file) still point there, so falling back to the flag default
+			// would leave them reconnecting forever (launch then
+			// double-spawns the editor) and could hijack another project's
+			// daemon on the default port.
+			opts.wsPort = upgradeWSPort(opts.wsPortSet, opts.wsPort, mismatchErr.RunningWSPort)
+			cfg.WSPort = opts.wsPort
 			editors, uerr := shutdownDaemonKeepEditors(opts.httpPort)
 			if uerr != nil {
 				return jsonError(cmd, "DAEMON_UPGRADE_FAILED", uerr.Error(),
@@ -270,6 +280,13 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		if running, ok := probeDaemonHealth(opts.httpPort); ok && running != "" &&
 			running != pluginmeta.PluginVersion() && semverCompatible(running, pluginmeta.PluginVersion()) {
 			if opts.upgradeDaemon {
+				// Same WS-port inheritance as the DAEMON_MISMATCH branch
+				// above, sourced from the drifted daemon's live status
+				// BEFORE it is shut down (a failed probe advertises no
+				// port, so the requested value stands).
+				liveWS, _ := liveDaemonWSPort(opts.httpPort)
+				opts.wsPort = upgradeWSPort(opts.wsPortSet, opts.wsPort, liveWS)
+				cfg.WSPort = opts.wsPort
 				editors, uerr := shutdownDaemonKeepEditors(opts.httpPort)
 				if uerr != nil {
 					return jsonError(cmd, "DAEMON_UPGRADE_FAILED", uerr.Error(),
@@ -452,6 +469,35 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		<-inProcess.Done()
 	}
 	return nil
+}
+
+// upgradeWSPort decides the WS port of the daemon that REPLACES the old one
+// in an --upgrade-daemon swap. An explicit --ws-port always wins; otherwise
+// the new daemon inherits the old daemon's actual WS port (runningWSPort),
+// because the kept editors' plugins — and this project's
+// .godot/godot_ai_ports.json — still point there. A non-positive
+// runningWSPort means the old daemon did not advertise one (dead probe),
+// so the requested value stands.
+func upgradeWSPort(explicit bool, requested, runningWSPort int) int {
+	if !explicit && runningWSPort > 0 {
+		return runningWSPort
+	}
+	return requested
+}
+
+// liveDaemonWSPort reads the daemon's actual WS port from its live status
+// (a recorded identity file may predate a restart on other ports). ok=false
+// when the daemon does not answer or advertises no ws_port.
+func liveDaemonWSPort(httpPort int) (wsPort int, ok bool) {
+	status, ok := probeKnownDaemonGET(httpPort, "/godot-ai/status")
+	if !ok {
+		return 0, false
+	}
+	n, ok := status["ws_port"].(float64)
+	if !ok || n <= 0 {
+		return 0, false
+	}
+	return int(n), true
 }
 
 // daemonMismatchError renders the DAEMON_MISMATCH envelope. Before giving

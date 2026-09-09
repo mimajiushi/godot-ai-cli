@@ -384,6 +384,12 @@ detected the already-running editor.
   an expiry adds a "kept editors did not reconnect within Ns" warning and
   continues into the unchanged spawn / `EDITOR_ALREADY_OPEN` flow. Plain
   launches (no kept editors) pay no wait — one query, as before.
+  Follow-up (same release line): the swap now also inherits the old
+  daemon's ACTUAL WS port unless `--ws-port` was passed explicitly —
+  previously the replacement daemon fell back to the flag default 9500,
+  so kept editors pinned to a non-default port could never reconnect
+  within the grace (double-spawning their editor) and the new daemon
+  could hijack another project's daemon on 9500.
 
 ## 14. Node-reference assignment in `set_property`, `open_scene` stale-disk warning (beta.18)
 

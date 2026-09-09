@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 	"github.com/mimajiushi/godot-ai-cli/internal/daemonctl"
+	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 	"github.com/mimajiushi/godot-ai-cli/internal/testutil/mockplugin"
 )
 
@@ -400,5 +402,90 @@ func TestSpawnDecisionNoAwaitWithoutUpgrade(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("polled %d times, want exactly 1 — no waiting without an upgrade", got)
+	}
+}
+
+// TestUpgradeWSPortInheritsRunningPort (defect D2 follow-up): an
+// --upgrade-daemon swap WITHOUT an explicit --ws-port must inherit the old
+// daemon's actual WS port — the kept editors' plugins and the project's
+// port file still point there. The pre-fix behavior fell back to the flag
+// default 9500, leaving the kept editor reconnecting forever (launch then
+// spawned a duplicate editor) and possibly hijacking another project's
+// daemon on 9500.
+func TestUpgradeWSPortInheritsRunningPort(t *testing.T) {
+	if got := upgradeWSPort(false, daemon.DefaultWSPort, 9510); got != 9510 {
+		t.Errorf("upgradeWSPort(false, %d, 9510) = %d, want the inherited 9510", daemon.DefaultWSPort, got)
+	}
+}
+
+// TestUpgradeWSPortRespectsExplicitFlag: an explicit --ws-port always wins
+// over the old daemon's actual port — the user asked for the move.
+func TestUpgradeWSPortRespectsExplicitFlag(t *testing.T) {
+	if got := upgradeWSPort(true, 9600, 9510); got != 9600 {
+		t.Errorf("upgradeWSPort(true, 9600, 9510) = %d, want the explicit 9600", got)
+	}
+}
+
+// TestUpgradeWSPortWithoutAdvertisedPort: an old daemon that advertises no
+// WS port (dead probe) cannot prove where it listened — the requested value
+// stands instead of inheriting a zero port.
+func TestUpgradeWSPortWithoutAdvertisedPort(t *testing.T) {
+	if got := upgradeWSPort(false, 9500, 0); got != 9500 {
+		t.Errorf("upgradeWSPort(false, 9500, 0) = %d, want the requested 9500", got)
+	}
+}
+
+// TestUpgradeSwapInheritsOldWSPort: the full mismatch-branch seam over real
+// processes — an old (incompatible-version) daemon listening on non-default
+// ephemeral ports yields a DaemonMismatchError whose RunningWSPort feeds
+// upgradeWSPort, and the inherited value is what the replacement daemon
+// config / project port file / ready response all consume (they share
+// opts.wsPort in runLaunch).
+func TestUpgradeSwapInheritsOldWSPort(t *testing.T) {
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "0.0.1"})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+	if d.WSPort() == daemon.DefaultWSPort {
+		t.Skipf("ephemeral WS port landed on the default %d — the inheritance would be invisible", d.WSPort())
+	}
+
+	// No explicit --ws-port: the requested config carries the flag default,
+	// exactly like `launch --http-port <old> --upgrade-daemon`.
+	_, err = daemonctl.EnsureRunning(context.Background(), daemon.Config{
+		HTTPPort: d.HTTPPort(), WSPort: daemon.DefaultWSPort, Version: pluginmeta.PluginVersion(),
+	})
+	var mismatchErr *daemonctl.DaemonMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("err = %v (%T), want DaemonMismatchError", err, err)
+	}
+	if mismatchErr.RunningWSPort != d.WSPort() {
+		t.Fatalf("RunningWSPort = %d, want the old daemon's actual %d", mismatchErr.RunningWSPort, d.WSPort())
+	}
+	if got := upgradeWSPort(false, daemon.DefaultWSPort, mismatchErr.RunningWSPort); got != d.WSPort() {
+		t.Errorf("inherited ws port = %d, want %d — the kept editors still point at the old port", got, d.WSPort())
+	}
+	if got := upgradeWSPort(true, 9600, mismatchErr.RunningWSPort); got != 9600 {
+		t.Errorf("explicit --ws-port 9600 must win, got %d", got)
+	}
+}
+
+// TestLiveDaemonWSPort: the adopt-drift branch's source for the old WS
+// port — the live /godot-ai/status probe reports the port the daemon
+// actually listens on; a dead port advertises nothing.
+func TestLiveDaemonWSPort(t *testing.T) {
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "3.2.9"})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	ws, ok := liveDaemonWSPort(d.HTTPPort())
+	if !ok || ws != d.WSPort() {
+		t.Errorf("liveDaemonWSPort = %d, %v — want the actual %d, true", ws, ok, d.WSPort())
+	}
+	if ws, ok := liveDaemonWSPort(1); ok {
+		t.Errorf("dead port advertised ws_port %d, want ok=false", ws)
 	}
 }

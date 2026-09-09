@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -190,6 +191,56 @@ func TestFirstFrameDeadline(t *testing.T) {
 			t.Fatal("expected the server to close after a garbage first frame")
 		}
 	})
+}
+
+func TestSlowUpgradeHeaderTolerated(t *testing.T) {
+	// Regression for RS-021 (daemon swap after --upgrade-daemon): the
+	// plugin's WebSocketPeer drives the HTTP upgrade from its `_process`
+	// ticks, so an editor whose frame loop stalls (import scan, debugger
+	// break, scheduling hiccup on a loaded host) sends the upgrade request
+	// far later than the TCP connect. Sharing the 10s first-frame deadline
+	// with ReadHeaderTimeout dropped such connections pre-upgrade, turning
+	// a slow-but-alive reconnect into a FAILED dial that burned the
+	// plugin's backoff slots — kept editors then missed the upgrade grace
+	// window and `launch` double-spawned the editor.
+	s := bridge.NewServer(testVersion)
+	s.HandshakeTimeout = 200 * time.Millisecond
+	if err := s.Start(0); err != nil {
+		t.Fatalf("bridge start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	conn, err := net.Dial("tcp", s.Addr())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Stay silent past the old shared deadline before sending any header
+	// byte — this is exactly what a stalled editor frame loop looks like.
+	time.Sleep(400 * time.Millisecond)
+	_, err = conn.Write([]byte(
+		"GET / HTTP/1.1\r\n" +
+			"Host: " + s.Addr() + "\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+			"Sec-WebSocket-Version: 13\r\n\r\n"))
+	if err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+
+	// The server must still answer 101; under the old ReadHeaderTimeout it
+	// had already closed the connection.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 256)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("upgrade answered with closed connection (ReadHeaderTimeout too tight?): %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "101") {
+		t.Fatalf("expected 101 Switching Protocols, got %q", string(buf[:n]))
+	}
 }
 
 func TestDuplicateSessionClosed4001(t *testing.T) {

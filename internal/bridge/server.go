@@ -28,6 +28,18 @@ const (
 	// connection is dropped.
 	defaultHandshakeTimeout = 10 * time.Second
 
+	// upgradeHeaderTimeout bounds the PRE-upgrade HTTP header wait. It is
+	// deliberately much looser than the first-frame deadline: the plugin's
+	// WebSocketPeer only writes the upgrade request from its `_process`
+	// ticks, so an editor whose frame loop stalls (import scan, debugger
+	// break, scheduling hiccup on a loaded host) sends headers seconds
+	// after the TCP connect. A tight deadline here turned such stalls into
+	// failed dials that burned the plugin's backoff slots, and kept
+	// editors missed the `--upgrade-daemon` reconnect grace (RS-021).
+	// The listener is loopback-only, so idle-connection exposure is
+	// bounded; post-upgrade silence stays capped by HandshakeTimeout.
+	upgradeHeaderTimeout = 60 * time.Second
+
 	// maxFrameBytes mirrors the upstream 4 MB max WS frame (screenshot
 	// base64 payloads drove the original sizing).
 	maxFrameBytes = 4 * 1024 * 1024
@@ -172,7 +184,7 @@ func (s *Server) Start(port int) error {
 	// The plugin dials the root path; any path upgrades to keep the
 	// endpoint forgiving of trailing-slash drift.
 	mux.HandleFunc("/", s.handleUpgrade)
-	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: s.HandshakeTimeout}
+	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: upgradeHeaderTimeout}
 
 	s.mu.Lock()
 	s.listener = ln

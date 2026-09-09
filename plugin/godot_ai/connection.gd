@@ -178,6 +178,13 @@ func _process(delta: float) -> void:
 		WebSocketPeer.STATE_CLOSED:
 			if _connected:
 				_connected = false
+				## RS-021: zero the stale backoff leftover so a drop from OPEN
+				## redials on THIS tick. `_attempt_reconnect` seeds the timer
+				## with the NEXT retry's delay before dialing; a fast dial
+				## leaves most of that delay (up to the 60s cap) parked here
+				## for the whole connection. Waiting it out after a drop let
+				## kept editors miss the `--upgrade-daemon` reconnect grace.
+				_reconnect_timer = 0.0
 				## This peer reached OPEN, so its one close diagnostic is the
 				## post-OPEN line below. Mark the peer consumed; otherwise a
 				## stale reconnect delay leaves it in CLOSED for another frame

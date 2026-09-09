@@ -390,6 +390,36 @@ detected the already-running editor.
   so kept editors pinned to a non-default port could never reconnect
   within the grace (double-spawning their editor) and the new daemon
   could hijack another project's daemon on 9500.
+  Third-round follow-up (plugin 3.2.11 → 3.2.12): cold-start replays
+  STILL intermittently double-spawned — instrumented replays (plugin
+  timing probes + netstat/session samplers) showed the kept editor's
+  redials hanging ~10-15s "before OPEN" while concurrent curl upgrades
+  to the same port answered instantly, and the session reappearing only
+  after the grace expired. Two compounding defects, both fixed:
+  - plugin (`connection.gd`): `_reconnect_timer` was never reset once a
+    connection reached OPEN, so the first redial after a drop waited out
+    the leftover backoff of the last successful dial (up to the 60s
+    cap). A drop from OPEN now zeroes the timer and redials on the same
+    tick; deliberate `disconnect_from_server` closes keep the old
+    scheduled behavior.
+  - daemon (`internal/bridge/server.go`): the WS listener shared the 10s
+    first-frame deadline as its `ReadHeaderTimeout`. The plugin's
+    WebSocketPeer writes the upgrade request only from `_process` ticks,
+    so an editor frame-loop stall past 10s got its TCP connection dropped
+    pre-upgrade — every stall became a FAILED dial and burned a backoff
+    slot. The pre-upgrade header wait is now a separate, generous 60s
+    (`upgradeHeaderTimeout`); the 10s post-upgrade first-frame deadline
+    is unchanged, and the listener stays loopback-only so idle-connection
+    exposure is bounded. (The frame stalls themselves — 9-15s inter-frame
+    gaps with a fully idle process — were also observed outside the bug
+    path on the affected host and are environmental; the fixes make the
+    reconnect path robust to them instead of racing them.)
+  Regression coverage: `connection` suite
+  (`test_post_open_drop_redials_immediately`,
+  `test_deliberate_disconnect_keeps_scheduled_redial`), bridge
+  `TestSlowUpgradeHeaderTolerated`, and an end-to-end replay that
+  froze the editor process for 20s mid-upgrade and still got PID0 reuse
+  with no grace-expiry warning.
 
 ## 14. Node-reference assignment in `set_property`, `open_scene` stale-disk warning (beta.18)
 

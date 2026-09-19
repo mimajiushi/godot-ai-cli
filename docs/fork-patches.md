@@ -454,3 +454,46 @@ silently picked up on-disk content newer than the editor's in-memory state.
   `references/commands.md`, SKILL.md procedure step 4, and
   `references/troubleshooting.md` cover the new surface; pinned Go-side
   version tests bumped to 3.2.10.
+
+## 15. Eval compile-error attribution, prints on the error path, shell-quote-free code input (beta.23)
+
+`plugin.cfg` version 3.2.12 → 3.2.13. Two field reports (`EVAL_COMPILE_ERROR`
+carried no diagnostic; PowerShell 5.1 silently strips `"` from `--code`) plus
+the launch/plugin control asks from the same project.
+
+- **`EVAL_COMPILE_ERROR` now answers with the diagnostics** (`debugger/
+  mcp_debugger_plugin.gd`): the pending entry records the code and two
+  cursors (`editor_cursor`, `debugger_cursor`) at `_send_eval`; `_on_eval_grace`
+  captures them BEFORE `_clear_pending` and replies
+  `error.data.{code_echo, parse_errors, hint, game_status}` (+ `truncated`
+  past `EVAL_PARSE_ERROR_MAX` = 5). `code_echo` is the code the plugin
+  literally compiled — the fastest way to see a quote the shell stripped.
+  `parse_errors` comes from `McpSurfacedErrorTracker.editor_entries_since`
+  filtered to error-level rows containing "Parse Error".
+- **The reply is deferred ~1s when no Parse Error row exists yet**
+  (`EVAL_PARSE_ERROR_RESCAN_SEC`): measured live (RS-022), the engine row is
+  promoted to the editor only AFTER the eval-attributed break is continued,
+  so the first scrape at grace time is always empty. The deferred path sends
+  the auto-continue first, then re-scrapes once and replies — the only way
+  the new field is non-empty in practice. A synchronous
+  `_compile_error_rescan_waiter` test seam mirrors `_eval_ready_frame_waiter`.
+- **`prints` now rides in `error.data` too** (`_on_eval_error`,
+  `_on_eval_runtime_error`): the CLI's bridge maps only `error.data` into
+  `CommandError`, so the fork's `error.prints` never reached any CLI caller.
+  The old key is kept (the GDScript assertions pin it).
+- CLI-only (no further plugin change): `editor eval` gained `--code-file`
+  (UTF-8, BOM tolerated), `--code-stdin` (terminal stdin refused instead of
+  hanging) and `--code-b64`, exactly one source per call
+  (`EVAL_CODE_SOURCE_CONFLICT` otherwise, `--params` code included), plus a
+  `-h`-only `OpSpec.HelpNote` carrying the PowerShell 5.1 warning.
+- CLI-only (launch/plugin control): `plugin.Preview`/`Plan`/`GitImpact` are a
+  read-only preview shared by `launch --dry-run`,
+  `launch --no-plugin-upgrade` (refuses with `PLUGIN_VERSION_MISMATCH` + the
+  plan before any write), `plugin status` and `plugin install --dry-run`
+  (`--version` is a guard: one plugin build is embedded,
+  `PLUGIN_VERSION_UNSUPPORTED` otherwise). The launch preview/gate runs
+  BEFORE the Godot probe, so both work fully offline; the ready payload adds a
+  structured `plugin` object (`files_changed` / `files_created` /
+  `git_dirty`). `Enable` was split into `enableContent` + `EnableDecision` so
+  the preview and the write cannot diverge.
+

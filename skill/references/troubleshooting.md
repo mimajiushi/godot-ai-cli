@@ -82,12 +82,17 @@ Emitted by `update`. None of them modify the install — checksum/download failu
 | `EDITED_SCENE_MISMATCH` | `--scene-file` guard tripped: another scene is being edited | `scene open` the intended scene or drop the guard. |
 | `UNKNOWN_COMMAND` | Plugin command name not registered — when the op IS in `commands --json`, the running editor's plugin is usually stale (see the plugin-version section below) | Check spelling against `commands --json` (`plugin_command` field); on a `plugin_stale` session, `plugin install --project <dir>` and restart the editor. |
 | `TEST_RUN_TIMEOUT` | Test run hit its abort ceiling; partial summary in `data` | `test results-get` returns the partial results. |
-| `EVAL_COMPILE_ERROR` / `EVAL_RUNTIME_ERROR` | `editor eval` code failed to compile / threw | Fix the eval snippet. |
+| `EVAL_COMPILE_ERROR` | `editor eval` code failed to compile (parse error) | Read `error.data`: `code_echo` is the code the plugin ACTUALLY compiled (a stripped quote shows up here), `parse_errors[].text` is the engine's `Parse Error: …` line (replied after the auto-resume so the Errors tab has it; `truncated: true` when more than 5 were dropped), `hint` names the PowerShell-5.1 quote trap or the `logs read --source editor` fallback, `game_status` shows the break. Fix the snippet — prefer `--code-file` over `--code` whenever it contains `"`. |
+| `EVAL_RUNTIME_ERROR` | `editor eval` code threw | Fix the eval snippet; `error.data.prints` carries the `--echo-prints` lines captured before the failure. |
+| `EVAL_CODE_SOURCE_CONFLICT` / `EVAL_CODE_SOURCE_ERROR` | `editor eval` got two code sources, or one it could not read | Pass exactly one of `--code` / `--code-file` / `--code-stdin` / `--code-b64` (a `--params` object carrying `code` counts as one too); `EVAL_CODE_SOURCE_ERROR` names the unreadable file, the invalid base64, or a terminal stdin given to `--code-stdin`. |
 | `EVAL_GAME_NOT_READY` | Game helper not servicing evals though play mode is up | Wait for the game to finish booting; retry. |
 | `EVAL_HUNG` | Eval never finished (game CPU-bound or frozen loop) | Simplify/shorten the eval. |
 | `EVAL_RESULT_TOO_LARGE` | Serialized eval result too big for the pipeline | Return a smaller slice. |
 | `GAME_HELPER_TIMEOUT` | Live game process failed to answer a game-side request | The game main loop is blocked/frozen; `project stop` and re-run. |
 | `INTERNAL_ERROR` | Unclassified plugin fault | `logs read --source plugin --include-details` for the stack. |
+| `PLUGIN_VERSION_MISMATCH` | `launch --no-plugin-upgrade` refused to rewrite an `addons/godot_ai` whose version differs from the bundled one (only with that flag) | `data.would_update` / `data.would_create` list the files that WOULD change, `data.git.tracked_update` counts the version-controlled ones, `data.hint` names both versions. Re-run without the flag to accept the upgrade, or `plugin install --project <dir>` explicitly. A fresh install or an in-sync tree never trips this gate. |
+| `PLUGIN_VERSION_UNSUPPORTED` | `plugin install --version X` asked for a version this CLI does not embed | The CLI vendors exactly one plugin build; `data.bundled_version` names it. Drop the flag (or use the CLI release that bundles X). |
+| `PLUGIN_PLAN_FAILED` | The read-only plugin preview could not read the project (`launch --dry-run`, `plugin status`) | Check `project.godot` readability and filesystem permissions. |
 | `SHUTDOWN_FAILED` | `stop` could not complete daemon shutdown | Teardown continued best-effort; check remaining processes manually. |
 
 ## Plugin version compatibility (`plugin_stale`)
@@ -157,6 +162,7 @@ Custom ports remain for ISOLATED daemons (e.g. defaults occupied by the upstream
 - Headless has no window focus events: after writing scripts via `script create`/`filesystem write-text`, run `filesystem scan` so the editor file system settles (the ops' responses say so in their diagnostics).
 - Editor startup plus first import is slow headless on CI — use `--wait 90` or more.
 - Game domain ops and `test run` work headless; viewport/screenshot-dependent suites typically self-skip without a real viewport (they show up as `skipped`, not failures).
+- `editor eval` compile errors DO come back with the engine's `Parse Error` text headless (verified on 4.7.2): the reply waits ~1s after the auto-resume, which is when the editor promotes the row. Before that fix the text was only reachable via `logs read --source editor`.
 
 ## GDScript test suites
 

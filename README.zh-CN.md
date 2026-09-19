@@ -53,6 +53,9 @@ go build -o godot-ai-cli ./cmd/godot-ai-cli  # Windows 为 godot-ai-cli.exe
 ## 快速上手
 
 ```bash
+# 先预览 launch 会往工程里写什么（一个字节都不写）
+godot-ai-cli launch --project /path/to/project --dry-run
+
 # 把插件装进工程、启动编辑器并等待就绪
 godot-ai-cli launch --project /path/to/project
 
@@ -66,6 +69,19 @@ godot-ai-cli node create --type Camera2D --name MainCamera --parent-path /Main
 # 运行工程的 GDScript 测试套件
 godot-ai-cli test run
 ```
+
+`launch --dry-run` 打印插件写入计划（会新建/覆盖哪些文件、是否要在
+`project.godot` 里启用、其中多少是 git 跟踪的），既不探测 Godot、不启 daemon、
+也不打开编辑器。`launch --no-plugin-upgrade` 在版本不匹配时直接失败
+（`PLUGIN_VERSION_MISMATCH`），而不是改写受版本控制的 `addons/godot_ai`；
+`plugin status --project <dir>` 随时只读地回答同一组问题。
+
+`editor eval` 的 GDScript 只能从 `--code` / `--code-file` / `--code-stdin` /
+`--code-b64` 中的**一个**来源传入；后三条通道存在的原因是 shell 会吞引号
+（Windows PowerShell 5.1 会把 `--code` 里的 `"` 从参数中剥掉）。编译失败时
+`EVAL_COMPILE_ERROR` 会带回 `error.data.code_echo`（插件实际编译的那段代码）、
+`error.data.parse_errors`（引擎的 `Parse Error` 原文）、`error.data.hint` 与
+`error.data.game_status`。
 
 Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 路径——涉及
 此类参数的命令请加 `MSYS_NO_PATHCONV=1` 前缀。
@@ -91,6 +107,10 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
   该 helper，不会随构建发布。如果工程里已装过上游 hi-godot/godot-ai 插件，
   `launch` 会原地升级为内置的 fork 版本（不再使用 Python 后端）。只想对齐插件版本、
   不启动编辑器时，单独运行 `plugin install --project <dir>`。
+  `plugin status --project <dir>` 会只读地报告工程插件版本、内置版本、`compatible`
+  （major.minor 是否相同）、是否已启用，以及待写入清单；`launch --no-plugin-upgrade`
+  在版本不匹配时直接以 `PLUGIN_VERSION_MISMATCH` 拒绝改写（并返回同一份清单），
+  免得把受版本控制的 addon 目录弄脏。
 - **CI / 无显示环境：** 加 `--headless`。依赖视口的操作（截图）需要有界面的编辑器。
 - **同时开多个工程：** 让每个工程共用同一个 daemon（相同端口）。每次 launch 都会把
   该工程的编辑器作为一个新会话打开并置为活动；操作默认落在活动会话——用

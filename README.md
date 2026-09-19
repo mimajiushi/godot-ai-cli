@@ -57,6 +57,9 @@ go build -o godot-ai-cli ./cmd/godot-ai-cli  # godot-ai-cli.exe on Windows
 ## Quick start
 
 ```bash
+# Preview what a launch would write into the project (nothing is touched)
+godot-ai-cli launch --project /path/to/project --dry-run
+
 # Install the plugin into a project, launch the editor and wait until ready
 godot-ai-cli launch --project /path/to/project
 
@@ -70,6 +73,22 @@ godot-ai-cli node create --type Camera2D --name MainCamera --parent-path /Main
 # Run the project's GDScript test suites
 godot-ai-cli test run
 ```
+
+`launch --dry-run` prints the plugin write plan (files that would be created or
+overwritten, whether `project.godot` would be enabled, and how much of that is
+git-tracked) without probing Godot, starting the daemon or opening an editor.
+`launch --no-plugin-upgrade` turns a version mismatch into a
+`PLUGIN_VERSION_MISMATCH` error instead of rewriting a version-controlled
+`addons/godot_ai`, and `plugin status --project <dir>` answers the same
+questions read-only at any time.
+
+`editor eval` takes its GDScript from exactly one of `--code`, `--code-file`,
+`--code-stdin` or `--code-b64`; the file/stdin/base64 channels exist because
+shells mangle quotes (`"` inside `--code` is stripped by Windows PowerShell
+5.1). A compile failure replies `EVAL_COMPILE_ERROR` with
+`error.data.code_echo` (the code actually compiled), `error.data.parse_errors`
+(the engine's `Parse Error` text), `error.data.hint` and
+`error.data.game_status`.
 
 Git Bash note: MSYS rewrites absolute node paths such as `/Main` into Windows
 paths — prefix commands that take them with `MSYS_NO_PATHCONV=1`.
@@ -102,7 +121,12 @@ checks GitHub Releases and offers to update in place.
   the project already has the upstream hi-godot/godot-ai plugin installed,
   `launch` upgrades it in place to the bundled fork (the Python backend is
   no longer used). To align a project's plugin version without launching,
-  run `plugin install --project <dir>` on its own.
+  run `plugin install --project <dir>` on its own. `plugin status --project
+  <dir>` reports the project and bundled versions, `compatible` (major.minor),
+  `enabled`, and the pending write plan without writing anything, and
+  `launch --no-plugin-upgrade` refuses the rewrite (failing with
+  `PLUGIN_VERSION_MISMATCH`) when the addon tree is version-controlled and the
+  project is not yours to dirty.
 - **CI / no display:** add `--headless`. Viewport-dependent ops
   (screenshots) need a windowed editor.
 - **Several projects at once:** launch each project against the SAME daemon

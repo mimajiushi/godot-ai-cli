@@ -67,7 +67,10 @@ Examples:
 				return errExit("daemon_not_running")
 			}
 
-			statusBody, err := getDaemonJSON(port, "/godot-ai/status")
+			// v4 起 /godot-ai/status 是 Bearer 认证的插件採用探针；CLI
+			// 读的是自家 daemon，走免认证的 cli 面（health 携带同样的
+			// version/ws_port/pid）。
+			statusBody, err := getDaemonJSON(port, "/godot-ai/cli/health")
 			if err != nil {
 				return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
 			}
@@ -635,23 +638,19 @@ func pluginStaleNote(pluginVersion, bundledVersion string) string {
 }
 
 // godotVersionCompatibility classifies the godot_version one session
-// reported at handshake: <4.5 is incompatible (the warning carries the
-// CheckCompatibility error wording), 5.x and unparseable versions stay
-// compatible but carry the CheckCompatibility warning wording, and
-// anything else is silently compatible.
+// reported at handshake. 上游 v4 只支持 4.7+ 的 4.x 线：4.5/4.6/5.x 都被
+// CheckCompatibility 拒绝（incompatible + 错误文案）；无法解析的版本保持
+// compatible 但带提示文案（v3 时代遗留会话的 godot_version 字段可能缺失）。
 func godotVersionCompatibility(raw string) (warning string, compatible bool) {
 	v, err := godot.ParseVersion(raw)
 	if err != nil {
 		return fmt.Sprintf(
-			"Godot version %q could not be parsed: godot-ai-cli is verified against Godot %s+ (%s+ recommended)",
-			raw, version.SupportedGodotMin, version.SupportedGodotRecommended), true
+			"Godot version %q could not be parsed: godot-ai-cli is verified against Godot %s+",
+			raw, version.SupportedGodotMin), true
 	}
 	warn, compatErr := godot.CheckCompatibility(v)
 	if compatErr != nil {
 		return compatErr.Error(), false
 	}
-	if v.Major >= 5 {
-		return warn, true
-	}
-	return "", true
+	return warn, true
 }

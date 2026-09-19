@@ -47,7 +47,7 @@ func startScreenshotDaemon(t *testing.T, playing bool) (*daemon.Daemon, *mockplu
 	})
 
 	dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(screenshotFixturePNG(t))
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.SetResponder(func(command string, _ map[string]any) *mockplugin.Response {
 		switch command {
 		case "get_editor_state":

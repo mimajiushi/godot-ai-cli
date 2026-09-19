@@ -67,9 +67,9 @@ func TestPluginStatusFreshProject(t *testing.T) {
 	}
 }
 
-// TestPluginStatusReportsDrift: an installed-but-older plugin is reported as
-// installed, incompatible-free (patch drift is accepted by the handshake) but
-// version_match=false with exactly the files that would change.
+// TestPluginStatusReportsDrift: an installed-but-patch-drifted plugin is
+// reported as installed, incompatible-free (patch drift is accepted by the
+// handshake) but version_match=false with exactly the files that would change.
 func TestPluginStatusReportsDrift(t *testing.T) {
 	dir := writeProjectFile(t)
 	if _, err := plugin.EnsureInstalled(dir); err != nil {
@@ -80,8 +80,9 @@ func TestPluginStatusReportsDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 与 bundled（4.1.x）同 major.minor 的 patch 漂移——握手仍判兼容。
 	if err := os.WriteFile(cfgPath,
-		[]byte(strings.Replace(string(cfg), `version="`+plugin.PluginVersion()+`"`, `version="3.2.7"`, 1)), 0o644); err != nil {
+		[]byte(strings.Replace(string(cfg), `version="`+plugin.PluginVersion()+`"`, `version="4.1.9"`, 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,13 +94,13 @@ func TestPluginStatusReportsDrift(t *testing.T) {
 		t.Errorf("installed/enabled = %v / %v", out["installed"], out["enabled"])
 	}
 	if out["compatible"] != true {
-		t.Errorf("3.2.7 vs %s is major.minor compatible: %v", plugin.PluginVersion(), out["compatible"])
+		t.Errorf("4.1.9 vs %s is major.minor compatible: %v", plugin.PluginVersion(), out["compatible"])
 	}
 	plan, _ := out["plugin"].(map[string]any)
 	if plan["version_match"] != false {
 		t.Errorf("version_match = %v, want false", plan["version_match"])
 	}
-	if plan["installed_version"] != "3.2.7" {
+	if plan["installed_version"] != "4.1.9" {
 		t.Errorf("installed_version = %v", plan["installed_version"])
 	}
 	update, _ := plan["would_update"].([]any)

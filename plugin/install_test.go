@@ -21,8 +21,29 @@ func newProject(t *testing.T, projectGodot string) string {
 }
 
 func TestPluginVersion(t *testing.T) {
-	if got := plugin.PluginVersion(); got != "3.2.13" {
-		t.Fatalf("PluginVersion() = %q, want 3.2.13", got)
+	if got := plugin.PluginVersion(); got != "4.1.0" {
+		t.Fatalf("PluginVersion() = %q, want 4.1.0", got)
+	}
+}
+
+// TestInstallClearsStaleUpstreamUpdateMarkers：上游 v4 自更新器的
+// addons/godot_ai/.godot_ai_update/ 残留（3.2.x→4.1.0 跨越升级的项目可能
+// 带着）必须随安装清除——残留 pending 标记会让上游 barrier 误判。
+func TestInstallClearsStaleUpstreamUpdateMarkers(t *testing.T) {
+	dir := newProject(t, "; engine config\n")
+	stale := filepath.Join(dir, "addons", "godot_ai", ".godot_ai_update")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pending.json"), []byte(`{"version":"4.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := plugin.Install(dir); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf(".godot_ai_update 未被清除（stat err = %v）", err)
 	}
 }
 

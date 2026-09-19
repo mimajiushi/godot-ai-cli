@@ -31,7 +31,7 @@ func startRecordDaemon(t *testing.T) (*daemon.Daemon, *mockplugin.Plugin) {
 	})
 
 	frameB64 := "data:image/png;base64," + base64Std(screenshotFixturePNG(t))
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
 		switch command {
 		case "get_editor_state":
@@ -179,7 +179,7 @@ func TestRecordNotRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.SetResponder(func(command string, _ map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{"is_playing": false}}
 	})

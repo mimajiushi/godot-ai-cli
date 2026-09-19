@@ -78,8 +78,8 @@ func newLaunchCommand() *cobra.Command {
      PLUGIN_VERSION_MISMATCH instead of rewriting a differently-versioned
      addons/godot_ai
   3. Resolve the Godot binary (--godot > GODOT_BIN > "godot use" default >
-     PATH > common locations) and check the version (4.5+ required, 4.7+
-     recommended)
+     PATH > common locations) and check the version (4.7+ required;
+     4.5/4.6 and 5.x refused)
   4. Install/upgrade and enable the embedded godot_ai plugin
   5. Ensure the backend daemon runs (spawns "serve" detached if absent)
   6. Launch the Godot editor detached (skipped when THIS project's editor
@@ -261,7 +261,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	warn, err := godot.CheckCompatibility(gv)
 	if err != nil {
 		return jsonError(cmd, "GODOT_UNSUPPORTED", err.Error(),
-			map[string]any{"detected": gv.Raw, "supported": "4.5+", "recommended": "4.7+"})
+			map[string]any{"detected": gv.Raw, "supported": "4.7+"})
 	}
 	if warn != "" {
 		warnings = append(warnings, warn)

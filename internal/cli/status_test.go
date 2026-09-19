@@ -16,9 +16,9 @@ import (
 )
 
 // TestStatusReportsGodotCompatibility drives the status command against a
-// real daemon with mock plugin sessions on Godot 4.4 / 4.7 / 5.1 / an
-// unparseable version: <4.5 is flagged incompatible, 5.x and garbage stay
-// compatible but carry a warning, 4.7 stays silent.
+// real daemon. v4 起版本底线由 WS 认证握手强制执行（<4.7 / 5.x / 不可解析
+// 的引擎版本在握手处 4002 拒绝，根本注册不了会话），所以这里钉住两件
+// 事：不合底线的版本连不上；合法的 4.7 会话在 status 里干净无警告。
 func TestStatusReportsGodotCompatibility(t *testing.T) {
 	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "test"})
 	if err != nil {
@@ -31,10 +31,17 @@ func TestStatusReportsGodotCompatibility(t *testing.T) {
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "old@0001", "godot_version": "4.4.stable.official"})
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "ok@0002", "godot_version": "4.7.stable.official"})
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "new@0003", "godot_version": "5.1.stable.official"})
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "weird@0004", "godot_version": "garbage"})
+	cap := d.Bridge().WSCapability
+
+	// 底线之外的引擎版本在握手处被拒绝（v4 协议门禁）。
+	for _, v := range []string{"4.4.stable.official", "5.1.stable.official", "garbage"} {
+		code, _ := mockplugin.DialRejected(t, addr, cap, map[string]any{"godot_version": v})
+		if code != 4002 {
+			t.Errorf("godot %q: close code = %d, want 4002", v, code)
+		}
+	}
+
+	mockplugin.Dial(t, addr, cap, map[string]any{"session_id": "ok@0002", "godot_version": "4.7.stable.official"})
 
 	cmd := NewRootCommand()
 	var buf bytes.Buffer
@@ -53,59 +60,18 @@ func TestStatusReportsGodotCompatibility(t *testing.T) {
 		t.Fatalf("out = %v", out)
 	}
 	sessions, ok := out["sessions"].([]any)
-	if !ok || len(sessions) != 4 {
-		t.Fatalf("sessions = %v", out["sessions"])
+	if !ok || len(sessions) != 1 {
+		t.Fatalf("sessions = %v（只有 4.7 会话应注册成功）", out["sessions"])
 	}
-	byID := make(map[string]map[string]any, len(sessions))
-	for _, entry := range sessions {
-		s, ok := entry.(map[string]any)
-		if !ok {
-			t.Fatalf("session entry = %v", entry)
-		}
-		byID[s["session_id"].(string)] = s
+	sess := sessions[0].(map[string]any)
+	if sess["godot_compatible"] != true {
+		t.Errorf("4.7 session godot_compatible = %v", sess["godot_compatible"])
 	}
-
-	// Godot 4.4: below the support floor → incompatible with the wording
-	// of the CheckCompatibility error.
-	old := byID["old@0001"]
-	if old["godot_compatible"] != false {
-		t.Errorf("4.4 session godot_compatible = %v", old["godot_compatible"])
+	if _, warned := sess["warning"]; warned {
+		t.Errorf("4.7 session unexpectedly warns: %v", sess["warning"])
 	}
-	if w, _ := old["warning"].(string); !strings.Contains(w, "not supported") {
-		t.Errorf("4.4 session warning = %v", old["warning"])
-	}
-
-	// Godot 4.7: fully supported → compatible and no warning at all.
-	okSess := byID["ok@0002"]
-	if okSess["godot_compatible"] != true {
-		t.Errorf("4.7 session godot_compatible = %v", okSess["godot_compatible"])
-	}
-	if _, warned := okSess["warning"]; warned {
-		t.Errorf("4.7 session unexpectedly warns: %v", okSess["warning"])
-	}
-
-	// Godot 5.1: untested major → compatible but warns.
-	newSess := byID["new@0003"]
-	if newSess["godot_compatible"] != true {
-		t.Errorf("5.1 session godot_compatible = %v", newSess["godot_compatible"])
-	}
-	if w, _ := newSess["warning"].(string); !strings.Contains(w, "untested major version") {
-		t.Errorf("5.1 session warning = %v", newSess["warning"])
-	}
-
-	// Unparseable: compatible, but the warning says the version is unknown.
-	weird := byID["weird@0004"]
-	if weird["godot_compatible"] != true {
-		t.Errorf("garbage session godot_compatible = %v", weird["godot_compatible"])
-	}
-	if w, _ := weird["warning"].(string); !strings.Contains(w, "could not be parsed") {
-		t.Errorf("garbage session warning = %v", weird["warning"])
-	}
-
-	// The top-level roll-up collects exactly the three warning sessions.
-	warnings, ok := out["warnings"].([]any)
-	if !ok || len(warnings) != 3 {
-		t.Fatalf("warnings = %v", out["warnings"])
+	if _, present := out["warnings"]; present {
+		t.Errorf("top-level warnings present for a clean 4.7 session: %v", out["warnings"])
 	}
 }
 
@@ -124,9 +90,9 @@ func TestStatusReportsOrigin(t *testing.T) {
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "cli@0001", "launched_by": "cli"})
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "user@0002", "launched_by": "user"})
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "legacy@0003"}) // no launched_by
+	mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"session_id": "cli@0001", "launched_by": "cli"})
+	mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"session_id": "user@0002", "launched_by": "user"})
+	mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"session_id": "legacy@0003"}) // no launched_by
 
 	cmd := NewRootCommand()
 	var buf bytes.Buffer
@@ -184,8 +150,8 @@ func TestStatusReportsPluginStale(t *testing.T) {
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "aligned@0001", "plugin_version": "3.2.8", "launched_by": "cli"})
-	mockplugin.Dial(t, addr, map[string]any{"session_id": "stale@0002", "plugin_version": "3.2.6", "launched_by": "cli"})
+	mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"session_id": "aligned@0001", "plugin_version": "3.2.8", "launched_by": "cli"})
+	mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"session_id": "stale@0002", "plugin_version": "3.2.6", "launched_by": "cli"})
 
 	cmd := NewRootCommand()
 	var buf bytes.Buffer
@@ -278,10 +244,10 @@ func TestGodotVersionCompatibility(t *testing.T) {
 	}{
 		{"4.4.stable.official", false, true},
 		{"3.6.stable.official", false, true},
-		{"4.5.stable.official", true, false},
-		{"4.6.2.stable.mono.official", true, false},
+		{"4.5.stable.official", false, true},
+		{"4.6.2.stable.mono.official", false, true},
 		{"4.7.stable.official", true, false},
-		{"5.1.stable.official", true, true},
+		{"5.1.stable.official", false, true},
 		{"garbage", true, true},
 		{"", true, true},
 	}
@@ -320,8 +286,8 @@ func TestStatusKnownDaemons(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d2.Shutdown(context.Background()) })
 	writeDaemonRecord(t, dir, d2.HTTPPort(), d2.WSPort(), "3.2.8")
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d2.WSPort()), map[string]any{
-		"session_id": "other@0001", "project_path": "/other/project/",
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d2.WSPort()), d2.Bridge().WSCapability, map[string]any{
+		"session_id": "other@0001", "project_path": "/other/project/", "plugin_version": "3.2.8",
 	})
 
 	// A dead record (crashed daemon leftover).
@@ -409,7 +375,7 @@ func TestStatusPortsOverrideActiveViaProjectFile(t *testing.T) {
 		t.Errorf("ports_override_active = %v without any pin", out["ports_override_active"])
 	}
 
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
 		"session_id": "pinned@0001", "project_path": projectDir + "/",
 	})
 	if err := godot.WriteProjectPorts(projectDir, d.HTTPPort(), d.WSPort()); err != nil {
@@ -433,7 +399,7 @@ func TestStopClearsProjectPortPins(t *testing.T) {
 	}
 	// No cleanup shutdown: stop IS the shutdown under test.
 
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
 		"session_id": "pinned@0001", "project_path": projectDir + "/", "launched_by": "user",
 	})
 	if err := godot.WriteProjectPorts(projectDir, d.HTTPPort(), d.WSPort()); err != nil {
@@ -471,7 +437,7 @@ func TestStopKeepsRepinnedPortFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
 		"session_id": "pinned@0001", "project_path": projectDir + "/", "launched_by": "user",
 	})
 	// The pin points at a DIFFERENT daemon now (newer launch elsewhere).

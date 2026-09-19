@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/capability"
 	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 )
 
@@ -96,8 +97,19 @@ func enumerateKnownDaemons() []knownDaemonRecord {
 // probeKnownDaemonGET fetches one endpoint from a recorded daemon with the
 // tight probe timeout. ok=false covers every failure shape (unreachable,
 // non-JSON, non-200) — probes never fail the caller.
+//
+// v4 起 /godot-ai/status 需要 Bearer 认证：能读到该端口的 capability
+// 记录（本机同账户）就带上，读不到则以匿名身份探（旧版 daemon 与 v3
+// Python 服务器仍匿名应答；v4 对端的 401 让调用方按"不可读"处理）。
 func probeKnownDaemonGET(httpPort int, path string) (body map[string]any, ok bool) {
-	resp, err := knownDaemonProbeClient.Get(daemonURL(httpPort, path))
+	req, err := http.NewRequest(http.MethodGet, daemonURL(httpPort, path), nil)
+	if err != nil {
+		return nil, false
+	}
+	if rec, err := capability.Read(httpPort); err == nil && rec != nil {
+		req.Header.Set("Authorization", "Bearer "+rec.HTTP)
+	}
+	resp, err := knownDaemonProbeClient.Do(req)
 	if err != nil {
 		return nil, false
 	}

@@ -70,6 +70,14 @@ func Install(projectDir string) (InstallResult, error) {
 		}
 	}
 
+	// 上游 v4 自带编辑器内自更新器，会在 addons/godot_ai/.godot_ai_update/
+	// 留暂存/回滚标记；fork 里自更新器恒不构建，但 3.2.x→4.1.0 跨越升级的
+	// 项目可能残留该目录——残留的 pending 标记会让上游 barrier 逻辑
+	// （verify_after_restart）误判。安装即权威落盘，顺手清掉。
+	if stale := filepath.Join(dest, ".godot_ai_update"); dirExists(stale) {
+		_ = os.RemoveAll(stale) // best-effort：清不动不阻塞安装
+	}
+
 	version := PluginVersion()
 	return InstallResult{
 		Installed:       true,
@@ -78,6 +86,12 @@ func Install(projectDir string) (InstallResult, error) {
 		PreviousVersion: previous,
 		Path:            dest,
 	}, nil
+}
+
+// dirExists 判断路径存在且是目录（软链/联接点按目标判定）。
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // installPlan lists every embedded plugin file in write order with

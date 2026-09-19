@@ -68,8 +68,8 @@ func TestDoubleOpenGuardHit(t *testing.T) {
 	dir := stubCacheDir(t)
 	d := startRecordedDaemon(t, dir, "3.2.9")
 
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
-		"session_id": "mine@0001", "project_path": "/my/project/", "editor_pid": 4321,
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "mine@0001", "project_path": "/my/project/", "plugin_version": "3.2.9", "editor_pid": 4321,
 	})
 
 	hit, warnings := findProjectOnOtherDaemons(1, "/my/project") // exceptPort 1: not ours
@@ -95,8 +95,8 @@ func TestDoubleOpenGuardHit(t *testing.T) {
 func TestDoubleOpenGuardMiss(t *testing.T) {
 	dir := stubCacheDir(t)
 	d := startRecordedDaemon(t, dir, "3.2.9")
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
-		"session_id": "other@0001", "project_path": "/other/project/", "editor_pid": 55,
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "other@0001", "project_path": "/other/project/", "editor_pid": 55, "plugin_version": "3.2.9",
 	})
 
 	if hit, warnings := findProjectOnOtherDaemons(1, "/my/project"); hit != nil || len(warnings) != 0 {
@@ -109,8 +109,8 @@ func TestDoubleOpenGuardMiss(t *testing.T) {
 func TestDoubleOpenGuardSkipsTargetDaemon(t *testing.T) {
 	dir := stubCacheDir(t)
 	d := startRecordedDaemon(t, dir, "3.2.9")
-	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
-		"session_id": "mine@0001", "project_path": "/my/project/",
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "mine@0001", "project_path": "/my/project/", "plugin_version": "3.2.9",
 	})
 
 	if hit, _ := findProjectOnOtherDaemons(d.HTTPPort(), "/my/project"); hit != nil {
@@ -216,8 +216,8 @@ func TestShutdownDaemonKeepEditors(t *testing.T) {
 		t.Fatalf("daemon start: %v", err)
 	}
 	// No t.Cleanup shutdown: the helper itself is the shutdown path.
-	plug := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
-		"session_id": "kept@0001", "project_path": "/my/project/",
+	plug := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "kept@0001", "project_path": "/my/project/", "plugin_version": "3.2.8",
 	})
 
 	editors, err := shutdownDaemonKeepEditors(d.HTTPPort())

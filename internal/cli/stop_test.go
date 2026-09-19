@@ -56,7 +56,7 @@ func dialOriginPlugin(t *testing.T, d *daemon.Daemon, sessionID, projectPath, la
 	if launchedBy != "" {
 		handshake["launched_by"] = launchedBy
 	}
-	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), handshake)
+	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, handshake)
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{}}
 	})
@@ -217,7 +217,7 @@ func TestStopSessionFlagQuitsOnlyThatEditor(t *testing.T) {
 	isolateCacheDir(t)
 	d := startTestDaemon(t)
 	p1 := dialOkPlugin(t, d, "one@0001", "C:/p/one/")
-	p2 := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	p2 := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
 		"session_id":   "two@0002",
 		"project_path": "C:/p/two/",
 	})

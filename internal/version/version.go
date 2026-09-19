@@ -2,7 +2,7 @@
 //
 // Version, RepoOwner and RepoName are overridden at release time via
 // -ldflags "-X ...". The Godot compatibility constants mirror the
-// upstream godot-ai plugin support policy (Godot 4.5+, 4.7 recommended).
+// upstream godot-ai v4 support policy (Godot 4.7+ required; 5.x refused).
 package version
 
 var (
@@ -18,10 +18,12 @@ var (
 )
 
 const (
-	// ProtocolVersion is the editor-plugin wire protocol version implemented here.
-	ProtocolVersion = 1
+	// ProtocolVersion is the editor-plugin WebSocket wire protocol version
+	// implemented here (v4 authenticated transport; mirrors bridge.WSProtocolVersion).
+	ProtocolVersion = 2
 	// SupportedGodotMin is the minimum supported Godot version (inclusive).
-	SupportedGodotMin = "4.5"
+	// 上游 v4 插件的 _supports_v4_editor 只放行 4.7+ 的 4.x 线。
+	SupportedGodotMin = "4.7"
 	// SupportedGodotRecommended is the minimum recommended Godot version.
 	SupportedGodotRecommended = "4.7"
 )

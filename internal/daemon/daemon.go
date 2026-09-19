@@ -9,6 +9,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,9 +19,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/bridge"
+	"github.com/mimajiushi/godot-ai-cli/internal/capability"
 	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 )
 
@@ -75,6 +78,9 @@ type Daemon struct {
 	bridge *bridge.Server
 	http   *http.Server
 	httpLn net.Listener
+	// caps 是本实例的 v4 传输能力（HTTP bearer + WS HMAC capability +
+	// 实例 nonce），发布后由插件生命周期读取完成认证採用。
+	caps capability.Record
 
 	// cancel triggers a graceful shutdown (signal, Run caller, or the
 	// /godot-ai/cli/shutdown endpoint); done closes once the shutdown has
@@ -91,13 +97,20 @@ func Start(ctx context.Context, cfg Config) (*Daemon, error) {
 	if cfg.Version == "" {
 		cfg.Version = pluginmeta.PluginVersion()
 	}
+	// v4 传输能力：插件 spawn 时经环境注入（GODOT_AI_HTTP_CAPABILITY /
+	// GODOT_AI_WS_TOKEN 成对），CLI 直起时随机生成。
+	caps, err := capability.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("capability resolve: %w", err)
+	}
 	b := bridge.NewServer(cfg.Version)
+	b.WSCapability = caps.WebSocket
 	if err := b.Start(cfg.WSPort); err != nil {
 		return nil, fmt.Errorf("websocket bridge: %w", err)
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	d := &Daemon{cfg: cfg, bridge: b, cancel: cancel, done: make(chan struct{})}
+	d := &Daemon{cfg: cfg, bridge: b, caps: caps, cancel: cancel, done: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /godot-ai/status", d.handleStatus)
 	mux.HandleFunc("GET /godot-ai/cli/health", d.handleHealth)
@@ -125,6 +138,13 @@ func Start(ctx context.Context, cfg Config) (*Daemon, error) {
 	// from "stale PID file" diagnostics. Removed again on clean shutdown.
 	if err := d.writePIDFile(); err != nil {
 		slog.Warn("daemon: pid file write failed", "err", err)
+	}
+
+	// 发布 v4 capability 记录（上游顺序：WS 监听就绪之后、视为"已发布"
+	// 之前）。插件生命周期的认证探针依赖它；发布失败不是致命错误——
+	// 编辑器会表现为"无可採用后端"并在插件侧给出诊断。
+	if _, err := capability.Publish(d.HTTPPort(), d.caps); err != nil {
+		slog.Warn("daemon: capability record publish failed", "err", err)
 	}
 
 	// Single owner of the real shutdown: whoever cancels runCtx first
@@ -172,11 +192,20 @@ func (d *Daemon) realShutdown(ctx context.Context) error {
 	if err := os.Remove(pidFilePath(d.HTTPPort())); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("daemon: pid file removal failed", "err", err)
 	}
+	// 仅当 capability 记录仍指向本实例时删除（上游 remove_capabilities
+	// 的 nonce 比对语义：不误删继任发布者）。
+	if !capability.Remove(d.HTTPPort(), d.caps.InstanceNonce) {
+		slog.Warn("daemon: capability record not removed (absent or superseded)")
+	}
 	return errors.Join(httpErr, bridgeErr)
 }
 
 // Bridge exposes the WebSocket bridge (sessions, commands, events).
 func (d *Daemon) Bridge() *bridge.Server { return d.bridge }
+
+// Capabilities 返回本实例的 v4 传输能力（测试与诊断用；生产路径由
+// capability 记录文件承载）。
+func (d *Daemon) Capabilities() capability.Record { return d.caps }
 
 // pidFilePath is where the daemon records its identity for the given HTTP
 // port: <user cache dir>/godot-ai-cli/daemon-<httpPort>.json.
@@ -243,10 +272,19 @@ func (d *Daemon) HTTPPort() int {
 // WSPort returns the actually bound WebSocket port.
 func (d *Daemon) WSPort() int { return d.bridge.Port() }
 
-// handleStatus serves the plugin-adoption probe. The GDScript plugin GETs
-// this to decide whether a compatible server is already running, so the
-// field set must stay exactly compatible.
-func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
+// handleStatus serves the plugin-adoption probe. The v4 GDScript plugin
+// GETs this with `Authorization: Bearer <http capability>` (上游
+// _probe_with_capability);无/错 bearer 一律 401——该端点是认证採用链的
+// 一环，不再匿名开放。CLI 自己的探针走 /godot-ai/cli/*，不经过这里。
+func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == r.Header.Get("Authorization") || !hmacEqualString(token, d.caps.HTTP) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": "capability required",
+			"hint":  "read the capability record for this port and retry with Authorization: Bearer <http>",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":                    "godot-ai",
 		"server_version":          d.cfg.Version,
@@ -255,17 +293,29 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"attach_protocol_version": 1,
 		"package_path":            "godot-ai-cli",
 		"pid":                     os.Getpid(),
-		// The fork never phones home; publish it so the 3.2.5+ dock
+		// instance_id 恒等于已发布记录的 instance_nonce：插件用它确认
+		// 探针打到的就是记录指向的那个进程实例。
+		"instance_id": d.caps.InstanceNonce,
+		// The fork never phones home; publish it so the dock
 		// telemetry tooltip reflects the running server's real state.
 		"telemetry_enabled": false,
 	})
 }
 
-// handleHealth is the CLI liveness probe.
+// hmacEqualString 常量时间比较两个 token（capability 比对不能用 ==）。
+func hmacEqualString(a, b string) bool {
+	return hmac.Equal([]byte(a), []byte(b))
+}
+
+// handleHealth is the CLI liveness probe. v4 起它是 CLI 探活的主通道
+// （/godot-ai/status 改为 Bearer 认证，只服务插件採用），所以顺带
+// 发布 ws_port/pid——採用决策需要的字段不再依赖认证端点。
 func (d *Daemon) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"version":  d.cfg.Version,
+		"ws_port":  d.bridge.Port(),
+		"pid":      os.Getpid(),
 		"sessions": len(d.bridge.Sessions()),
 	})
 }

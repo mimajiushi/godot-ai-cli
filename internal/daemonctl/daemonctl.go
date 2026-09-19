@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/capability"
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 )
@@ -105,52 +106,54 @@ type probeInfo struct {
 	version string // /godot-ai/cli/health version field
 }
 
-// probe classifies the occupant of httpPort.
+// probe classifies the occupant of httpPort. v4 起自家 daemon 的
+// /godot-ai/status 改为 Bearer 认证，所以先探免认证的 cli 面（只有
+// godot-ai-cli daemon 提供）；探不到再用 /godot-ai/status 区分
+// "上游 Python 服务器"与"完全无关的占用者"。
 func probe(httpPort int) probeInfo {
-	name, wsPort, answered := probeStatus(httpPort)
+	version, wsPort, ok := healthProbe(httpPort)
+	if ok {
+		return probeInfo{state: probeOurs, version: version, wsPort: wsPort}
+	}
+	name, wsPort2, answered := probeStatus(httpPort)
 	if !answered {
 		return probeInfo{state: probeUnreachable}
 	}
-	info := probeInfo{name: name, wsPort: wsPort}
+	info := probeInfo{name: name, wsPort: wsPort2}
 	if name != "godot-ai" {
 		info.state = probeForeignOther
 		return info
 	}
-	// A compatible-looking answer is not enough: the upstream Python
-	// server names itself godot-ai too. Only OUR daemon serves the
-	// /godot-ai/cli/* API.
-	version, ok := healthProbe(httpPort)
-	if !ok {
-		info.state = probeForeignGodotAI
-		return info
-	}
-	info.state = probeOurs
-	info.version = version
+	// A godot-ai-named server WITHOUT the /cli API is the upstream Python
+	// backend.
+	info.state = probeForeignGodotAI
 	return info
 }
 
 // healthProbe reports whether /godot-ai/cli/health answers with status ok,
-// returning the daemon's advertised version.
-func healthProbe(httpPort int) (version string, ok bool) {
+// returning the daemon's advertised version and ws_port（v4 起 health 携带
+// ws_port，採用决策不再依赖认证端点）。
+func healthProbe(httpPort int) (version string, wsPort int, ok bool) {
 	resp, err := probeClient.Get(fmt.Sprintf("http://127.0.0.1:%d/godot-ai/cli/health", httpPort))
 	if err != nil {
-		return "", false
+		return "", 0, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", false
+		return "", 0, false
 	}
 	var body struct {
 		Status  string `json:"status"`
 		Version string `json:"version"`
+		WSPort  int    `json:"ws_port"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", false
+		return "", 0, false
 	}
 	if body.Status != "ok" {
-		return "", false
+		return "", 0, false
 	}
-	return body.Version, true
+	return body.Version, body.WSPort, true
 }
 
 // foreignOccupantError maps a foreign probe state to the right error.
@@ -271,9 +274,19 @@ func versionCompatible(running, requested string) bool {
 
 // probeStatus GETs /godot-ai/status. answered reports whether ANY HTTP
 // response arrived (even a foreign one); name and wsPort are the body's
-// fields (zero values when absent).
+// fields (zero values when absent). 能读到该端口的 capability 记录时带上
+// Bearer（v4 对端——含我们的 daemon 与上游 v4 Python——都要求认证；
+// 记录读不到时匿名探测，401 同样算 answered）。
 func probeStatus(httpPort int) (name string, wsPort int, answered bool) {
-	resp, err := probeClient.Get(fmt.Sprintf("http://127.0.0.1:%d/godot-ai/status", httpPort))
+	req, err := http.NewRequest(http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d/godot-ai/status", httpPort), nil)
+	if err != nil {
+		return "", 0, false
+	}
+	if rec, rerr := capability.Read(httpPort); rerr == nil && rec != nil {
+		req.Header.Set("Authorization", "Bearer "+rec.HTTP)
+	}
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		return "", 0, false
 	}

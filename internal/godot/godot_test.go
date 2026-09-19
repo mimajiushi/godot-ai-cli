@@ -52,7 +52,8 @@ func TestParseVersion(t *testing.T) {
 	}
 }
 
-// TestCheckCompatibility mirrors the upstream support floor matrix.
+// TestCheckCompatibility mirrors the upstream v4 support floor matrix:
+// only 4.7+ on the 4.x line is accepted; 4.5/4.6 and 5.x are refused.
 func TestCheckCompatibility(t *testing.T) {
 	cases := []struct {
 		version  string
@@ -62,12 +63,12 @@ func TestCheckCompatibility(t *testing.T) {
 		{"3.6.stable.official", true, false},
 		{"4.3.stable.official", true, false},
 		{"4.4.1.stable.official", true, false},
-		{"4.5.stable.official", false, true},
-		{"4.6.2.stable.mono.official", false, true},
+		{"4.5.stable.official", true, false},
+		{"4.6.2.stable.mono.official", true, false},
 		{"4.7.stable.official", false, false},
 		{"4.7.2.stable.mono.official.abc123", false, false},
 		{"4.8.dev4.official", false, false},
-		{"5.0.stable.official", false, true},
+		{"5.0.stable.official", true, false},
 	}
 	for _, c := range cases {
 		t.Run(c.version, func(t *testing.T) {
@@ -82,7 +83,7 @@ func TestCheckCompatibility(t *testing.T) {
 			if (warn != "") != c.wantWarn {
 				t.Errorf("warn = %q, wantWarn %v", warn, c.wantWarn)
 			}
-			if c.wantErr && err != nil && !strings.Contains(err.Error(), "4.5+") {
+			if c.wantErr && err != nil && !strings.Contains(err.Error(), "4.7+") {
 				t.Errorf("unsupported error should name the supported range: %v", err)
 			}
 		})

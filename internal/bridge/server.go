@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -23,10 +24,12 @@ import (
 )
 
 const (
-	// defaultHandshakeTimeout mirrors the upstream 10s first-frame deadline:
-	// the plugin must send its handshake within this window or the
-	// connection is dropped.
-	defaultHandshakeTimeout = 10 * time.Second
+	// defaultHandshakeTimeout mirrors the upstream v4 5s handshake window
+	// (DEFAULT_HANDSHAKE_TIMEOUT_SECONDS): the plugin must complete the
+	// auth_hello → auth_response exchange within it or the connection is
+	// dropped. The PRE-upgrade header wait stays generous — see
+	// upgradeHeaderTimeout.
+	defaultHandshakeTimeout = 5 * time.Second
 
 	// upgradeHeaderTimeout bounds the PRE-upgrade HTTP header wait. It is
 	// deliberately much looser than the first-frame deadline: the plugin's
@@ -41,13 +44,10 @@ const (
 	upgradeHeaderTimeout = 60 * time.Second
 
 	// maxFrameBytes mirrors the upstream 4 MB max WS frame (screenshot
-	// base64 payloads drove the original sizing).
+	// base64 payloads drove the original sizing). Applied only AFTER the
+	// v4 auth handshake completes; pre-auth frames stay capped by
+	// maxHandshakeFrameBytes (auth.go).
 	maxFrameBytes = 4 * 1024 * 1024
-
-	// closeCodeDuplicateSession mirrors the upstream application close code
-	// (RFC 6455 reserves 4000-4999) used when a handshake repeats an
-	// already-registered session_id.
-	closeCodeDuplicateSession = 4001
 )
 
 // sessionIDPattern mirrors the upstream handshake validation: the plugin
@@ -64,13 +64,14 @@ type Session struct {
 	ProtocolVersion int
 	EditorPID       int
 	// PluginStale marks a handshake accepted with a patch-level version
-	// drift: compatible major.minor, unequal patch (e.g. plugin 3.2.6 vs
-	// bundled 3.2.7). The session works, but the plugin may miss ops the
+	// drift: compatible major.minor, unequal patch (e.g. plugin 4.1.0 vs
+	// bundled 4.1.1). The session works, but the plugin may miss ops the
 	// CLI advertises — status/launch surface it as a warning.
 	PluginStale bool
 	// Origin is the normalized provenance from the handshake's launched_by
-	// field: "cli" for editors the CLI spawned, "user" for everything else
-	// (including pre-3.2.7 plugins that carry no launched_by field).
+	// field (fork 扩展，见 auth.go authResponse): "cli" for editors the CLI
+	// spawned, "user" for everything else (including pure-upstream 4.x
+	// plugins that carry no launched_by field).
 	Origin string
 
 	mu        sync.RWMutex
@@ -137,7 +138,15 @@ type wsConn struct {
 type Server struct {
 	version string
 
-	// HandshakeTimeout bounds the wait for the first frame (default 10s).
+	// WSCapability 是本实例的编辑器通道 capability（64 位小写 hex，
+	// 上游 validate_ws_capability 的形状）。daemon 在启动时注入（环境
+	// 变量 GODOT_AI_WS_TOKEN 或随机生成并随 capability 记录发布）；
+	// NewServer 的默认随机值只服务单测。认证在 handleConn 里完成，
+	// 空值等价于"锁定"：所有编辑器连接以 4003 fail-closed。
+	WSCapability string
+
+	// HandshakeTimeout bounds the whole v4 auth exchange (default 5s,
+	// mirroring upstream DEFAULT_HANDSHAKE_TIMEOUT_SECONDS).
 	HandshakeTimeout time.Duration
 	// ImportingHoldCap bounds the readiness gate's hold while the editor
 	// imports (default 8s). Tests shrink it; see readiness.go.
@@ -162,10 +171,13 @@ type Server struct {
 }
 
 // NewServer builds a Server that reports version in handshake_ack frames.
-// Pass pluginmeta.PluginVersion() in production.
+// Pass pluginmeta.PluginVersion() in production. The WS capability defaults
+// to a random per-instance value (production daemons always override it
+// with the resolved/published one before Start).
 func NewServer(version string) *Server {
 	return &Server{
 		version:          version,
+		WSCapability:     newServerNonce(),
 		HandshakeTimeout: defaultHandshakeTimeout,
 		sessions:         map[string]*Session{},
 		conns:            map[string]*wsConn{},
@@ -355,67 +367,140 @@ func isLoopbackOrigin(origin string) bool {
 	return false
 }
 
-// handleConn runs the lifecycle of one plugin connection. It is invoked
-// by the HTTP upgrade handler and blocks until the connection closes.
+// handleConn runs the lifecycle of one plugin connection: the v4
+// authenticated handshake (auth_hello → auth_challenge → auth_response →
+// handshake_ack, mirrored from upstream transport/websocket.py), then the
+// command/response read loop. Any handshake failure closes the connection
+// with the mirrored close code — there is no legacy fallback parser.
 func (s *Server) handleConn(c *websocket.Conn) {
+	// 预认证帧上限 8KB（上游 DEFAULT_MAX_HANDSHAKE_FRAME_BYTES）；
+	// 认证通过后放宽到 4MB 截图负载上限。
+	c.SetReadLimit(maxHandshakeFrameBytes)
+
+	if !validWSCapability(s.WSCapability) {
+		// 上游语义：无 capability 是"锁定"而非"免认证"——fail closed。
+		slog.Warn("bridge: rejecting editor connection: no v4 capability configured")
+		_ = c.Close(closeCodeAuthFailed, "server has no v4 editor capability; restart it from Godot")
+		return
+	}
+
+	// 整个握手（两帧读 + 一帧写）共用 HandshakeTimeout 窗口。
+	deadline := time.Now().Add(s.HandshakeTimeout)
+	readFrame := func() ([]byte, error) {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+		_, raw, err := c.Read(ctx)
+		return raw, err
+	}
+
+	// 帧 1：auth_hello（只含 client_nonce，编辑器元数据在服务端证明
+	// 自己的 capability 之后才披露——上游设计）。
+	rawHello, err := readFrame()
+	if err != nil {
+		slog.Warn("bridge: auth_hello read failed", "err", err)
+		_ = c.Close(closeCodeHandshakePolicy, "v4 editor handshake timed out")
+		return
+	}
+	hello, code, reason := parseAuthHello(rawHello)
+	if hello == nil {
+		slog.Warn("bridge: rejecting first frame", "code", code, "reason", reason)
+		_ = c.Close(websocket.StatusCode(code), reason)
+		return
+	}
+
+	// 帧 2（出站）：auth_challenge——随机 server_nonce + HMAC 服务端证明。
+	serverNonce := newServerNonce()
+	if serverNonce == "" {
+		_ = c.Close(closeCodeAuthFailed, "could not generate v4 server nonce")
+		return
+	}
+	challenge := map[string]any{
+		"type":             "auth_challenge",
+		"protocol_version": WSProtocolVersion,
+		"client_nonce":     hello.ClientNonce,
+		"server_nonce":     serverNonce,
+		"server_version":   s.version,
+		"server_proof":     serverProof(s.WSCapability, hello.ClientNonce, serverNonce, s.version),
+	}
+	wc := &wsConn{conn: c}
+	writeCtx, writeCancel := context.WithDeadline(context.Background(), deadline)
+	err = wc.writeJSON(writeCtx, challenge)
+	writeCancel()
+	if err != nil {
+		slog.Warn("bridge: auth_challenge send failed", "err", err)
+		_ = c.CloseNow()
+		return
+	}
+
+	// 帧 3（入站）：auth_response——编辑器元数据 + 客户端证明。
+	rawResp, err := readFrame()
+	if err != nil {
+		slog.Warn("bridge: auth_response read failed", "err", err)
+		_ = c.Close(closeCodeHandshakePolicy, "v4 editor handshake timed out")
+		return
+	}
+	resp, code, reason := parseAuthResponse(rawResp)
+	if resp == nil {
+		slog.Warn("bridge: rejecting auth_response", "code", code, "reason", reason)
+		_ = c.Close(websocket.StatusCode(code), reason)
+		return
+	}
+	if resp.ClientNonce != hello.ClientNonce || resp.ServerNonce != serverNonce {
+		_ = c.Close(closeCodeAuthFailed, "v4 handshake nonce mismatch")
+		return
+	}
+	// proof 校验：插件带 launched_by（fork 扩展）时按扩展转录验；
+	// 纯上游插件无此字段，按上游原样转录验，origin 归一为 "user"。
+	expected := clientProofExpectation(s.WSCapability, s.version, resp, resp.HasLaunchedBy)
+	if !hmac.Equal([]byte(resp.ClientProof), []byte(expected)) {
+		_ = c.Close(closeCodeAuthFailed, "v4 editor proof failed")
+		return
+	}
+	if !supportsV4Editor(resp.GodotVersion) {
+		_ = c.Close(closeCodeProtocolMismatch,
+			"Godot 4.7 or newer within the 4.x line is required by the v4 editor protocol")
+		return
+	}
+
+	// 认证通过：放宽帧上限到正常负载预算（上游在证明通过后提升
+	// max_message_size）。
 	c.SetReadLimit(maxFrameBytes)
 
-	// First frame must be a valid handshake within the deadline.
-	readCtx, cancel := context.WithTimeout(context.Background(), s.HandshakeTimeout)
-	_, rawMsg, err := c.Read(readCtx)
-	cancel()
-	if err != nil {
-		slog.Warn("bridge: first frame read failed", "err", err)
-		_ = c.Close(websocket.StatusPolicyViolation, "handshake timeout or read error")
-		return
-	}
-	var hs Handshake
-	if err := json.Unmarshal(rawMsg, &hs); err != nil ||
-		hs.Type != "handshake" || !sessionIDPattern.MatchString(hs.SessionID) {
-		slog.Warn("bridge: rejecting malformed handshake frame")
-		_ = c.Close(websocket.StatusPolicyViolation, "invalid handshake")
-		return
-	}
-
-	// Version gate: major.minor must match the server's bundled plugin
-	// version. A patch-level drift is accepted and flagged stale; a
-	// malformed or minor/major-mismatched plugin version is rejected
-	// before the session is registered.
-	stale, rejectReason := s.checkPluginVersion(hs.PluginVersion)
+	// 版本门禁：插件本应在 HTTP 探针阶段就完成 major.minor 评估（fork
+	// 放宽），这里只是纵深防御——畸形 plugin_version 拒绝，patch 漂移
+	// 接受并标记 stale。
+	stale, rejectReason := s.checkPluginVersion(resp.PluginVersion)
 	if rejectReason != "" {
-		slog.Warn("bridge: rejecting handshake", "session", hs.SessionID, "reason", rejectReason)
+		slog.Warn("bridge: rejecting handshake", "session", resp.SessionID, "reason", rejectReason)
 		_ = c.Close(websocket.StatusPolicyViolation, rejectReason)
 		return
 	}
 
-	wc := &wsConn{conn: c}
-	if !s.registerSession(&hs, wc, stale) {
+	if !s.registerSession(resp, wc, stale) {
 		_ = c.Close(closeCodeDuplicateSession, "session id already registered")
 		return
 	}
 
-	// Report the server version; the plugin checks it for major.minor
-	// compatibility against its own plugin.cfg version. A stale-accepted
-	// handshake also carries plugin_stale + bundled_plugin_version so the
-	// plugin can warn about the drift instead of failing.
+	// handshake_ack：上游形状 + fork 扩展的 stale 提示键。
 	ack := handshakeAck{
-		Type:          "handshake_ack",
-		ServerVersion: s.version,
+		Type:            "handshake_ack",
+		ProtocolVersion: WSProtocolVersion,
+		ServerVersion:   s.version,
 	}
 	if stale {
 		ack.PluginStale = true
 		ack.BundledPluginVersion = s.version
 	}
 	if err := wc.writeJSON(context.Background(), ack); err != nil {
-		slog.Warn("bridge: handshake_ack send failed", "session", hs.SessionID, "err", err)
-		s.unregisterSession(hs.SessionID)
+		slog.Warn("bridge: handshake_ack send failed", "session", resp.SessionID, "err", err)
+		s.unregisterSession(resp.SessionID)
 		_ = c.CloseNow()
 		return
 	}
 
 	slog.Info("bridge: session connected",
-		"session", hs.SessionID, "pid", hs.EditorPID,
-		"godot", hs.GodotVersion, "project", hs.ProjectPath)
+		"session", resp.SessionID, "pid", resp.EditorPID,
+		"godot", resp.GodotVersion, "project", resp.ProjectPath)
 
 	// Read loop: no read deadlines and no ping/pong enforcement — during an
 	// exclusive test run the editor cannot answer pings, and loopback TCP
@@ -425,11 +510,11 @@ func (s *Server) handleConn(c *websocket.Conn) {
 		if err != nil {
 			break
 		}
-		s.handleFrame(hs.SessionID, frame)
+		s.handleFrame(resp.SessionID, frame)
 	}
 
-	slog.Info("bridge: session disconnected", "session", hs.SessionID)
-	s.unregisterSession(hs.SessionID)
+	slog.Info("bridge: session disconnected", "session", resp.SessionID)
+	s.unregisterSession(resp.SessionID)
 	_ = c.CloseNow()
 }
 
@@ -437,6 +522,8 @@ func (s *Server) handleConn(c *websocket.Conn) {
 // stale=true for an accepted patch-level drift and a non-empty rejection
 // reason when the handshake must be refused (empty reason = accept).
 //
+// 在 v4 里插件本应在 HTTP 探针阶段就完成版本评估（server_version_check.gd
+// 的 fork 补丁把上游严格相等放宽为 major.minor），这道门禁是纵深防御。
 // The gate keys on the server's OWN version only when it parses as
 // semver: production daemons always run with the vendored plugin.cfg
 // version, while tests/dev builds may pass a placeholder — a server that
@@ -460,9 +547,10 @@ func (s *Server) checkPluginVersion(pluginVersion string) (stale bool, rejectRea
 }
 
 // normalizeOrigin maps the handshake's launched_by provenance onto the
-// session origin. Only "cli" is trusted; a missing (pre-3.2.7 plugin) or
-// unrecognized value normalizes to "user", so a session we cannot identify
-// is never mistaken for a CLI-spawned editor.
+// session origin. Only "cli" is trusted; a missing (pure-upstream 4.x
+// plugin without the fork extension) or unrecognized value normalizes to
+// "user", so a session we cannot identify is never mistaken for a
+// CLI-spawned editor.
 func normalizeOrigin(launchedBy string) string {
 	if launchedBy == "cli" {
 		return "cli"
@@ -473,32 +561,32 @@ func normalizeOrigin(launchedBy string) string {
 // registerSession adds the session and connection to the registry. It
 // returns false when the session_id is already registered (duplicate).
 // stale carries the version gate's patch-drift verdict onto the session.
-func (s *Server) registerSession(hs *Handshake, wc *wsConn, stale bool) bool {
+func (s *Server) registerSession(resp *authResponse, wc *wsConn, stale bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return false
 	}
-	if _, exists := s.sessions[hs.SessionID]; exists {
+	if _, exists := s.sessions[resp.SessionID]; exists {
 		return false
 	}
 	sess := &Session{
-		ID:              hs.SessionID,
-		GodotVersion:    hs.GodotVersion,
-		ProjectPath:     hs.ProjectPath,
-		PluginVersion:   hs.PluginVersion,
-		ProtocolVersion: hs.ProtocolVersion,
-		EditorPID:       hs.EditorPID,
+		ID:              resp.SessionID,
+		GodotVersion:    resp.GodotVersion,
+		ProjectPath:     resp.ProjectPath,
+		PluginVersion:   resp.PluginVersion,
+		ProtocolVersion: WSProtocolVersion,
+		EditorPID:       resp.EditorPID,
 		PluginStale:     stale,
-		Origin:          normalizeOrigin(hs.LaunchedBy),
-		readiness:       hs.Readiness,
+		Origin:          normalizeOrigin(resp.LaunchedBy),
+		readiness:       resp.Readiness,
 	}
-	s.sessions[hs.SessionID] = sess
-	s.order = append(s.order, hs.SessionID)
+	s.sessions[resp.SessionID] = sess
+	s.order = append(s.order, resp.SessionID)
 	if s.activeID == "" {
-		s.activeID = hs.SessionID
+		s.activeID = resp.SessionID
 	}
-	s.conns[hs.SessionID] = wc
+	s.conns[resp.SessionID] = wc
 	return true
 }
 

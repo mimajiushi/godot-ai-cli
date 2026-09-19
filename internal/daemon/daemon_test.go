@@ -16,7 +16,7 @@ import (
 )
 
 // testVersion mirrors the vendored plugin version the daemon advertises.
-const testVersion = "3.2.5"
+const testVersion = "4.1.0"
 
 // startDaemon boots a daemon on ephemeral loopback ports.
 func startDaemon(t *testing.T) *daemon.Daemon {
@@ -95,10 +95,24 @@ func errorBody(t *testing.T, body map[string]any) map[string]any {
 	return errObj
 }
 
+// TestStatusEndpoint 钉住 v4 的认证採用探针：无/错 Bearer → 401；
+// 持正确 http capability → 200 且 instance_id 等于能力记录的 nonce。
 func TestStatusEndpoint(t *testing.T) {
 	d := startDaemon(t)
 
-	code, body := getJSON(t, baseURL(d)+"/godot-ai/status")
+	// 无 Authorization 头 → 401（v4 起该端点不再匿名开放）。
+	code, _ := getJSON(t, baseURL(d)+"/godot-ai/status")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d, want 401", code)
+	}
+
+	// 错误 token → 401。
+	code, _ = getStatusWithBearer(t, d, "wrong-token")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("wrong-token status = %d, want 401", code)
+	}
+
+	code, body := getStatusWithBearer(t, d, d.Capabilities().HTTP)
 	if code != http.StatusOK {
 		t.Fatalf("status code = %d", code)
 	}
@@ -120,9 +134,28 @@ func TestStatusEndpoint(t *testing.T) {
 	if body["pid"].(float64) <= 0 {
 		t.Errorf("pid = %v", body["pid"])
 	}
+	if body["instance_id"] != d.Capabilities().InstanceNonce {
+		t.Errorf("instance_id = %v, want %v", body["instance_id"], d.Capabilities().InstanceNonce)
+	}
 	if body["telemetry_enabled"] != false {
 		t.Errorf("telemetry_enabled = %v, want false (the fork never phones home)", body["telemetry_enabled"])
 	}
+}
+
+// getStatusWithBearer 以指定 bearer token 探测 /godot-ai/status。
+func getStatusWithBearer(t *testing.T, d *daemon.Daemon, token string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL(d)+"/godot-ai/status", nil)
+	if err != nil {
+		t.Fatalf("build GET: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET status: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, decodeBody(t, resp)
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -162,8 +195,8 @@ func TestSessionsEmpty(t *testing.T) {
 func TestSessionsExposeOrigin(t *testing.T) {
 	d := startDaemon(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
-	cli := mockplugin.Dial(t, addr, map[string]any{"launched_by": "cli"})
-	legacy := mockplugin.Dial(t, addr, nil)
+	cli := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"launched_by": "cli"})
+	legacy := mockplugin.Dial(t, addr, d.Bridge().WSCapability, nil)
 
 	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
 	if code != http.StatusOK {
@@ -187,10 +220,10 @@ func TestSessionsExposeOrigin(t *testing.T) {
 // handshake was accepted with a patch-level version drift (major.minor
 // compatible, patch unequal) — the flag is absent for aligned sessions.
 func TestSessionsExposePluginStale(t *testing.T) {
-	d := startDaemon(t) // daemon version testVersion = "3.2.5"
+	d := startDaemon(t) // daemon version testVersion = "4.1.0"
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
-	aligned := mockplugin.Dial(t, addr, nil) // default plugin_version == testVersion
-	stale := mockplugin.Dial(t, addr, map[string]any{"plugin_version": "3.2.7"})
+	aligned := mockplugin.Dial(t, addr, d.Bridge().WSCapability, nil) // default plugin_version == testVersion
+	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.1.1"})
 
 	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
 	if code != http.StatusOK {
@@ -211,8 +244,8 @@ func TestSessionsExposePluginStale(t *testing.T) {
 	}
 
 	st := byID[stale.SessionID]
-	if st["plugin_version"] != "3.2.7" {
-		t.Errorf("stale session plugin_version = %v, want 3.2.7", st["plugin_version"])
+	if st["plugin_version"] != "4.1.1" {
+		t.Errorf("stale session plugin_version = %v, want 4.1.1", st["plugin_version"])
 	}
 	if st["plugin_stale"] != true {
 		t.Errorf("stale session plugin_stale = %v, want true", st["plugin_stale"])
@@ -294,7 +327,7 @@ func TestExecuteNoEditor(t *testing.T) {
 
 func TestExecuteEndToEnd(t *testing.T) {
 	d := startDaemon(t)
-	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), nil)
+	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, nil)
 	p.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{
 			"command": command,
@@ -335,7 +368,7 @@ func TestExecuteEndToEnd(t *testing.T) {
 
 func TestExecuteWriteGateProbesWhenImporting(t *testing.T) {
 	d := startDaemon(t)
-	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
 		"readiness": "importing",
 	})
 	p.SetResponder(func(command string, _ map[string]any) *mockplugin.Response {
@@ -364,7 +397,7 @@ func TestExecuteWriteGateProbesWhenImporting(t *testing.T) {
 
 func TestExecuteWriteGateRejectsPlaying(t *testing.T) {
 	d := startDaemon(t)
-	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), map[string]any{
+	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
 		"readiness": "playing",
 	})
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
@@ -405,8 +438,8 @@ func TestActivateEndpoint(t *testing.T) {
 		t.Errorf("code = %v, want SESSION_NOT_FOUND", errObj["code"])
 	}
 
-	first := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), nil)
-	second := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), nil)
+	first := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, nil)
+	second := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, nil)
 
 	code, body = postJSON(t, url, map[string]any{"session_id": second.SessionID})
 	if code != http.StatusOK || body["status"] != "ok" || body["active_session"] != second.SessionID {
@@ -424,7 +457,7 @@ func TestActivateEndpoint(t *testing.T) {
 		if s["active"] != wantActive {
 			t.Errorf("session %v active = %v, want %v", s["session_id"], s["active"], wantActive)
 		}
-		if s["readiness"] != "ready" || s["godot_version"] != "4.7.0" || s["editor_pid"].(float64) != 4321 {
+		if s["readiness"] != "ready" || s["godot_version"] != "4.7-stable (official)" || s["editor_pid"].(float64) != 4321 {
 			t.Errorf("session fields = %v", s)
 		}
 	}

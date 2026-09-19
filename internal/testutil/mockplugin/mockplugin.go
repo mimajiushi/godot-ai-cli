@@ -1,14 +1,21 @@
-// Package mockplugin implements the plugin side of the godot_ai WebSocket
-// protocol for tests: it dials a bridge.Server, performs the handshake,
-// answers commands from a programmable responder (with optional delays to
-// model deferred/out-of-order replies), and can push events.
+// Package mockplugin implements the plugin side of the godot_ai v4
+// WebSocket protocol for tests: it dials a bridge.Server, runs the
+// authenticated handshake (auth_hello → auth_challenge → auth_response,
+// HMAC proofs computed with the server's WS capability), answers commands
+// from a programmable responder (with optional delays to model
+// deferred/out-of-order replies), and can push events.
 package mockplugin
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,33 +63,42 @@ type Plugin struct {
 	loopDone  chan struct{}
 }
 
-// Dial connects to ws://<addr>, sends the handshake, and reads the
-// handshake_ack. Passing nil handshake fields yields sane defaults with a
-// unique session id. It fails the test on any error.
+// --- v4 握手证明的客户端镜像（与 internal/bridge/auth.go 同算法） ---
+
+// proofMessage 与 bridge.proofMessage 同格式：domain + "\n<len>:<值>"。
+func proofMessage(domain string, values ...string) []byte {
+	msg := []byte(domain)
+	for _, v := range values {
+		enc := []byte(v)
+		msg = append(msg, '\n')
+		msg = append(msg, strconv.Itoa(len(enc))...)
+		msg = append(msg, ':')
+		msg = append(msg, enc...)
+	}
+	return msg
+}
+
+func hmacProof(capability, domain string, values ...string) string {
+	mac := hmac.New(sha256.New, []byte(capability))
+	mac.Write(proofMessage(domain, values...))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// Dial connects to ws://<addr> and runs the v4 authenticated handshake
+// using the server's WS capability. fields overrides auth_response fields;
+// nil yields sane defaults with a unique session id. It fails the test on
+// any error (including a failed server-proof check — the mock verifies the
+// server exactly like the real plugin does).
 //
-// The defaults deliberately carry NO launched_by field (the pre-3.2.7
-// plugin shape, origin "user"); pass "launched_by": "cli" in the handshake
-// overlay to simulate a CLI-spawned editor. The plugin version is overridable
-// the same way ("plugin_version": "...") for handshake version-matrix tests.
-func Dial(t *testing.T, addr string, handshake map[string]any) *Plugin {
+// 默认不携带 launched_by（纯上游插件形状，origin 归一为 "user"）；
+// 传 "launched_by": "cli" 模拟 CLI spawn 的编辑器（走 fork 扩展转录）。
+// 传 "client_proof": "<64hex>" 可注入伪造证明（认证失败路径测试）。
+func Dial(t *testing.T, addr, capability string, fields map[string]any) *Plugin {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, handshake, payload := dialAndHandshake(t, addr, handshake)
-	p := &Plugin{
-		t:         t,
-		Conn:      conn,
-		SessionID: handshake["session_id"].(string),
-		stamp:     handshake["readiness"].(string),
-		loopDone:  make(chan struct{}),
-	}
+	conn, resp := dialAndAuth(t, addr, capability, fields)
 
-	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
-		t.Fatalf("mockplugin: send handshake: %v", err)
-	}
-
-	_, ackFrame, err := conn.Read(ctx)
+	_, ackFrame, err := conn.Read(context.Background())
 	if err != nil {
 		t.Fatalf("mockplugin: read handshake_ack: %v", err)
 	}
@@ -90,43 +106,70 @@ func Dial(t *testing.T, addr string, handshake map[string]any) *Plugin {
 	if err := json.Unmarshal(ackFrame, &ack); err != nil {
 		t.Fatalf("mockplugin: parse handshake_ack: %v", err)
 	}
-	p.Ack = ack
+	p := &Plugin{
+		t:         t,
+		Conn:      conn,
+		SessionID: resp["session_id"].(string),
+		stamp:     resp["readiness"].(string),
+		Ack:       ack,
+		loopDone:  make(chan struct{}),
+	}
 
 	go p.readLoop()
 	t.Cleanup(p.Close)
 	return p
 }
 
-// DialRejected sends the handshake and asserts the server closes the
-// connection WITHOUT a handshake_ack (the version-gate / malformed-handshake
-// path). It returns the close reason and fails the test when an ack arrives.
-func DialRejected(t *testing.T, addr string, handshake map[string]any) string {
+// DialRejected 跑完整握手（可被 "client_proof" 注入伪造）并断言服务端
+// 不发 handshake_ack 直接关闭（认证/协议拒绝路径）。返回关闭码与原因。
+func DialRejected(t *testing.T, addr, capability string, fields map[string]any) (int, string) {
+	t.Helper()
+
+	conn, _ := dialAndAuth(t, addr, capability, fields)
+	t.Cleanup(func() { _ = conn.CloseNow() })
+
+	_, _, err := conn.Read(context.Background())
+	if err == nil {
+		t.Fatal("mockplugin: expected rejection, got handshake_ack")
+	}
+	return closeDetails(t, err)
+}
+
+// DialRaw 发送任意第一帧并返回服务端关闭码与原因（v3 插件/畸形帧测试）。
+func DialRaw(t *testing.T, addr string, payload []byte) (int, string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, payload := dialAndHandshake(t, addr, handshake)
+	conn, _, err := websocket.Dial(ctx, "ws://"+addr, nil)
+	if err != nil {
+		t.Fatalf("mockplugin: dial %s: %v", addr, err)
+	}
 	t.Cleanup(func() { _ = conn.CloseNow() })
-
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
-		t.Fatalf("mockplugin: send handshake: %v", err)
+		t.Fatalf("mockplugin: send raw frame: %v", err)
 	}
-	_, frame, err := conn.Read(ctx)
+	_, _, err = conn.Read(context.Background())
 	if err == nil {
-		t.Fatalf("mockplugin: expected rejection, got frame %s", frame)
+		t.Fatal("mockplugin: expected rejection, got a frame")
 	}
-	var cerr websocket.CloseError
-	if errors.As(err, &cerr) {
-		return cerr.Reason
-	}
-	t.Fatalf("mockplugin: rejection read error is not a close frame: %v", err)
-	return ""
+	return closeDetails(t, err)
 }
 
-// dialAndHandshake opens the connection and builds the handshake payload
-// with defaults applied. It returns the effective handshake map (defaults
-// filled) so callers can read back the session id / readiness.
-func dialAndHandshake(t *testing.T, addr string, handshake map[string]any) (*websocket.Conn, map[string]any, []byte) {
+// closeDetails 提取 websocket 关闭码与原因。
+func closeDetails(t *testing.T, err error) (int, string) {
+	t.Helper()
+	var cerr websocket.CloseError
+	if errors.As(err, &cerr) {
+		return int(cerr.Code), cerr.Reason
+	}
+	t.Fatalf("mockplugin: rejection read error is not a close frame: %v", err)
+	return 0, ""
+}
+
+// dialAndAuth 拨号并完成到 auth_response 发送为止的握手段，返回连接与
+// 生效的 auth_response 字段表（默认值已填充）。
+func dialAndAuth(t *testing.T, addr, capability string, fields map[string]any) (*websocket.Conn, map[string]any) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -136,29 +179,91 @@ func dialAndHandshake(t *testing.T, addr string, handshake map[string]any) (*web
 		t.Fatalf("mockplugin: dial %s: %v", addr, err)
 	}
 
-	if handshake == nil {
-		handshake = map[string]any{}
+	// 帧 1：auth_hello（64hex 随机 client_nonce）。
+	var nonceBuf [32]byte
+	if _, err := rand.Read(nonceBuf[:]); err != nil {
+		t.Fatalf("mockplugin: nonce: %v", err)
 	}
-	defaults := map[string]any{
-		"type":             "handshake",
-		"session_id":       fmt.Sprintf("mock-%d", nextID.Add(1)),
-		"godot_version":    "4.7.0",
-		"project_path":     "C:/projects/mock",
-		"plugin_version":   "3.2.5",
-		"protocol_version": 1,
-		"readiness":        "ready",
-		"editor_pid":       4321,
+	clientNonce := hex.EncodeToString(nonceBuf[:])
+	hello, _ := json.Marshal(map[string]any{
+		"type":             "auth_hello",
+		"protocol_version": 2,
+		"client_nonce":     clientNonce,
+	})
+	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+		t.Fatalf("mockplugin: send auth_hello: %v", err)
 	}
-	for k, v := range defaults {
-		if _, ok := handshake[k]; !ok {
-			handshake[k] = v
-		}
-	}
-	payload, err := json.Marshal(handshake)
+
+	// 帧 2（入站）：auth_challenge——像真插件一样验证服务端证明。
+	_, chalFrame, err := conn.Read(ctx)
 	if err != nil {
-		t.Fatalf("mockplugin: marshal handshake: %v", err)
+		t.Fatalf("mockplugin: read auth_challenge: %v", err)
 	}
-	return conn, handshake, payload
+	var chal map[string]any
+	if err := json.Unmarshal(chalFrame, &chal); err != nil {
+		t.Fatalf("mockplugin: parse auth_challenge: %v", err)
+	}
+	if chal["type"] != "auth_challenge" {
+		t.Fatalf("mockplugin: expected auth_challenge, got %s", chalFrame)
+	}
+	serverNonce, _ := chal["server_nonce"].(string)
+	serverVersion, _ := chal["server_version"].(string)
+	serverProof, _ := chal["server_proof"].(string)
+	// "skip_server_proof_check": true 时跳过服务端证明校验——测试用
+	// 错误 capability 走到服务端的客户端证明拒绝（真实插件会自己
+	// fail-closed，这里是要验服务端的 4003）。
+	skipServerCheck := fields != nil && fields["skip_server_proof_check"] == true
+	expectedServer := hmacProof(capability, "godot-ai-ws-v2/server-proof",
+		"2", clientNonce, serverNonce, serverVersion)
+	if !skipServerCheck && !hmac.Equal([]byte(serverProof), []byte(expectedServer)) {
+		t.Fatalf("mockplugin: server proof mismatch (wrong capability?)")
+	}
+
+	// 帧 3：auth_response（默认纯上游形状；launched_by 触发 fork 转录）。
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	resp := map[string]any{
+		"type":               "auth_response",
+		"protocol_version":   2,
+		"client_nonce":       clientNonce,
+		"server_nonce":       serverNonce,
+		"session_id":         fmt.Sprintf("mock-%d", nextID.Add(1)),
+		"godot_version":      "4.7-stable (official)",
+		"project_path":       "C:/projects/mock",
+		"plugin_version":     "4.1.0",
+		"readiness":          "ready",
+		"editor_pid":         4321,
+		"server_launch_mode": "manual",
+	}
+	for k, v := range fields {
+		if k == "skip_server_proof_check" {
+			continue // 控制键，不上线
+		}
+		resp[k] = v
+	}
+	if _, forged := resp["client_proof"]; !forged {
+		values := []string{
+			"2", clientNonce, serverNonce, serverVersion,
+			resp["session_id"].(string), resp["godot_version"].(string),
+			resp["project_path"].(string), resp["plugin_version"].(string),
+			resp["readiness"].(string),
+			strconv.Itoa(resp["editor_pid"].(int)),
+			resp["server_launch_mode"].(string),
+		}
+		if lb, ok := resp["launched_by"].(string); ok {
+			values = append(values, lb)
+		}
+		resp["client_proof"] = hmacProof(capability, "godot-ai-ws-v2/client-proof", values...)
+	}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("mockplugin: marshal auth_response: %v", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatalf("mockplugin: send auth_response: %v", err)
+	}
+	return conn, resp
 }
 
 // SetResponder installs the command responder.

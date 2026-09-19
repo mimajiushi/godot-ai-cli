@@ -58,18 +58,16 @@ func VersionFromBinary(path string) (Version, error) {
 	return ParseVersion(strings.SplitN(string(out), "\n", 2)[0])
 }
 
-// CheckCompatibility mirrors the upstream support floor: Godot 4.5+ is
-// supported, 4.7+ recommended. It returns a warning for supported-but-old
-// or untested-major versions and an error for unsupported ones.
+// CheckCompatibility mirrors the upstream v4 support floor: only the 4.x
+// line with minor >= 7 is supported (upstream `_supports_v4_editor`).
+// 4.5/4.6 and every 5.x are REFUSED — the v4 plugin's attach bridge and
+// signed-addon boot flow do not exist there and fail closed.
 func CheckCompatibility(v Version) (warn string, err error) {
-	if v.Major < 4 || (v.Major == 4 && v.Minor < 5) {
-		return "", fmt.Errorf("Godot %s is not supported: godot-ai-cli requires Godot 4.5+ (4.7+ recommended)", v.Raw)
+	if v.Major < 4 || (v.Major == 4 && v.Minor < 7) {
+		return "", fmt.Errorf("Godot %s is not supported: godot-ai-cli requires Godot 4.7+ (the bundled godot-ai v4 plugin only supports the 4.x line)", v.Raw)
 	}
 	if v.Major >= 5 {
-		return fmt.Sprintf("Godot %s is an untested major version: godot-ai-cli is verified against Godot 4.x (4.5+, 4.7+ recommended)", v.Raw), nil
-	}
-	if v.Major == 4 && v.Minor < 7 {
-		return fmt.Sprintf("Godot 4.7+ is recommended (detected %s)", v.Raw), nil
+		return "", fmt.Errorf("Godot %s is not supported: the bundled godot-ai v4 plugin refuses Godot 5.x (verified against Godot 4.7+)", v.Raw)
 	}
 	return "", nil
 }

@@ -19,7 +19,7 @@ import (
 
 // testVersion is the server version every test bridge reports; it must
 // equal the vendored plugin.cfg version for real deployments.
-const testVersion = "3.2.5"
+const testVersion = "4.1.0"
 
 // startServer boots a bridge on an ephemeral loopback port.
 func startServer(t *testing.T) *bridge.Server {
@@ -106,7 +106,7 @@ func TestUpgradeOriginPolicy(t *testing.T) {
 
 func TestHandshakeAcceptAndAckVersion(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
 	if got := p.Ack["type"]; got != "handshake_ack" {
 		t.Fatalf("ack type = %v, want handshake_ack", got)
@@ -123,8 +123,14 @@ func TestHandshakeAcceptAndAckVersion(t *testing.T) {
 	if sess.ID != p.SessionID {
 		t.Errorf("session id = %q, want %q", sess.ID, p.SessionID)
 	}
-	if sess.GodotVersion != "4.7.0" || sess.EditorPID != 4321 {
+	if sess.GodotVersion != "4.7-stable (official)" || sess.EditorPID != 4321 {
 		t.Errorf("session metadata mismatch: %+v", sess)
+	}
+	if sess.ProtocolVersion != 2 {
+		t.Errorf("protocol version = %d, want 2 (v4)", sess.ProtocolVersion)
+	}
+	if got := p.Ack["protocol_version"]; got != float64(2) {
+		t.Errorf("ack protocol_version = %v, want 2", got)
 	}
 	if sess.Readiness() != "ready" {
 		t.Errorf("readiness = %q, want ready", sess.Readiness())
@@ -135,13 +141,14 @@ func TestHandshakeAcceptAndAckVersion(t *testing.T) {
 }
 
 // TestHandshakeOrigin pins the launched_by → Origin normalization: only an
-// explicit "cli" marks the session CLI-spawned; a missing field (pre-3.2.7
-// plugin) or an unrecognized value both normalize to "user".
+// explicit "cli" marks the session CLI-spawned; a missing field（纯上游
+// 4.x 插件没有这条 fork 扩展）or an unrecognized value both normalize to
+// "user".
 func TestHandshakeOrigin(t *testing.T) {
 	s := startServer(t)
-	cli := mockplugin.Dial(t, s.Addr(), map[string]any{"launched_by": "cli"})
-	legacy := mockplugin.Dial(t, s.Addr(), nil)
-	unknown := mockplugin.Dial(t, s.Addr(), map[string]any{"launched_by": "something-else"})
+	cli := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"launched_by": "cli"})
+	legacy := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
+	unknown := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"launched_by": "something-else"})
 
 	origins := map[string]string{}
 	for _, sess := range s.Sessions() {
@@ -245,34 +252,20 @@ func TestSlowUpgradeHeaderTolerated(t *testing.T) {
 
 func TestDuplicateSessionClosed4001(t *testing.T) {
 	s := startServer(t)
-	first := mockplugin.Dial(t, s.Addr(), nil)
+	first := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
-	conn := dialRaw(t, s.Addr())
-	hs, _ := json.Marshal(map[string]any{
-		"type":           "handshake",
-		"session_id":     first.SessionID,
-		"godot_version":  "4.7.0",
-		"project_path":   "C:/projects/other",
-		"plugin_version": testVersion,
-		"readiness":      "ready",
+	// v4：第二条连接走完认证握手但复用同一 session_id → 4001。
+	code, reason := mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
+		"session_id": first.SessionID,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := conn.Write(ctx, websocket.MessageText, hs); err != nil {
-		t.Fatalf("write duplicate handshake: %v", err)
-	}
-	_, _, err := conn.Read(context.Background())
-	if err == nil {
-		t.Fatal("expected duplicate session to be closed")
-	}
-	if code := websocket.CloseStatus(err); code != 4001 {
-		t.Fatalf("close code = %d, want 4001 (err=%v)", code, err)
+	if code != 4001 {
+		t.Fatalf("close code = %d, want 4001 (reason=%q)", code, reason)
 	}
 }
 
 func TestSendCommandOK(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{
 			"command": command,
@@ -299,7 +292,7 @@ func TestSendCommandOK(t *testing.T) {
 
 func TestSendCommandErrorStatus(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{
 			Status: "error",
@@ -328,7 +321,7 @@ func TestSendCommandErrorStatus(t *testing.T) {
 
 func TestSendCommandTimeout(t *testing.T) {
 	s := startServer(t)
-	mockplugin.Dial(t, s.Addr(), nil) // no responder: replies never come
+	mockplugin.Dial(t, s.Addr(), s.WSCapability, nil) // no responder: replies never come
 
 	_, cmdErr := s.SendCommand(context.Background(), "", "create_node", nil, 200*time.Millisecond)
 	if cmdErr == nil {
@@ -344,7 +337,7 @@ func TestSendCommandTimeout(t *testing.T) {
 
 func TestNonFiniteParamsRejected(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{}}
 	})
@@ -372,7 +365,7 @@ func TestNonFiniteParamsRejected(t *testing.T) {
 
 func TestDeferredResponseResolves(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{
 			Delay: 400 * time.Millisecond, // models a deferred plugin reply
@@ -391,7 +384,7 @@ func TestDeferredResponseResolves(t *testing.T) {
 
 func TestOutOfOrderResponses(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.SetResponder(func(command string, _ map[string]any) *mockplugin.Response {
 		delay := time.Duration(0)
 		if command == "slow" {
@@ -427,7 +420,7 @@ func TestOutOfOrderResponses(t *testing.T) {
 
 func TestEventUpdatesCachedReadiness(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
 	p.PushEvent("readiness_changed", map[string]any{"readiness": "playing"})
 	waitFor(t, "readiness to become playing", func() bool {
@@ -454,7 +447,7 @@ func TestEventListenerDispatched(t *testing.T) {
 		mu.Unlock()
 	})
 
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.PushEvent("scene_changed", map[string]any{"current_scene": "res://main.tscn"})
 
 	waitFor(t, "scene_changed event dispatch", func() bool {
@@ -474,7 +467,7 @@ func TestEventListenerDispatched(t *testing.T) {
 
 func TestResponseReadinessStampHealsSession(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	// A dropped readiness_changed event leaves the cache at "ready"; the
 	// response envelope stamp must heal it.
 	p.SetReadinessStamp("importing")
@@ -501,7 +494,7 @@ func TestResponseReadinessStampHealsSession(t *testing.T) {
 
 func TestUnknownRequestIDDropped(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
 	// A response nobody asked for must be dropped, not crash the session.
 	frame, _ := json.Marshal(map[string]any{
@@ -542,7 +535,7 @@ func TestNoSessionPluginDisconnected(t *testing.T) {
 
 func TestUnknownSession(t *testing.T) {
 	s := startServer(t)
-	mockplugin.Dial(t, s.Addr(), nil)
+	mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
 	_, cmdErr := s.SendCommand(context.Background(), "ghost@beef", "create_node", nil, time.Second)
 	if cmdErr == nil {
@@ -555,8 +548,8 @@ func TestUnknownSession(t *testing.T) {
 
 func TestActivateSwitchesActive(t *testing.T) {
 	s := startServer(t)
-	first := mockplugin.Dial(t, s.Addr(), nil)
-	second := mockplugin.Dial(t, s.Addr(), nil)
+	first := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
+	second := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
 	if got := s.ActiveSession().ID; got != first.SessionID {
 		t.Fatalf("active = %q, want first session %q", got, first.SessionID)
@@ -582,7 +575,7 @@ func TestActivateSwitchesActive(t *testing.T) {
 
 func TestDisconnectRemovesSession(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 	p.Close()
 
 	waitFor(t, "session removal after disconnect", func() bool {
@@ -600,7 +593,7 @@ func TestDisconnectRemovesSession(t *testing.T) {
 
 func TestDisconnectFailsInFlightCommand(t *testing.T) {
 	s := startServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil) // no responder: command stays in flight
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil) // no responder: command stays in flight
 
 	errCh := make(chan *bridge.CommandError, 1)
 	go func() {
@@ -624,15 +617,16 @@ func TestDisconnectFailsInFlightCommand(t *testing.T) {
 }
 
 // TestHandshakeVersionMatrix pins the major.minor compatibility gate the
-// 3.2.8 handshake relaxation introduced: equal versions and patch-level
-// drift (both directions) are accepted — drift flagged plugin_stale in the
-// ack and on the session — while minor/major mismatches and malformed
-// versions are rejected before any session registers.
+// 3.2.8 handshake relaxation introduced（v4 认证握手后依然生效）: equal
+// versions and patch-level drift (both directions) are accepted — drift
+// flagged plugin_stale in the ack and on the session — while minor/major
+// mismatches and malformed versions are rejected before any session
+// registers.
 func TestHandshakeVersionMatrix(t *testing.T) {
-	s := startServer(t) // server version testVersion = "3.2.5"
+	s := startServer(t) // server version testVersion = "4.1.0"
 
 	t.Run("equal version accepted without stale", func(t *testing.T) {
-		p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": testVersion})
+		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": testVersion})
 		if _, present := p.Ack["plugin_stale"]; present {
 			t.Errorf("ack = %v, want no plugin_stale for an equal version", p.Ack)
 		}
@@ -644,7 +638,7 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 	})
 
 	t.Run("patch-newer plugin accepted stale", func(t *testing.T) {
-		p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": "3.2.7"})
+		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": "4.1.1"})
 		if p.Ack["plugin_stale"] != true {
 			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
 		}
@@ -659,23 +653,30 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 	})
 
 	t.Run("patch-older plugin accepted stale", func(t *testing.T) {
-		p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": "3.2.0"})
+		// 另起一台 patch 更高的服务端，让"插件更旧"有落差可言。
+		older := bridge.NewServer("4.1.3")
+		if err := older.Start(0); err != nil {
+			t.Fatalf("bridge start: %v", err)
+		}
+		t.Cleanup(func() { _ = older.Shutdown(context.Background()) })
+		p := mockplugin.Dial(t, older.Addr(), older.WSCapability, map[string]any{"plugin_version": "4.1.0"})
 		if p.Ack["plugin_stale"] != true {
 			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
 		}
 	})
 
 	t.Run("minor mismatch rejected", func(t *testing.T) {
-		reason := mockplugin.DialRejected(t, s.Addr(), map[string]any{
-			"session_id": "rej-minor@0001", "plugin_version": "3.3.0"})
+		_, reason := mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
+			"session_id": "rej-minor@0001", "plugin_version": "4.2.0"})
 		if !strings.Contains(reason, "incompatible plugin version") {
 			t.Errorf("close reason = %q, want an incompatible-version explanation", reason)
 		}
 	})
 
 	t.Run("major mismatch rejected", func(t *testing.T) {
-		reason := mockplugin.DialRejected(t, s.Addr(), map[string]any{
-			"session_id": "rej-major@0001", "plugin_version": "4.2.0"})
+		// 旧 fork 线的 3.2.x 插件必须被显式拒绝（v4 同步的升级后果）。
+		_, reason := mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
+			"session_id": "rej-major@0001", "plugin_version": "3.2.13"})
 		if !strings.Contains(reason, "incompatible plugin version") {
 			t.Errorf("close reason = %q, want an incompatible-version explanation", reason)
 		}
@@ -683,13 +684,20 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 
 	t.Run("malformed version rejected", func(t *testing.T) {
 		for v, id := range map[string]string{
-			"garbage": "rej-garbage@0001", "3.2": "rej-short@0001", "": "rej-empty@0001",
+			"garbage": "rej-garbage@0001", "4.1": "rej-short@0001",
 		} {
-			reason := mockplugin.DialRejected(t, s.Addr(), map[string]any{
+			_, reason := mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
 				"session_id": id, "plugin_version": v})
 			if !strings.Contains(reason, "malformed plugin_version") {
 				t.Errorf("plugin_version %q: close reason = %q, want a malformed-version explanation", v, reason)
 			}
+		}
+		// 空 plugin_version 在更前面的字段校验阶段被拒（上游
+		// VersionToken min_length=1），走 4002 而非版本门禁。
+		code, reason := mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
+			"session_id": "rej-empty@0001", "plugin_version": ""})
+		if code != 4002 || !strings.Contains(reason, "plugin_version") {
+			t.Errorf("empty plugin_version: code = %d reason = %q, want 4002 invalid-field", code, reason)
 		}
 	})
 
@@ -719,7 +727,7 @@ func TestHandshakeVersionGateSkipsUnversionedServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 
-	p := mockplugin.Dial(t, s.Addr(), map[string]any{"plugin_version": "9.9.9"})
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": "9.9.9"})
 	if _, present := p.Ack["plugin_stale"]; present {
 		t.Errorf("ack = %v, want no plugin_stale from an unversioned server", p.Ack)
 	}

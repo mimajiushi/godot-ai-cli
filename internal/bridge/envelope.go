@@ -10,37 +10,14 @@
 // (src/godot_ai/transport/websocket.py, protocol/envelope.py).
 package bridge
 
-// Handshake is the first frame a plugin sends after connecting.
-// Mirrors upstream protocol/envelope.py HandshakeMessage.
-type Handshake struct {
-	Type            string `json:"type"`
-	SessionID       string `json:"session_id"`
-	GodotVersion    string `json:"godot_version"`
-	ProjectPath     string `json:"project_path"`
-	PluginVersion   string `json:"plugin_version"`
-	ProtocolVersion int    `json:"protocol_version"`
-	Readiness       string `json:"readiness"`
-	EditorPID       int    `json:"editor_pid"`
-	// LaunchedBy tags the editor's provenance: "cli" when the CLI spawned
-	// the editor process (launch exports GODOT_AI_CLI_LAUNCHED=1), "user"
-	// otherwise. Plugins before 3.2.7 omit the field entirely; the server
-	// normalizes a missing or unrecognized value to "user" — conservative:
-	// what we cannot identify we never auto-quit.
-	LaunchedBy string `json:"launched_by"`
-	// ServerLaunchMode and AuthToken are accepted for wire compatibility;
-	// the token is ignored (loopback-only trust boundary, compat gate).
-	ServerLaunchMode string `json:"server_launch_mode"`
-	AuthToken        string `json:"auth_token,omitempty"`
-}
-
-// handshakeAck is the server's answer to a valid Handshake. The plugin
-// rejects the server when the versions are not major.minor compatible.
-// PluginStale/BundledPluginVersion are set only when the handshake was
-// accepted with a patch-level drift (e.g. plugin 3.2.6 vs server 3.2.7) —
-// they tell the plugin to warn instead of fail.
+// handshakeAck 是服务端对合法 auth_response 的应答（上游
+// websocket.py 的握手尾声 + fork 扩展键）。插件在收到它之后用
+// server_version 做 major.minor 兼容评估（fork 放宽，见
+// pluginmeta.Compatible 与插件侧 server_version_check.gd 的 fork 补丁）。
 type handshakeAck struct {
-	Type          string `json:"type"` // always "handshake_ack"
-	ServerVersion string `json:"server_version"`
+	Type            string `json:"type"` // always "handshake_ack"
+	ProtocolVersion int    `json:"protocol_version"`
+	ServerVersion   string `json:"server_version"`
 	// PluginStale marks an accepted handshake whose plugin version differs
 	// from the server's bundled plugin version (compatible major.minor,
 	// drifted patch). Omitted when the versions are identical.

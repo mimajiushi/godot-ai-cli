@@ -27,7 +27,7 @@ func startGateServer(t *testing.T) *bridge.Server {
 
 func TestRequireWritableReadyFastPath(t *testing.T) {
 	s := startGateServer(t)
-	p := mockplugin.Dial(t, s.Addr(), nil)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
 	if cmdErr := s.RequireWritable(context.Background(), ""); cmdErr != nil {
 		t.Fatalf("RequireWritable: %v", cmdErr)
@@ -40,7 +40,7 @@ func TestRequireWritableReadyFastPath(t *testing.T) {
 
 func TestRequireWritableNoSceneFastPath(t *testing.T) {
 	s := startGateServer(t)
-	p := mockplugin.Dial(t, s.Addr(), map[string]any{"readiness": "no_scene"})
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "no_scene"})
 
 	// Upstream lets no_scene through: individual handlers reject when no
 	// scene is open.
@@ -62,7 +62,7 @@ func TestRequireWritableNoSession(t *testing.T) {
 
 func TestRequireWritableImportingClearsDuringHold(t *testing.T) {
 	s := startGateServer(t)
-	p := mockplugin.Dial(t, s.Addr(), map[string]any{"readiness": "importing"})
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "importing"})
 
 	// The editor reports "importing" twice, then becomes ready.
 	var probes atomic.Int32
@@ -87,7 +87,7 @@ func TestRequireWritableImportingClearsDuringHold(t *testing.T) {
 
 func TestRequireWritablePersistentImporting(t *testing.T) {
 	s := startGateServer(t)
-	p := mockplugin.Dial(t, s.Addr(), map[string]any{"readiness": "importing"})
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "importing"})
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{"readiness": "importing"}}
 	})
@@ -120,7 +120,7 @@ func TestRequireWritablePersistentImporting(t *testing.T) {
 
 func TestRequireWritablePlayingFailsFast(t *testing.T) {
 	s := startGateServer(t)
-	p := mockplugin.Dial(t, s.Addr(), map[string]any{"readiness": "playing"})
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{"readiness": "playing"}}
 	})
@@ -150,7 +150,7 @@ func TestRequireWritablePlayingFailsFast(t *testing.T) {
 
 func TestRequireWritableStaleCacheHealedByProbe(t *testing.T) {
 	s := startGateServer(t)
-	p := mockplugin.Dial(t, s.Addr(), map[string]any{"readiness": "playing"})
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
 	// The game already stopped but the readiness_changed event was lost;
 	// the live probe must heal the cache and let the write through.
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
@@ -170,7 +170,7 @@ func TestRequireWritableStaleCacheHealedByProbe(t *testing.T) {
 // connection error.
 func TestRequireWritableProbeFailureEnforcesCache(t *testing.T) {
 	s := startGateServer(t)
-	mockplugin.Dial(t, s.Addr(), map[string]any{"readiness": "playing"})
+	mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
 	// No responder: the probe times out.
 
 	cmdErr := s.RequireWritable(context.Background(), "")

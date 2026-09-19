@@ -15,7 +15,7 @@
 场景、节点、脚本、信号、UI、材质、动画、粒子、相机、环境、TileMap、测试、截图等——
 都暴露为打印 JSON 的普通子命令。任何能执行 shell 命令的 Agent 都能驱动 Godot。
 
-- **支持的 Godot：** 4.5+（推荐 4.7+），标准版或 .NET（Mono）版均可
+- **支持的 Godot：** 4.7+（仅 4.x 线——4.5/4.6 与 5.x 在 launch 处拒绝），标准版或 .NET（Mono）版均可
 - **支持的平台：** Windows、macOS、Linux（amd64 与 arm64）
 
 ## 安装
@@ -92,7 +92,7 @@ Git Bash 注意：MSYS 会把 `/Main` 这类绝对节点路径改写成 Windows 
 
 ## 接入你自己的工程
 
-- **前提：** 一个 Godot **4.5+** 工程（包含 `project.godot` 的目录）。动手前先跑
+- **前提：** 一个 Godot **4.7+** 工程（包含 `project.godot` 的目录）。动手前先跑
   `godot-ai-cli -v`——它会打印支持的 Godot 版本范围，以及工程将被对齐到的内置插件版本。
 - **Godot 二进制：** `launch` 依次从 `--godot` 参数、`GODOT_BIN` 环境变量、
   `godot use` 保存的默认路径、PATH、各系统常见安装位置查找编辑器。Godot 不在这些
@@ -204,8 +204,9 @@ script/build-release.sh`（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
 ## 与 hi-godot/godot-ai 的关系
 
-`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v3.2.5，移除了遥测并禁用了
-Python server 拉起逻辑（Go daemon 完全取代 Python 后端）。每一处分叉都在 GDScript
+`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v4.1.0，移除了遥测并禁用了
+Python server 拉起逻辑（Go daemon 完全取代 Python 后端，并自行实现了 v4 的
+认证传输——capability 记录发现 + HMAC 证明握手）。每一处分叉都在 GDScript
 源码中以 `godot-ai-cli fork patch` 标注，并在
 [docs/fork-patches.md](docs/fork-patches.md) 中逐条列出。上游许可证：MIT，
 "Godot AI contributors"。见 `UPSTREAM-LICENSE.txt`。

@@ -82,7 +82,7 @@ godot-ai-cli test run --suite test_animation --test-name test_fade    # narrow w
 godot-ai-cli test results-get                                          # re-read the last run
 ```
 
-Read the summary fields: `suite_count`, `total`, `passed`, `failed`, `skipped`, `load_errors`, `edited_scene`, `scene_warning`. Note `load_errors` and `scene_warning` are OMITTED from the payload when empty — absence means "none", not "forgot to check" (`edited_scene` is always present, `""` when no scene is open). Suites are discovered from `res://tests/` (McpTestSuite subclasses). A run aborted mid-way returns `TEST_RUN_TIMEOUT` with partial results retrievable via `test results-get`.
+Read the summary fields: `suite_count`, `total`, `passed`, `failed`, `skipped`, `assertions` (Σ per-test `assertion_count`, no `--verbose` needed), `duration_ms`, `load_errors`, `edited_scene`, `scene_warning`, `game_status`, `play_state_warning`. Note `load_errors`, `scene_warning` and `play_state_warning` are OMITTED from the payload when empty — absence means "none", not "forgot to check" (`edited_scene` and `game_status` are always present, `""`/`active:false` when idle). `game_status.active:true` means a game run is live in this session: suites that assert the no-game precondition (editor/project/manual_play_adoption) fail deterministically — `project stop` and re-run, or pass `--require-idle-session` to refuse up front with `EDITOR_NOT_READY/EDITOR_PLAYING`. Suites are discovered from `res://tests/` (McpTestSuite subclasses). A run aborted mid-way returns `TEST_RUN_TIMEOUT` with partial results retrievable via `test results-get`.
 
 ## 5. Run the game and drive it with input
 

@@ -19,14 +19,18 @@ agent ──▶ godot-ai-cli <subcommand> ──HTTP 127.0.0.1:8000──▶ dae
   bind loopback only; that is the entire trust boundary.
 - **Plugin** (`plugin/godot_ai`, vendored, embedded via `plugin/embed.go`):
   a GDScript editor plugin that dials the bridge as a WebSocket *client* and
-  executes commands inside the editor.
+  executes commands inside the editor. Since the v4.1.0 rebase it is upstream
+  v4's signed add-on tree plus the fork patches (docs/fork-patches.md §16).
 
-HTTP endpoints: `GET /godot-ai/status` (the upstream plugin-adoption probe —
-field-compatible so the GDScript plugin adopts the Go daemon exactly like an
-upstream Python server) and the CLI surface `GET /godot-ai/cli/health`,
+HTTP endpoints: `GET /godot-ai/status` (the upstream v4 plugin-adoption
+probe — field-compatible so the GDScript plugin adopts the Go daemon exactly
+like an upstream Python server; **Bearer-only**, keyed by the capability
+record's auth token) and the CLI surface `GET /godot-ai/cli/health`,
 `GET /godot-ai/cli/sessions`, `GET /godot-ai/cli/custom-tools`,
 `POST /godot-ai/cli/activate`, `POST /godot-ai/cli/execute`,
-`POST /godot-ai/cli/shutdown` (`internal/daemon/daemon.go`).
+`POST /godot-ai/cli/shutdown` (`internal/daemon/daemon.go`) — the `/cli/*`
+surface is deliberately unauthenticated so agents never touch the capability
+secret.
 
 Browser CSRF hardening: everything binds loopback only, and on top of that
 the POST mutation endpoints require `Content-Type: application/json`
@@ -36,37 +40,68 @@ preflight the daemon never answers. The WebSocket bridge rejects upgrade
 requests whose `Origin` header names a non-loopback host with 403; the
 plugin sends no `Origin` header at all, which stays accepted.
 
+## Capability record and authenticated transport (v4)
+
+The v4 trust anchor is a per-instance **capability record** written by
+whoever spawned the daemon (`internal/capability`) at
+`%LOCALAPPDATA%\godot-ai\capabilities\http-<port>.json`
+(`{version:1, http, websocket, instance_nonce}` — POSIX: XDG config dir).
+The record carries the bearer token; directory and file are owner-only, and
+the plugin refuses linked/permissive paths (upstream `transport_capability`
+rules, mirrored by the Go side). A CLI/`launch` spawn injects the record
+into the editor process environment; a user-opened editor discovers it from
+the well-known directory.
+
 ## Wire envelope
 
-JSON frames (`internal/bridge/envelope.go`), mirrored from the upstream
-Python backend:
+JSON frames (`internal/bridge/envelope.go`). The **handshake is upstream v4
+protocol version 2** (`internal/bridge/auth.go`), a four-frame authenticated
+dance — v3 peers (first frame `type:"handshake"`, protocol 1) are refused
+with close code 4002:
 
-- Plugin → server: `Handshake` (`type`, `session_id`, `godot_version`,
-  `project_path`, `plugin_version`, `protocol_version`, `readiness`,
-  `editor_pid`) as the first frame; unsolicited `event` frames
-  (`scene_changed`, `play_state_changed`, `readiness_changed`, …) at any time.
-- Server → plugin: `handshake_ack` (`server_version`), then command requests
-  `{request_id, command, params}`.
-- Plugin → server: `CommandResponse` `{request_id, status: "ok"|"error",
-  data, error: {code, message, data}, readiness}`. Responses may arrive out
-  of order and are correlated purely by `request_id`; the `readiness` stamp
-  on every response heals the server's cached session readiness.
+1. Plugin → server: `auth_hello` (`type`, `protocol_version`,
+   `client_nonce`).
+2. Server → plugin: `auth_challenge` (`client_nonce`, `server_nonce`,
+   `server_version`, `server_proof`).
+3. Plugin → server: `auth_response` (`client_proof`, `session_id`,
+   `godot_version`, `project_path`, `plugin_version`, `readiness`,
+   `editor_pid`, `server_launch_mode` — plus the fork-only `launched_by`,
+   §16.2). Proofs are HMAC-SHA256 keyed by the 64-hex capability over the
+   per-field `\n<utf8-byte-len>:<value>` transcript, domains
+   `godot-ai-ws-v2/server-proof` / `…/client-proof`.
+4. Server → plugin: `handshake_ack` (`server_version` + fork keys
+   `plugin_stale` / `bundled_plugin_version`), then command requests
+   `{request_id, command, params}`.
+
+Failures close with 4001 (duplicate session), 4002 (protocol mismatch — also
+the Godot-version gate), 4003 (auth failed), 1008 (handshake
+policy/timeout), 1009 (frame too large). Frames are capped at 8 KB pre-auth
+and 4 MB post-auth; the handshake times out after 5 s.
+
+After authentication the command envelope is unchanged: unsolicited `event`
+frames (`scene_changed`, `play_state_changed`, `readiness_changed`, …) flow
+plugin → server at any time, and `CommandResponse` `{request_id, status:
+"ok"|"error", data, error: {code, message, data}, readiness}` answers may
+arrive out of order, correlated purely by `request_id`; the `readiness`
+stamp on every response heals the server's cached session readiness.
 
 ## Handshake and version compatibility
 
 Both sides of the handshake enforce **major.minor compatibility** between
 the plugin's `plugin.cfg` version and the server's version — exact equality
 is NOT required (since 3.2.8; see `docs/fork-patches.md` §12 for the
-incident that ended strict equality). A patch-level drift (3.2.6 ↔ 3.2.7)
+incident that ended strict equality). A patch-level drift (4.1.0 ↔ 4.1.1)
 is accepted and flagged: the daemon marks the session `PluginStale`, sends
 `plugin_stale: true` + `bundled_plugin_version` in `handshake_ack`, and
 surfaces the drift via `/godot-ai/cli/sessions`, `status`, and `launch`
-warnings. A minor/major mismatch or a malformed version is rejected. The
-plugin-side check lives in
-`plugin/godot_ai/utils/server_lifecycle.gd::_server_version_compatibility`;
-the Go-side rule lives in `internal/pluginmeta` (`ParseSemver` /
-`Compatible`), the single source both the bridge gate and the CLI notes
-use. The advertised version flows
+warnings; the plugin side shows it as a soft amber `version_note` on the
+dock (never a block). A minor/major mismatch or a malformed version is
+rejected — by the plugin even earlier, at the HTTP probe stage (it refuses
+to dial the WS at all). The plugin-side rule lives in
+`plugin/godot_ai/utils/version_compat.gd` (`McpVersionCompat`;
+`server_version_check.gd` delegates to it); the Go-side rule lives in
+`internal/pluginmeta` (`ParseSemver` / `Compatible`), the single source both
+the bridge gate and the CLI notes use. The advertised version flows
 `plugin.PluginVersion()` → `internal/pluginmeta` → `daemon.Config.Version`
 default → `bridge.NewServer(version)` → `handshake_ack.server_version`.
 `plugin.cfg` is the single source of truth; bumping it is the only version

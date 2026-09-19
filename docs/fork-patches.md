@@ -1,14 +1,20 @@
-# Fork patches vs upstream v3.2.5
+# Fork patches vs upstream v4.1.0
 
 `plugin/godot_ai/` is a fork of [hi-godot/godot-ai](https://github.com/hi-godot/godot-ai)
-**v3.2.5** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
-is the complete list of divergences. The behavioral patches (§2–§4) are
+**v4.1.0** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
+is the complete list of divergences. The behavioral patches are
 marked in the GDScript source with a `godot-ai-cli fork patch` comment —
 `grep -rn "godot-ai-cli fork patch" plugin/godot_ai` audits them — and gated
 behind `utils/fork_config.gd` so dormant upstream code keeps compiling and
 upstream diffs stay reviewable. §1 is a whole-file rewrite (marked
 "STRIPPED in the godot-ai-cli fork" instead) and §6 is comment-only
 rewording, so neither shows up in that grep.
+
+> §1–§15 are the running history written against the v3.2.x base (each entry
+> names the fork release that introduced it). **§16 documents the v4.1.0
+> rebase**: which patches were re-applied onto the new upstream architecture,
+> which upstream deletions made v3-era patches obsolete, and the upgrade
+> consequence for projects still on a 3.2.x plugin.
 
 ## 1. `telemetry.gd` — rewritten as no-ops
 
@@ -277,7 +283,7 @@ dock hard-failed with "Incompatible server" and wedged.
   and the note wording. Cross-version handshake coverage is now mandatory
   — the incident was precisely the untested case.
 
-## v3.2.5 sync notes
+## v3.2.5 sync notes (historical — superseded by the §16 v4.1.0 rebase)
 
 The vendored base was a post-v3.2.4 upstream snapshot that already carried
 several fixes that shipped in v3.2.5: the batch rollback rewrite
@@ -301,8 +307,9 @@ Upstream-side follow-ups landed outside the vendored tree:
 
 ## Syncing with upstream
 
-1. Diff `plugin/godot_ai/` against the upstream tag; every hunk that is not
-   behind a `godot-ai-cli fork patch` marker is upstream drift to review.
+1. Diff `plugin/godot_ai/` against the upstream tag (current base:
+   **v4.1.0**); every hunk that is not behind a `godot-ai-cli fork patch`
+   marker is upstream drift to review.
 2. Re-apply upstream changes **around** the marked patches; never remove a
    `ForkConfig` gate — extend `fork_config.gd` instead.
 3. Keep dormant upstream code compiling (guards early-return, never delete),
@@ -496,4 +503,190 @@ the launch/plugin control asks from the same project.
   structured `plugin` object (`files_changed` / `files_created` /
   `git_dirty`). `Enable` was split into `enableContent` + `EnableDecision` so
   the preview and the write cannot diverge.
+
+## 16. Full alignment to upstream v4.1.0 (beta.24)
+
+`plugin.cfg` version 3.2.13 → **4.1.0**. Upstream v4 is a breaking line:
+signed add-on tree, authenticated transport (capability record +
+HMAC-proofed WS handshake, protocol version 2), a lifecycle-manager state
+machine replacing `McpServerState`'s presentation logic, a new in-editor
+updater, and the attach bridge. The fork re-based by mirroring the upstream
+tree wholesale and re-applying every still-meaningful fork patch onto the
+new architecture, then teaching the Go daemon the v4 transport.
+
+**Upgrade consequence (accepted):** every project on a 3.2.x plugin must run
+`godot-ai-cli plugin install` and restart the editor; v3 and v4 peers fail
+closed against each other (close codes 4002 protocol mismatch / 4003 auth
+failed). `plugin install` also clears a stale `addons/.godot_ai_update/`
+directory left by the upstream self-updater so its restart barrier cannot
+misfire.
+
+### 16.1 Go daemon implements the v4 authenticated transport
+
+`internal/bridge/auth.go` + `internal/capability/`: WS protocol version 2 —
+`auth_hello` → `auth_challenge` → `auth_response` → `handshake_ack`, with
+`server_proof`/`client_proof` = HMAC-SHA256 keyed by the 64-hex capability
+over per-field `\n<utf8-byte-len>:<value>` transcripts (domains
+`godot-ai-ws-v2/server-proof` / `…/client-proof`). Capability records live at
+`%LOCALAPPDATA%\godot-ai\capabilities\http-<port>.json`
+(`{version:1,http,websocket,instance_nonce}`); `/godot-ai/status` is
+Bearer-only, CLI probes stay on unauthenticated `/godot-ai/cli/*`. The
+handshake enforces the 4.7+/4.x Godot gate (mirror of upstream
+`_supports_v4_editor`), close codes 4001/4002/4003/1008/1009, an 8 KB
+pre-auth / 4 MB post-auth frame cap, and a 5 s handshake timeout.
+`mockplugin` (`internal/testutil`) speaks the same v4 dance for tests.
+
+### 16.2 Fork patches re-applied onto the v4 plugin
+
+- **`launched_by` origin tracking** (`connection.gd`, §11): the fork appends
+  its `launched_by` key to the v4 `auth_response` AND to the client-proof
+  transcript; the daemon tries the fork transcript first, then the upstream
+  one (origin `user`). `_launched_by()` returns `cli` only for
+  `GODOT_AI_CLI_LAUNCHED=1`.
+- **Relaxed version gate** (§12, now `utils/version_compat.gd` —
+  `McpVersionCompat`): `utils/server_version_check.gd` delegates to it.
+  Patch drift is a SOFT warning — `server_lifecycle.gd` carries
+  `version_note` into `get_status_dict()` and the dock shows an amber label
+  (`mcp_dock.gd::_refresh_server_version_label`); minor/major mismatch is a
+  hard block with `McpVersionCompat.incompatible_align_hint()` in the copy.
+- **`handshake_ack` fork keys** (`connection.gd`): `plugin_stale` /
+  `bundled_plugin_version` are accepted via a new optional-keys parameter on
+  `_has_exact_keys` (upstream demanded an exact key set and rejected the fork
+  daemon's ack) and surfaced as `conn.server_plugin_stale` /
+  `conn.bundled_plugin_version`.
+- **D1 BLOCKED self-heal, redesigned for v4** (`utils/server_lifecycle.gd`):
+  the v3 connection-level "keep redialing while blocked" loop is incoherent
+  in v4 (blocked connections carry no auth token — redialing loops into
+  4003). The v4 form is lifecycle-level: a BLOCKED episode whose reason is
+  `incompatible`/`occupied` (and only with `automatic_effects` on) arms a
+  5s/15s/30s backoff re-probe, then a 60 s steady-state re-probe
+  (`BLOCKED_RECHECK_DELAYS_SECONDS`), each recheck starting a fresh tagged
+  episode through `recover_blocked_episode` (stale-episode and state guards
+  refuse superseded timers). When the occupant was meanwhile replaced by a
+  compatible daemon the editor heals to READY without a restart. RS-021's
+  old connection-suite assertions are superseded — see
+  `tools/regression-scenarios.md`.
+- **Port pinning** (§13): `PortPins` + `ClientConfigurator._resolved_ports()`
+  keep 项目钉值 > EditorSettings (v4 endpoint override included) > 默认.
+- **Go-daemon-first spawn** (§2): `_effect_launch` prefers
+  `godot-ai-cli serve` via `utils/cli_daemon.gd`, with capability injection
+  (`spawn_capability_process`), falling back to the upstream Python spawn
+  only when no CLI binary exists.
+- **No telemetry** (§1): `telemetry.gd` stays a whole-file no-op stub on the
+  v4 interface (`OPT_OUT_EVENT` kept for parity; `assert_opt_out()` returns
+  false — nothing is ever sent).
+- **No in-editor self-update** (`ForkConfig.v4_self_update_disabled()`):
+  `_update_manager` is never constructed, the update banner is forced hidden,
+  `present_update_check` early-returns; plugin updates ride the CLI release
+  and land via `plugin install`.
+- **MCP client-config stays disabled** (§3):
+  `ForkConfig.mcp_client_config_disabled()` gates the `client` lazy handler
+  (3 wire commands), the dock rows/CTA/drift banner, and
+  `client_job_owner.request_status_refresh` (defense in depth).
+- **Fork-only commands**: `spriteframes` handler (+5 ops, now
+  `extends command_handler.gd` like every v4 handler), tileset physics ops,
+  `project continue`/`project focus`, input-map `list_actions` glob, the
+  `$node` reference encoding in `set_property`, the open-scene stale-disk
+  warning, the dispatcher's UNKNOWN_COMMAND stale-plugin hint
+  (`unknown_command_error`), and the beta.8/9/23 game-side features
+  (record_frames, debug_draw, eval print echo, break recovery,
+  compile-error attribution) — all re-applied at their v4 locations.
+- **Lazy-handler arithmetic**: upstream declares 30 handlers including
+  `client`; the fork gates `client` off (−1) and adds `spriteframes` (+1) —
+  the count stays 30 (`demo/tests/test_dispatcher.gd` pins it).
+
+### 16.3 Test-suite rebase (`demo/tests`)
+
+All 74 upstream v4.1.0 suites plus the `fixtures/` cross-language samples
+were mirrored (CRLF→LF normalized); the five fork-only suites
+(`cli_daemon`, `port_pins`, `spriteframes`, `tileset_physics`,
+`version_compat`) are kept. Suites pinning fork-removed v3 mechanisms were
+adapted rather than deleted so upstream refreshes stay diff-able:
+`test_plugin_telemetry` was rewritten against the stub contract; `clients` /
+`plugin_lifecycle` stash and clear the project port-pin file around their
+upstream port assertions; `dock` / `plugin_lifecycle` fork-gate the four
+tests that pin hidden UI; `server_lifecycle` gained the D1 re-probe block
+(driven through a canned-effect subclass — `automatic_effects=true` would
+otherwise run a REAL probe against the configured port). The old fork-only
+`test_plugin_lifecycle` walk tests (resolved-port reuse, managed-record
+pins, `McpStartupPath`, `handle_server_version_verified`) were NOT ported —
+they pin v3 mechanisms the lifecycle manager deleted, and the mirrored v4
+suite covers the same ground. Green baseline (Godot 4.7.2 headless):
+79 suites / 2519 tests / 0 failed / 0 load errors (see
+`../demo/tests/README.md`).
+
+## 17. beta.24 requirement batch (8 user-requested features)
+
+Landed after the v4.1.0 rebase, each with unit tests + a
+`tools/regression-scenarios.md` entry (RS-024…RS-029):
+
+- **`image cells`** (`internal/image/cells.go`, `internal/cli/image.go`):
+  per-cell alpha occupancy + bbox for sprite sheets (partial edge cells
+  counted, `--region` windowing, falls back to the best `grid-detect`
+  candidate); `grid-detect` gained a forced-grid verification mode
+  (`--cell WxH` / `--cols N --rows M` → `forced:true`, `GRID_MISMATCH` on
+  inconsistency) and empty-candidate `reason`/`hints`/`factor_candidates`.
+  (RS-024)
+- **`script run`** (`internal/cli/script_run.go`): standalone engine
+  `--script` probe with no editor session or daemon; resolves the Godot
+  binary like `launch`, prefers the `<name>_console.exe` variant on Windows
+  so stdout is capturable, returns exit_code + stdout/stderr + duration_ms.
+  (RS-025)
+- **`test run` play-state visibility** (`testing/test_runner.gd`,
+  `handlers/test_handler.gd`): the result aggregates `assertions`;
+  `game_status{active,status,readiness}` rides every response; failures
+  during play carry `play_state_warning`; new `--require-idle-session` flag
+  refuses with `EDITOR_NOT_READY`/`EDITOR_PLAYING` (retryable:false) instead
+  of producing misleading results. (RS-026)
+- **`editor eval --syntax-only`** (`handlers/editor_handler.gd`): an
+  editor-process compile check (same wrapper template as the game side) that
+  never executes, never breaks, and needs no running game — answers
+  `{ok:true, source:"editor", checked_bytes}` or `EVAL_COMPILE_ERROR` with
+  `code_echo` (+ PowerShell quote hint / headless no-Parse-Error fallback
+  hint). (RS-027)
+- **Eval break-snapshot + F2/F3** (`debugger/mcp_debugger_plugin.gd`,
+  `runtime/game_helper.gd`): the rescan path of `EVAL_COMPILE_ERROR` keeps
+  the pre-continue game state as `game_status_before_continue`
+  (status `break` + `break.reason`); the game side now sends
+  `EVAL_COMPILE_ERROR` as its `mcp:eval_error` code (whitelisted editor-side)
+  so an external `project continue` inside the grace window no longer
+  degrades the reply to a bare INTERNAL_ERROR; the stale head comment was
+  corrected. (RS-028)
+- **Mouse-aim input** (`runtime/game_helper.gd`): `game input-warp`
+  (`--position` + `--space window|canvas|world`, real `Input.warp_mouse`,
+  three-space echo, `clamped:true` + actual landing when the OS clamps),
+  `game get-mouse` (window/canvas/world readback), and `input-mouse` now
+  admits `affects_mouse_position:false` in its payload and help. (RS-029)
+
+Also in beta.24: `game debug-control` (suspend/resume/next_frame/debug_status
+through the debugger channel) and `resource physics-shape-generate`
+(batch collision-shape generation for 3D scenes).
+
+Regression fixes caught by the beta.24 cold-start replay (Agent Teams,
+4 lanes, RS-001…RS-029):
+
+- **Go-daemon brand equivalence** (`utils/port_resolver.gd`, RS-016 step 5):
+  upstream's `commandline_is_godot_ai_server` demands `--pid-file` /
+  `--transport` in the command line (the Python server's shape), so the
+  fork-spawned Go daemon (`godot-ai-cli serve --http-port N --ws-port M`)
+  failed the brand check and never got a kill grant (unbranded →
+  launch_unproven — the daemon ran but the plugin could not authenticate).
+  The brand check now also accepts the Go shape (brand + ` serve ` +
+  `--http-port`); pinned by `test_brand_accepts_go_daemon_serve_shape`.
+- **Plugin-written pid file for the Go daemon** (`utils/server_lifecycle.gd`,
+  same RS-016 step 5 replay): `_effect_prove`'s pid_file gate waits on a
+  file only the Python backend ever wrote, so the prove stage timed out
+  even after the brand fix. `_effect_launch_cli_daemon` now pre-clears the
+  pid file and publishes it itself after a successful spawn
+  (`_publish_launch_pid_file`), keeping every downstream reader (prove
+  gate, stop/replace `server_pid`) consistent.
+- **Lane-artifact self-skip** (`demo/tests/test_clients.gd`):
+  `test_addons_dir_is_symlink_detects_canonical_layout` now skips itself on
+  replay-lane materialized addon copies (real directory, not junction)
+  instead of failing there — it still runs and passes in the canonical
+  checkout layout.
+- **RS-018 adjudication**: the v3-era cross-version soft-warning +
+  eval-roundtrip expectation is marked historical in the registry — v4
+  peers fail closed (4002/4003) by design.
+
 

@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --format md` (159 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --format md` (163 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --format md
@@ -22,17 +22,17 @@ Conventions applying to every op:
 - Every op also accepts `--session <id>` (pin to one connected editor when several are attached) and `--params '<json>'` (base wire params; explicit flags override colliding keys).
 - Optional flags left at their zero value are omitted from the wire params.
 - `[write]` ops are gated on editor writability: while the editor is importing or playing they fail with `EDITOR_NOT_READY` (see references/troubleshooting.md).
-- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem scan` 30s, `batch execute` 30s.
+- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem scan` 30s, `resource physics-shape-generate` 30s, `batch execute` 30s.
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
 - CLI-side extras not in the wire params: `editor eval` also accepts `--code-file`, `--code-stdin`, `--code-b64`; `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`; `node set-property` also accepts `--node-ref`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
 
-Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` / `image view` (local texture palette analysis / pixel sampling / sprite-sheet grid detection / nearest-neighbor upscale for inspection — no editor needed), `tilemap dump` / `tilemap render` (local .tscn TileMapLayer decode / PNG composite — no editor needed), plus `launch` (pins the daemon ports per project in `.godot/godot_ai_ports.json`, never the global EditorSettings; `--dry-run` prints the plugin write plan — files that would be written, git tracked/untracked impact, whether project.godot would be enabled — and exits WITHOUT probing Godot, starting the daemon or opening an editor; `--no-plugin-upgrade` refuses to rewrite `addons/godot_ai` when the project plugin version differs from the bundled one (`PLUGIN_VERSION_MISMATCH` + the same plan payload) instead of dirtying a version-controlled addon tree; the ready payload reports the step as a structured `plugin` object with `files_changed` / `files_created` / `git_dirty`; `--upgrade-daemon` replaces a mismatched old daemon WITHOUT quitting its editors (the replacement inherits the old daemon's actual WS port unless `--ws-port` is given), then waits (up to 75s) for the kept editors to reconnect and reuses their sessions instead of spawning duplicates; `EDITOR_ALREADY_OPEN` blocks double-opening a project another daemon already hosts — `--force-spawn` overrides at file-lock/save risk) / `stop` (quits CLI-launched editor sessions, shuts the daemon down, and removes the per-project port pins; user-opened editors are kept and reported as `kept_sessions` — `--all` quits every session, `--session <id>` quits exactly one regardless of origin) / `status` (daemon + sessions with per-session `origin`, plus `known_daemons`: every recorded daemon on this machine probed live, and `ports_override_active` covering both per-project port files and legacy global pins) / `serve` / `godot detect` / `godot use` / `plugin install` (`--dry-run` prints the plan; `--version` is a guard — this CLI embeds exactly one plugin version) / `plugin status` (read-only: installed/enabled, bundled vs project version, `compatible` by major.minor, and the pending `would_update` / `would_create` lists with git tracked/untracked counts) / `update` / `version` / `commands`.
+Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` / `image cells` / `image view` (local texture palette analysis / pixel sampling / sprite-sheet grid detection with forced-grid verification (`--cell WxH` / `--cols N --rows M`) and empty-candidate reason+hints+factor_candidates / per-cell alpha occupancy + bbox / nearest-neighbor upscale for inspection — no editor needed), `script run` (standalone engine `--script` probe — no editor session or daemon; resolves the Godot binary like launch, prefers the `<name>_console.exe` variant on Windows so stdout is capturable, returns exit_code + stdout/stderr + duration_ms; writes a `.godot/` import cache into --project on first run), `tilemap dump` / `tilemap render` (local .tscn TileMapLayer decode / PNG composite — no editor needed), plus `launch` (pins the daemon ports per project in `.godot/godot_ai_ports.json`, never the global EditorSettings; `--dry-run` prints the plugin write plan — files that would be written, git tracked/untracked impact, whether project.godot would be enabled — and exits WITHOUT probing Godot, starting the daemon or opening an editor; `--no-plugin-upgrade` refuses to rewrite `addons/godot_ai` when the project plugin version differs from the bundled one (`PLUGIN_VERSION_MISMATCH` + the same plan payload) instead of dirtying a version-controlled addon tree; the ready payload reports the step as a structured `plugin` object with `files_changed` / `files_created` / `git_dirty`; `--upgrade-daemon` replaces a mismatched old daemon WITHOUT quitting its editors (the replacement inherits the old daemon's actual WS port unless `--ws-port` is given), then waits (up to 75s) for the kept editors to reconnect and reuses their sessions instead of spawning duplicates; `EDITOR_ALREADY_OPEN` blocks double-opening a project another daemon already hosts — `--force-spawn` overrides at file-lock/save risk) / `stop` (quits CLI-launched editor sessions, shuts the daemon down, and removes the per-project port pins; user-opened editors are kept and reported as `kept_sessions` — `--all` quits every session, `--session <id>` quits exactly one regardless of origin) / `status` (daemon + sessions with per-session `origin`, plus `known_daemons`: every recorded daemon on this machine probed live, and `ports_override_active` covering both per-project port files and legacy global pins) / `serve` / `godot detect` / `godot use` / `plugin install` (`--dry-run` prints the plan; `--version` is a guard — this CLI embeds exactly one plugin version) / `plugin status` (read-only: installed/enabled, bundled vs project version, `compatible` by major.minor, and the pending `would_update` / `would_create` lists with git tracked/untracked counts) / `update` / `version` / `commands`.
 
 ## editor (9 ops)
 
 ### `editor eval` — Evaluate GDScript code inside the running game
-`game_eval` · 15s · --code string (required), --echo-prints bool (default "false")
+`game_eval` · 15s · --code string (required), --echo-prints bool (default "false"), --syntax-only bool (default "false")
 CLI-side flags (not wire params): `--code-file` string — read the GDScript source from this UTF-8 file (a leading BOM is tolerated) instead of --code; `--code-stdin` bool (default "false") — read the GDScript source from stdin instead of --code (a terminal stdin is an error, never a hang); `--code-b64` string — base64-encoded GDScript source: fallback for shells/pipelines that cannot carry quotes
 Response: {"result","source"}; result is the value of the code's explicit return (null for plain statements). --echo-prints adds "prints": the print()/printerr() lines this eval produced. Errors are {"status":"error","error":{code,message,data}}; a compile failure (EVAL_COMPILE_ERROR) adds data.code_echo (the exact code the plugin compiled), data.parse_errors (the engine's Parse Error lines), data.hint and data.game_status.
 Example: `editor eval --code 'print($Player.position)' --echo-prints` → `{"result":null,"source":"game","prints":["(144, 136)\n"]}` — no follow-up `logs read` needed.
@@ -186,7 +186,8 @@ Uses DisplayServer.window_move_to_foreground — the recovery when eval reports 
 `get_test_results` · 8s · --verbose bool (default "false")
 
 ### `test run` — Run GDScript test suites in the editor
-`run_tests` · 300s · --suite string, --test-name string, --exclude-test-name string, --verbose bool (default "false")
+`run_tests` · 300s · --suite string, --test-name string, --exclude-test-name string, --verbose bool (default "false"), --require-idle-session bool (default "false")
+Response: Fields: passed / failed / skipped / total / assertions (Σ per-test assertion_count, no --verbose needed) / duration_ms / suite_count / suites_run / edited_scene / game_status (always present: active + status + readiness; a live game makes the no-game-precondition suites fail deterministically). Optional: scene_warning / play_state_warning (failed>0 with a live game) / failures (failed>0) / load_errors / results (only --verbose). Empty-value fields are omitted — absent means none.
 
 ## animation (16 ops)
 
@@ -364,12 +365,20 @@ Uses DisplayServer.window_move_to_foreground — the recovery when eval reports 
 ### `input-map remove-action` — Remove an input action and its bindings
 `remove_action` · 8s · **[write]** · --action string (required)
 
-## game (10 ops)
+## game (13 ops)
+
+### `game debug-control` — Suspend/resume/step the running game via the editor debugger bridge
+`game_debug_control` · 15s · --action string (required)
+Response: {"action","status","frames_advanced"} — debug_status reports whether the game is currently suspended; next_frame advances exactly one frame while suspended.
 
 ### `game debug-draw` — Toggle engine debug rendering (collision shapes, paths, navigation) in the running game
 `game_command` · 15s · --collisions string, --paths string, --navigation string
 Response: {"debug_collisions_hint","debug_paths_hint","debug_navigation_hint"} — the current states after applying the given flags. Pair with editor screenshot --source game (or editor record) to verify collision-shape fit visually.
 Debug outlines ARE included in the game framebuffer capture; a capture flagged `stale_frame` predates your change (frozen/backgrounded game), retry with a live loop.
+
+### `game get-mouse` — Read the current mouse position in window/canvas/world coordinate spaces
+`game_command` · 15s · no flags
+Response: Returns mouse_window / mouse_canvas / mouse_world — use after input-warp (or during play) to verify the aim is where the script intends.
 
 ### `game get-node-info` — Property snapshot of a node in the running game
 `game_command` · 15s · --path string (required), --include-properties bool (default "true"), --fields json
@@ -391,12 +400,17 @@ Debug outlines ARE included in the game framebuffer capture; a capture flagged `
 
 ### `game input-mouse` — Send a mouse event to the running game
 `game_command` · 15s · --event string (required), --position json, --button string (default "left"), --pressed bool (default "true")
+Response: Synthetic events do NOT enter the viewport mouse state — the payload carries "affects_mouse_position": false and get_global_mouse_position() is unchanged. To actually move the aim use game input-warp; read back with game get-mouse.
 
 ### `game input-sequence` — Drive a frame-timed action timeline in the running game
 `game_command` · 30s · --steps json (required), --settle-frames int (default "0")
 
 ### `game input-state` — Read currently pressed input actions in the running game
 `game_command` · 15s · --actions json
+
+### `game input-warp` — Warp the OS mouse cursor so the game's aim actually follows (Input.warp_mouse + coordinate echo)
+`game_command` · 15s · --position json (required), --space string (default "window")
+Response: Echoes all three coordinate spaces: mouse_window (window client pixels — what Input.warp_mouse takes), mouse_canvas (viewport/stretch space), mouse_world (what get_global_mouse_position() returns). clamped:true + actual position when the OS clamped the warp (target outside window/screen).
 
 ## autoload (3 ops)
 
@@ -460,7 +474,7 @@ Debug outlines ARE included in the game framebuffer capture; a capture flagged `
 ### `ui set-text` — Set the text of a Label/Button/RichTextLabel
 `set_text` · 8s · **[write]** · --path string (required), --text string (required)
 
-## resource (15 ops)
+## resource (16 ops)
 
 ### `resource assign` — Assign a resource to a node's property
 `assign_resource` · 8s · **[write]** · --path string (required), --property string (required), --resource-path string (required)
@@ -488,6 +502,9 @@ Debug outlines ARE included in the game framebuffer capture; a capture flagged `
 
 ### `resource physics-shape-autofit` — Auto-fit a collision shape to a node's geometry
 `physics_shape_autofit` · 8s · **[write]** · --path string (required), --source-path string, --shape-type string
+
+### `resource physics-shape-generate` — Batch-generate collision bodies+shapes for MeshInstance3D nodes
+`physics_shape_generate` · 30s · **[write]** · --paths json (required), --shape-type string (default "box"), --body-type string (default "static"), --scene-file string
 
 ### `resource search` — Search resources by type and path prefix
 `search_resources` · 8s · --type string, --path string, --offset int (default "0"), --limit int (default "100")

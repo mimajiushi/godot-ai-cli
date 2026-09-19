@@ -17,7 +17,7 @@ UI, materials, animation, particles, cameras, environments, tilemaps, tests,
 screenshots and more — as plain subcommands that print JSON. Any agent that can
 run a shell command can drive Godot.
 
-- **Supported Godot:** 4.5+ (4.7+ recommended), standard or .NET (Mono) builds
+- **Supported Godot:** 4.7+ (the 4.x line only — 4.5/4.6 and 5.x are refused at launch), standard or .NET (Mono) builds
 - **Platforms:** Windows, macOS, Linux (amd64 & arm64)
 
 ## Install
@@ -100,7 +100,7 @@ checks GitHub Releases and offers to update in place.
 
 ## Using it in your own project
 
-- **Prerequisite:** a Godot **4.5+** project (a directory containing
+- **Prerequisite:** a Godot **4.7+** project (a directory containing
   `project.godot`). Run `godot-ai-cli -v` first — it prints the supported
   Godot range and the bundled plugin version the project will be aligned to.
 - **Godot binary:** `launch` resolves the editor from `--godot`, then
@@ -237,12 +237,13 @@ script/build-release.sh` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Relationship to hi-godot/godot-ai
 
-The editor plugin under `plugin/godot_ai/` is a fork of upstream v3.2.5 with
+The editor plugin under `plugin/godot_ai/` is a fork of upstream v4.1.0 with
 telemetry removed and the Python server spawn disabled (the Go daemon replaces
-the Python backend entirely). Every divergence is marked `godot-ai-cli fork
-patch` in the GDScript source and enumerated in
-[docs/fork-patches.md](docs/fork-patches.md). Upstream license: MIT, "Godot AI
-contributors". See `UPSTREAM-LICENSE.txt`.
+the Python backend entirely and implements the v4 authenticated transport —
+capability-record discovery plus an HMAC proof handshake — itself). Every
+divergence is marked `godot-ai-cli fork patch` in the GDScript source and
+enumerated in [docs/fork-patches.md](docs/fork-patches.md). Upstream license:
+MIT, "Godot AI contributors". See `UPSTREAM-LICENSE.txt`.
 
 ## License
 

@@ -209,6 +209,19 @@ func resourceOps() []OpSpec {
 			},
 		},
 		{
+			// 上游 v4 原生命令：批量为 MeshInstance3D 生成碰撞体（StaticBody3D/Area3D
+			// + 形状子节点），插件侧 30s deferred 预算 → ScanTimeout。
+			Domain: "resource", Name: "physics-shape-generate", PluginCommand: "physics_shape_generate",
+			Summary: "Batch-generate collision bodies+shapes for MeshInstance3D nodes",
+			Timeout: ScanTimeout, Write: true,
+			Params: []ParamSpec{
+				pj("paths", "paths", true, `JSON array of MeshInstance3D scene paths, e.g. ["Root/MeshA"] (max 1024)`),
+				ps("shape-type", "shape_type", false, "box", "box | sphere | capsule | cylinder"),
+				ps("body-type", "body_type", false, "static", "static | area"),
+				ps("scene-file", "scene_file", false, "", "Scene file to edit (default: currently edited scene)"),
+			},
+		},
+		{
 			Domain: "resource", Name: "gradient-texture-create", PluginCommand: "gradient_texture_create",
 			Summary: "Create a GradientTexture2D resource",
 			Timeout: DefaultTimeout, Write: true,

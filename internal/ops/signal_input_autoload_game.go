@@ -189,12 +189,32 @@ func gameOps() []OpSpec {
 			Domain: "game", Name: "input-mouse", PluginCommand: "game_command", WrapOp: "input_mouse",
 			Summary: "Send a mouse event to the running game",
 			Timeout: GameTimeout,
+			// fork 补丁：合成事件不进 viewport 鼠标状态，返回值里明说
+			ResponseNote: `Synthetic events do NOT enter the viewport mouse state — the payload carries "affects_mouse_position": false and get_global_mouse_position() is unchanged. To actually move the aim use game input-warp; read back with game get-mouse.`,
 			Params: []ParamSpec{
 				ps("event", "event", true, "", "button | motion"),
 				pj("position", "position", false, `JSON {"x":..,"y":..} position`),
 				ps("button", "button", false, "left", "left | right | middle | wheel_up | wheel_down"),
 				pb("pressed", "pressed", false, "true", "true = press, false = release"),
 			},
+		},
+		{
+			// fork 补丁（game_helper.gd input_warp）：鼠标瞄准类玩法的真实鼠标控制
+			Domain: "game", Name: "input-warp", PluginCommand: "game_command", WrapOp: "input_warp",
+			Summary:      "Warp the OS mouse cursor so the game's aim actually follows (Input.warp_mouse + coordinate echo)",
+			Timeout:      GameTimeout,
+			ResponseNote: `Echoes all three coordinate spaces: mouse_window (window client pixels — what Input.warp_mouse takes), mouse_canvas (viewport/stretch space), mouse_world (what get_global_mouse_position() returns). clamped:true + actual position when the OS clamped the warp (target outside window/screen).`,
+			Params: []ParamSpec{
+				pj("position", "position", true, `JSON {"x":..,"y":..} target position`),
+				ps("space", "space", false, "window", "Coordinate space of --position: window (client pixels) | canvas (viewport/stretch) | world (game world)"),
+			},
+		},
+		{
+			// fork 补丁（game_helper.gd get_mouse）：瞄准到位自检
+			Domain: "game", Name: "get-mouse", PluginCommand: "game_command", WrapOp: "get_mouse",
+			Summary:      "Read the current mouse position in window/canvas/world coordinate spaces",
+			Timeout:      GameTimeout,
+			ResponseNote: `Returns mouse_window / mouse_canvas / mouse_world — use after input-warp (or during play) to verify the aim is where the script intends.`,
 		},
 		{
 			Domain: "game", Name: "input-gamepad", PluginCommand: "game_command", WrapOp: "input_gamepad",
@@ -247,6 +267,19 @@ func gameOps() []OpSpec {
 				ps("collisions", "collisions", false, "", "on | off (omit to leave unchanged)"),
 				ps("paths", "paths", false, "", "on | off (omit to leave unchanged)"),
 				ps("navigation", "navigation", false, "", "on | off (omit to leave unchanged)"),
+			},
+		},
+		{
+			// 上游 v4 原生命令（非 game_command 包装）：走编辑器调试桥的
+			// suspend/resume/next_frame/debug_status。
+			Domain: "game", Name: "debug-control", PluginCommand: "game_debug_control",
+			Summary: "Suspend/resume/step the running game via the editor debugger bridge",
+			Timeout: GameTimeout,
+			ResponseNote: `{"action","status","frames_advanced"} — debug_status reports
+  whether the game is currently suspended; next_frame advances exactly one frame
+  while suspended.`,
+			Params: []ParamSpec{
+				ps("action", "action", true, "", "suspend | resume | next_frame | debug_status"),
 			},
 		},
 	}

@@ -379,7 +379,7 @@ func TestExecuteOpRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{"echo": params["property"]}}
 	})
@@ -418,7 +418,7 @@ func TestCallEscapeHatch(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{
 			Status: "error",
@@ -452,7 +452,7 @@ func TestCustomListRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.PushEvent("custom_tools_changed", map[string]any{
 		"tools": []any{map[string]any{"name": "my_tool", "enabled": true}},
 	})
@@ -491,7 +491,7 @@ func TestBoolFlagValueCompat(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 
-	plugin := mockplugin.Dial(t, d.Bridge().Addr(), nil)
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
 	plugin.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
 		return &mockplugin.Response{Data: map[string]any{"ok": true}}
 	})

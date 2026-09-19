@@ -126,11 +126,15 @@ func testOps() []OpSpec {
 			Domain: "test", Name: "run", PluginCommand: "run_tests",
 			Summary: "Run GDScript test suites in the editor",
 			Timeout: TestRunTimeout,
+			// fork：字段口径文档化（test-run-response-fields-doc 需求）
+			ResponseNote: "Fields: passed / failed / skipped / total / assertions (Σ per-test assertion_count, no --verbose needed) / duration_ms / suite_count / suites_run / edited_scene / game_status (always present: active + status + readiness; a live game makes the no-game-precondition suites fail deterministically). Optional: scene_warning / play_state_warning (failed>0 with a live game) / failures (failed>0) / load_errors / results (only --verbose). Empty-value fields are omitted — absent means none.",
 			Params: []ParamSpec{
 				ps("suite", "suite", false, "", "Run only this suite"),
 				ps("test-name", "test_name", false, "", "Run only this test"),
 				ps("exclude-test-name", "exclude_test_name", false, "", "Skip this test"),
 				pb("verbose", "verbose", false, "false", "Verbose per-test output"),
+				// fork 补丁（test_handler.gd）：live 游戏时 EDITOR_NOT_READY 拒绝
+				pb("require-idle-session", "require_idle_session", false, "false", "Refuse with EDITOR_NOT_READY/EDITOR_PLAYING when a game run is live (guards CI from phantom no-game failures)"),
 			},
 		},
 		{

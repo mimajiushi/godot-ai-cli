@@ -117,6 +117,8 @@ func editorOps() []OpSpec {
 			Params: []ParamSpec{
 				ps("code", "code", true, "", "GDScript source to evaluate in the game context"),
 				pb("echo-prints", "echo_prints", false, "false", `Also return the print()/printerr() lines produced during this eval as "prints"`),
+				// fork 补丁（editor_handler.gd）：编辑器进程编译检查，不碰游戏
+				pb("syntax-only", "syntax_only", false, "false", "Compile-check only in the editor process — no execution, no debugger break, no running game required (ok:true or EVAL_COMPILE_ERROR with parse_errors)"),
 			},
 			// CLI-side code channels: the code travels as the one `code` wire
 			// param, so the plugin-facing contract is unchanged.

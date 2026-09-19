@@ -47,6 +47,9 @@ func newDomainCommands() []*cobra.Command {
 			parent.AddCommand(newCustomListCommand(), newCustomInvokeCommand())
 		case "tilemap":
 			parent.AddCommand(newTilemapDumpCommand(), newTilemapRenderCommand())
+		case "script":
+			// 本地探针执行，不经 daemon（需求：headless script run）。
+			parent.AddCommand(newScriptRunCommand())
 		}
 		cmds = append(cmds, parent)
 	}

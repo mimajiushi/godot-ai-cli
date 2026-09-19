@@ -1396,6 +1396,13 @@ func _send_eval(
 		"grace_callable": grace_callable,
 		"acked": false,
 		"compiled": false,
+		## godot-ai-cli fork patch：编译失败归因所需的上下文。code_echo 让
+		## "引号被 shell 吞掉"这类参数传输问题一眼可见；两个游标把 Parse
+		## Error 行限定在"本次 eval 发出之后新出现"的范围内，避免串上一次
+		## eval 的错误文本。
+		"code": code,
+		"editor_cursor": _editor_log_cursor(),
+		"debugger_cursor": _debugger_promoted_cursor(),
 	}
 
 	## godot-ai-cli fork patch: echo_prints rides as a third element; older
@@ -1518,6 +1525,97 @@ func _parse_eval_prints(data: Array, index: int) -> Variant:
 	return prints_json.data
 
 
+## godot-ai-cli fork patch：一次编译错误最多回传的 Parse Error 条数（超出置
+## truncated=true）——一次解析风暴不该把响应撑爆。
+const EVAL_PARSE_ERROR_MAX := 5
+
+
+## godot-ai-cli fork patch：本次 eval 起点的 Debugger 提升序列游标（无 tracker
+## 时返回 0，等价于"不过滤"）。
+func _debugger_promoted_cursor() -> int:
+	if _surfaced_error_tracker == null:
+		return 0
+	return _surfaced_error_tracker.debugger_promoted_total(false)
+
+
+## godot-ai-cli fork patch：编译失败的错误文案。原文保留（既有调用方/文案匹配
+## 不破），另把"引号可能是被 PowerShell 5.1 吞掉的"直接写进 message。
+## parse_errors 是否为空取自即将回传的 data，保证 message 与 data 一致。
+func _eval_compile_message(code: String, data: Dictionary) -> String:
+	var base := ("Game eval failed to compile — likely a GDScript syntax/parse error. "
+		+ "The engine's Parse Error text (when the editor's Debugger Errors tab captured it) "
+		+ "rides back in error.data.parse_errors; error.data.code_echo is the code the plugin "
+		+ "actually compiled.")
+	var empty_parse_errors: Array = data.get("parse_errors", [])
+	var hint := _eval_quote_hint(code, empty_parse_errors.is_empty())
+	if not hint.is_empty():
+		base += " " + hint
+	return base
+
+
+## godot-ai-cli fork patch：编译失败的错误 data —— code_echo（实际编译的代码）、
+## parse_errors（引擎 Parse Error 原文）、game_status（此时往往已停在 break）、
+## hint（自查提示）与 truncated。只回传本次 eval 之后新提升的错误行。
+func _eval_compile_error_data(code: String, editor_cursor: int, debugger_cursor: int) -> Dictionary:
+	var parse_errors: Array[Dictionary] = []
+	var truncated := false
+	if _surfaced_error_tracker != null:
+		var captured: Dictionary = _surfaced_error_tracker.editor_entries_since(
+			editor_cursor, debugger_cursor, true)
+		truncated = bool(captured.get("truncated", false))
+		for raw_entry in captured.get("entries", []):
+			if not raw_entry is Dictionary:
+				continue
+			var entry: Dictionary = raw_entry
+			if str(entry.get("level", "")) != "error":
+				continue
+			var text := str(entry.get("text", ""))
+			if not text.to_lower().contains("parse error"):
+				continue
+			parse_errors.append({
+				"text": text,
+				"path": str(entry.get("path", "")),
+				"line": int(entry.get("line", 0)),
+			})
+			if parse_errors.size() >= EVAL_PARSE_ERROR_MAX:
+				truncated = true
+				break
+	var data := {
+		"code_echo": code,
+		"parse_errors": parse_errors,
+		"game_status": get_game_status(-1, EVAL_READY_WAIT_SEC),
+	}
+	if truncated:
+		data["truncated"] = true
+	var hint := _eval_quote_hint(code, parse_errors.is_empty())
+	if not hint.is_empty():
+		data["hint"] = hint
+	return data
+
+
+## godot-ai-cli fork patch：自查提示。代码含双引号 + 编译失败 → 直接给出两条
+## 出路；Parse Error 一条都没抓到 → 说明该来源（Debugger 面板，headless 编辑器
+## 不填充）并给 logs read 兜底命令。
+func _eval_quote_hint(code: String, parse_errors_empty: bool) -> String:
+	var parts: Array[String] = []
+	if code.contains("\""):
+		parts.append("the code contains double quotes: if it was passed through Windows PowerShell 5.1 they were stripped from the argument — escape them as \\\" or pass the code with --code-file/--code-stdin")
+	if parse_errors_empty:
+		parts.append("no Parse Error line was captured for this failure (the editor's Debugger Errors tab is the source at reply time) — `godot-ai-cli logs read --source editor --tail 25` has the raw text")
+	return "; ".join(parts)
+
+
+## godot-ai-cli fork patch：编译错误带 Parse Error 原文的重扫窗口。
+## 实测（RS-022，插件 3.2.13）：引擎的 Parse Error 行要在补发 continue、断点
+## 恢复之后才被提升到编辑器侧（编辑器日志里可见于回复后约 0.7s），所以第一次
+## 抓不到时先补发 continue、等这么久再抓一次。失败路径本就已经等了 3s 宽限，
+## 多 1s 换回真实引擎原文是划算的；成功路径一分钱不花。
+const EVAL_PARSE_ERROR_RESCAN_SEC := 1.0
+## 测试/诊断探针：重扫前的等待（生产用 SceneTreeTimer；测试注入同步 waiter，
+## 与 _eval_ready_frame_waiter 同一手法）。
+var _compile_error_rescan_waiter: Callable = Callable()
+
+
 ## #518: codes the game side may attach as mcp:eval_error's optional third
 ## payload element. Allowlisted so a game process can't mint arbitrary
 ## top-level error codes over the debugger channel; anything else (including
@@ -1550,6 +1648,10 @@ func _on_eval_error(data: Array) -> void:
 	var prints = _parse_eval_prints(data, 3)
 	if prints != null:
 		err["error"]["prints"] = prints
+		## godot-ai-cli fork patch：CLI 侧的 bridge 只把 error.data 映射进
+		## CommandError（error 层的自定义键会被丢弃），因此同一份 prints 在
+		## data 里再带一份，CLI 才真的收得到。
+		err["error"]["data"] = {"prints": prints}
 	_send_error_response(connection, request_id, err)
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_error (%s): %s" % [request_id, message])
@@ -1589,15 +1691,53 @@ func _on_eval_grace(request_id: String) -> void:
 		if _log_buffer:
 			_log_buffer.log("[debug] eval grace: no ack yet, deferring to timeout (%s)" % request_id)
 		return
+	## godot-ai-cli fork patch：归因上下文必须在 _clear_pending 之前取出——
+	## clear 会把整个 pending 条目 erase 掉（code / 两个游标都在里面）。
+	var code := str(pending_entry.get("code", ""))
+	var editor_cursor := int(pending_entry.get("editor_cursor", 0))
+	var debugger_cursor := int(pending_entry.get("debugger_cursor", 0))
 	_clear_pending(request_id)
 	var conn: McpConnection = pending_entry.connection
 	if conn == null or not is_instance_valid(conn):
 		return
-	_send_error(conn, request_id, ErrorCodes.EVAL_COMPILE_ERROR,
-		"Game eval failed to compile — likely a GDScript syntax/parse error. The parse error text is in the editor's Output/Debugger panel; it is not capturable from the running game. Check your eval code's syntax.")
+	## godot-ai-cli fork patch：不再只说"去看编辑器面板"——Parse Error 原文、
+	## 实际编译的代码、可执行 hint 与游戏状态一并回传。
+	var data := _eval_compile_error_data(code, editor_cursor, debugger_cursor)
+	if data["parse_errors"].is_empty():
+		## Parse Error 行是"报错 → 断点恢复"之后才提升到编辑器侧的（实测回复
+		## 后约 0.7s），所以先补发 continue，重扫一次再回复——否则这次的 data
+		## 永远拿不到引擎原文。
+		_auto_continue_after_eval_error(request_id)
+		_send_compile_error_after_rescan(conn, request_id, code, editor_cursor, debugger_cursor)
+		return
+	_send_compile_error(conn, request_id, code, data)
 	if _log_buffer:
 		_log_buffer.log("[debug] !! eval compile error (%s)" % request_id)
 	_auto_continue_after_eval_error(request_id)
+
+
+## godot-ai-cli fork patch：单点发送编译错误回复（延迟路径与即时路径共用）。
+func _send_compile_error(conn: McpConnection, request_id: String, code: String, data: Dictionary) -> void:
+	var err := ErrorCodes.make(ErrorCodes.EVAL_COMPILE_ERROR, _eval_compile_message(code, data))
+	err["error"]["data"] = data
+	_send_error_response(conn, request_id, err)
+
+
+## godot-ai-cli fork patch：等 EVAL_PARSE_ERROR_RESCAN_SEC 后重扫一次再回复。
+## 这一次回复已经是最终答案，不再循环等待（拿不到就靠 hint 指 logs read）。
+func _send_compile_error_after_rescan(
+	conn: McpConnection, request_id: String, code: String, editor_cursor: int, debugger_cursor: int
+) -> void:
+	var tree := Engine.get_main_loop() as SceneTree
+	if _compile_error_rescan_waiter.is_valid():
+		await _compile_error_rescan_waiter.call()
+	elif tree != null:
+		await tree.create_timer(EVAL_PARSE_ERROR_RESCAN_SEC).timeout
+	var data := _eval_compile_error_data(code, editor_cursor, debugger_cursor)
+	_send_compile_error(conn, request_id, code, data)
+	if _log_buffer:
+		_log_buffer.log("[debug] !! eval compile error after rescan (%s, parse_errors=%d)"
+			% [request_id, data["parse_errors"].size()])
 
 
 ## #490: the game sends this the instant reload() of the eval source
@@ -1642,6 +1782,9 @@ func _on_eval_runtime_error(data: Array) -> void:
 	var prints = _parse_eval_prints(data, 2)
 	if prints != null:
 		err["error"]["prints"] = prints
+		## godot-ai-cli fork patch：同上——bridge 只保留 error.data，CLI 要靠
+		## data.prints 才看得到崩溃前的输出。
+		err["error"]["data"] = {"prints": prints}
 	_send_error_response(connection, request_id, err)
 	if _log_buffer:
 		_log_buffer.log("[debug] <- mcp:eval_runtime_error (%s): %s" % [request_id, message])

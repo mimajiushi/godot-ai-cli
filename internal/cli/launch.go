@@ -35,34 +35,59 @@ func jsonError(cmd *cobra.Command, code, message string, data map[string]any) er
 	return &reportedError{err: exitError(code)}
 }
 
+// pluginUpgradeRefusal renders PLUGIN_VERSION_MISMATCH for a plan that would
+// rewrite a differently-versioned addons/godot_ai: the refusal happens BEFORE
+// any write, and it names the file/git impact so "upgrade or not" stays an
+// informed decision instead of a silent edit of version-controlled files.
+func pluginUpgradeRefusal(cmd *cobra.Command, plan plugin.Plan) error {
+	data := plan.JSON()
+	data["hint"] = fmt.Sprintf(
+		"project plugin %s ≠ bundled %s; re-run without --no-plugin-upgrade to update the addon tree, or install the CLI release that bundles %s (see `godot-ai-cli -v`)",
+		plan.InstalledVersion, plan.BundledVersion, plan.InstalledVersion)
+	return jsonError(cmd, "PLUGIN_VERSION_MISMATCH",
+		"Project plugin version differs from the bundled plugin; refusing to modify the project without explicit consent", data)
+}
+
 // newLaunchCommand implements the zero-manual-step startup:
-// find Godot → check version → install/enable the plugin → ensure the
-// daemon → launch the editor detached → wait for the plugin handshake.
+// check the project → preview/gate the plugin step (--dry-run /
+// --no-plugin-upgrade) → find Godot → check its version → install/enable the
+// plugin → ensure the daemon → launch the editor detached → wait for the
+// plugin handshake.
 func newLaunchCommand() *cobra.Command {
 	var (
-		project       string
-		headless      bool
-		godotBin      string
-		httpPort      int
-		wsPort        int
-		waitSec       int
-		foreground    bool
-		upgradeDaemon bool
-		forceSpawn    bool
+		project         string
+		headless        bool
+		godotBin        string
+		httpPort        int
+		wsPort          int
+		waitSec         int
+		foreground      bool
+		upgradeDaemon   bool
+		forceSpawn      bool
+		noPluginUpgrade bool
+		dryRun          bool
 	)
 	cmd := &cobra.Command{
 		Use:   "launch --project PATH",
 		Short: "Install the plugin, start the daemon, and launch the Godot editor",
 		Long: `launch performs the full editor startup with zero manual steps:
 
-  1. Resolve the Godot binary (--godot > GODOT_BIN > "godot use" default >
-     PATH > common locations)
-  2. Check the version (4.5+ required, 4.7+ recommended)
-  3. Install/upgrade and enable the embedded godot_ai plugin
-  4. Ensure the backend daemon runs (spawns "serve" detached if absent)
-  5. Launch the Godot editor detached (skipped when THIS project's editor
+  1. Check that the project directory contains project.godot
+  2. Preview the plugin install step and gate it: --dry-run prints the plan
+     (files written, git impact) and exits; --no-plugin-upgrade fails with
+     PLUGIN_VERSION_MISMATCH instead of rewriting a differently-versioned
+     addons/godot_ai
+  3. Resolve the Godot binary (--godot > GODOT_BIN > "godot use" default >
+     PATH > common locations) and check the version (4.5+ required, 4.7+
+     recommended)
+  4. Install/upgrade and enable the embedded godot_ai plugin
+  5. Ensure the backend daemon runs (spawns "serve" detached if absent)
+  6. Launch the Godot editor detached (skipped when THIS project's editor
      already has a connected session)
-  6. Wait for the plugin session handshake and print a ready JSON line
+  7. Wait for the plugin session handshake and print a ready JSON line
+
+Steps 1-2 never touch the daemon, the editor or the Godot binary, so both
+--dry-run and the --no-plugin-upgrade refusal work fully offline.
 
 Multiple projects can share one daemon: launching another project opens its
 editor as an additional session and pins it active. Ops target the active
@@ -82,6 +107,11 @@ file > EditorSettings > default) — the global EditorSettings is NOT
 touched, so parallel daemons on different ports no longer cross-wire
 projects. stop deletes the file again.
 
+The ready payload reports the plugin step as a structured "plugin" object
+(installed / upgraded / from / to / files_changed / files_created /
+git_dirty), so a version bump that rewrites a tracked addon tree is visible
+as data, not only as a warning line.
+
 When the port is held by an OLD daemon (DAEMON_MISMATCH):
   - re-run with --upgrade-daemon to shut the old daemon down WITHOUT
     quitting any editor (compatible plugins reconnect to the new daemon
@@ -97,20 +127,24 @@ with EDITOR_ALREADY_OPEN instead of double-opening; --force-spawn overrides
 Examples:
   godot-ai-cli launch --project C:/games/rpg
   godot-ai-cli launch --project . --headless --wait 90
+  godot-ai-cli launch --project . --dry-run      # preview what would be written
+  godot-ai-cli launch --project . --no-plugin-upgrade
   godot-ai-cli launch --project . --foreground   # keep daemon in this process`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLaunch(cmd, launchOptions{
-				project:       project,
-				headless:      headless,
-				godotBin:      godotBin,
-				httpPort:      httpPort,
-				wsPort:        wsPort,
-				wsPortSet:     cmd.Flags().Changed("ws-port"),
-				wait:          time.Duration(waitSec) * time.Second,
-				foreground:    foreground,
-				upgradeDaemon: upgradeDaemon,
-				forceSpawn:    forceSpawn,
+				project:         project,
+				headless:        headless,
+				godotBin:        godotBin,
+				httpPort:        httpPort,
+				wsPort:          wsPort,
+				wsPortSet:       cmd.Flags().Changed("ws-port"),
+				wait:            time.Duration(waitSec) * time.Second,
+				foreground:      foreground,
+				upgradeDaemon:   upgradeDaemon,
+				forceSpawn:      forceSpawn,
+				noPluginUpgrade: noPluginUpgrade,
+				dryRun:          dryRun,
 			})
 		},
 	}
@@ -123,6 +157,8 @@ Examples:
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run the daemon in-process instead of spawning it detached")
 	cmd.Flags().BoolVar(&upgradeDaemon, "upgrade-daemon", false, "on DAEMON_MISMATCH, shut the old daemon down WITHOUT quitting editors (compatible plugins reconnect), then start the new one")
 	cmd.Flags().BoolVar(&forceSpawn, "force-spawn", false, "open a second editor even when another daemon hosts one for this project (RISK: scene file locks / saves can overwrite each other)")
+	cmd.Flags().BoolVar(&noPluginUpgrade, "no-plugin-upgrade", false, "refuse to rewrite addons/godot_ai when the project plugin version differs from the bundled one (fails with PLUGIN_VERSION_MISMATCH instead of dirtying the project)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview the plugin install step (files written, git impact) and exit — no Godot probe, no daemon, no editor, nothing written")
 	_ = cmd.MarkFlagRequired("project")
 	return cmd
 }
@@ -143,16 +179,18 @@ var (
 
 // launchOptions collects the launch flags.
 type launchOptions struct {
-	project       string
-	headless      bool
-	godotBin      string
-	httpPort      int
-	wsPort        int
-	wsPortSet     bool // true only when --ws-port was passed explicitly
-	wait          time.Duration
-	foreground    bool
-	upgradeDaemon bool
-	forceSpawn    bool
+	project         string
+	headless        bool
+	godotBin        string
+	httpPort        int
+	wsPort          int
+	wsPortSet       bool // true only when --ws-port was passed explicitly
+	wait            time.Duration
+	foreground      bool
+	upgradeDaemon   bool
+	forceSpawn      bool
+	noPluginUpgrade bool // --no-plugin-upgrade: refuse a version-rewriting install
+	dryRun          bool // --dry-run: print the plugin plan and exit before any mutation
 }
 
 // runLaunch executes the launch pipeline and prints the result JSON.
@@ -179,7 +217,29 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 			fmt.Sprintf("%s does not contain a project.godot file", projectDir), nil)
 	}
 
-	// Step 2: resolve and version-check the Godot binary.
+	// Step 2 (new): preview the plugin install step and gate it. Deliberately
+	// placed BEFORE the Godot probe: a preview and a refusal must not depend on
+	// whether this machine has Godot installed, which also keeps --dry-run
+	// fully offline and side-effect free.
+	plan, err := plugin.Preview(projectDir)
+	if err != nil {
+		return jsonError(cmd, "PLUGIN_PLAN_FAILED", err.Error(), nil)
+	}
+	if opts.dryRun {
+		return printJSON(out, map[string]any{
+			"status":   "ok",
+			"dry_run":  true,
+			"project":  projectDir,
+			"plugin":   plan.JSON(),
+			"warnings": []string{},
+			"note":     "dry run covers the plugin install step only — no Godot probe, no daemon, no editor, nothing written",
+		}, false)
+	}
+	if opts.noPluginUpgrade && plan.VersionMismatch() {
+		return pluginUpgradeRefusal(cmd, plan)
+	}
+
+	// Step 3: resolve and version-check the Godot binary.
 	binary, err := godot.Find(opts.godotBin)
 	if err != nil {
 		return jsonError(cmd, "GODOT_NOT_FOUND", err.Error(), nil)
@@ -207,7 +267,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		warnings = append(warnings, warn)
 	}
 
-	// Step 3: install/upgrade + enable the embedded plugin.
+	// Step 4: install/upgrade + enable the embedded plugin.
 	install, err := plugin.EnsureInstalled(projectDir)
 	if err != nil {
 		return jsonError(cmd, "PLUGIN_INSTALL_FAILED", err.Error(), nil)
@@ -446,6 +506,10 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	if warnings == nil {
 		warnings = []string{}
 	}
+	// The plugin step as structured data (requirement: a rewrite of a tracked
+	// addon tree must be visible as fields, not only inside a warning string).
+	// The counts come from the pre-flight plan, which lists exactly what
+	// EnsureInstalled writes.
 	result := map[string]any{
 		"status":         "ready",
 		"session_id":     session["session_id"],
@@ -455,7 +519,17 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		"headless":       opts.headless,
 		"daemon":         map[string]any{"http_port": opts.httpPort, "ws_port": opts.wsPort},
 		"plugin_version": pluginmeta.PluginVersion(),
-		"warnings":       warnings,
+		"plugin": map[string]any{
+			"installed":     install.Installed,
+			"upgraded":      install.Upgraded,
+			"from":          install.PreviousVersion,
+			"to":            install.Version,
+			"files_changed": len(plan.WouldUpdate),
+			"files_created": len(plan.WouldCreate),
+			"git_dirty":     plan.Git.DirtyAfter,
+			"git_available": plan.Git.Available,
+		},
+		"warnings": warnings,
 	}
 	if editorPID != 0 {
 		result["launched_editor_pid"] = editorPID

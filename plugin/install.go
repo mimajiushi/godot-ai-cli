@@ -127,9 +127,31 @@ func Enable(projectDir string) (changed bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
-	content := string(data)
+	newContent, changed := enableContent(string(data))
+	if !changed {
+		return false, nil
+	}
+	return true, writeProjectGodot(path, newContent)
+}
 
-	// Match the file's line-ending style for any lines we add.
+// EnableDecision is the read-only half of Enable: it reports whether
+// project.godot would need the godot_ai entry added, without writing
+// anything. `launch --dry-run` / `plugin status` preview through this, so the
+// preview and the write can never diverge (both call enableContent).
+func EnableDecision(projectDir string) (bool, error) {
+	path := filepath.Join(projectDir, "project.godot")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	_, changed := enableContent(string(data))
+	return changed, nil
+}
+
+// enableContent is the pure core of Enable: it returns the project.godot
+// content that enables godot_ai (plus whether it differs from the input).
+// The file's line-ending style is matched for any lines we add.
+func enableContent(content string) (string, bool) {
 	nl := "\n"
 	if strings.Contains(content, "\r\n") {
 		nl = "\r\n"
@@ -146,7 +168,7 @@ func Enable(projectDir string) (changed bool, err error) {
 			b.WriteString(nl)
 		}
 		b.WriteString(header + nl + nl + `enabled=PackedStringArray("godot_ai")` + nl)
-		return true, writeProjectGodot(path, b.String())
+		return b.String(), true
 	}
 
 	// Section exists: it ends at the next section header or EOF.
@@ -159,7 +181,7 @@ func Enable(projectDir string) (changed bool, err error) {
 
 	if match := enabledArrayPattern.FindStringSubmatch(section); match != nil {
 		if strings.Contains(match[1], `"godot_ai"`) {
-			return false, nil // already enabled
+			return content, false // already enabled
 		}
 		// Append godot_ai to the existing array, keeping the other entries.
 		args := strings.TrimSpace(match[1])
@@ -169,8 +191,7 @@ func Enable(projectDir string) (changed bool, err error) {
 		args += `"godot_ai"`
 		newSection := strings.Replace(section, match[0],
 			"enabled=PackedStringArray("+args+")", 1)
-		newContent := content[:headerIdx] + newSection + content[sectionEnd:]
-		return true, writeProjectGodot(path, newContent)
+		return content[:headerIdx] + newSection + content[sectionEnd:], true
 	}
 
 	// Section without an enabled key: add one right after the header line.
@@ -179,8 +200,7 @@ func Enable(projectDir string) (changed bool, err error) {
 		headerLineEnd = len(content) - headerIdx
 	}
 	insertAt := headerIdx + headerLineEnd + 1
-	newContent := content[:insertAt] + nl + `enabled=PackedStringArray("godot_ai")` + nl + content[insertAt:]
-	return true, writeProjectGodot(path, newContent)
+	return content[:insertAt] + nl + `enabled=PackedStringArray("godot_ai")` + nl + content[insertAt:], true
 }
 
 // writeProjectGodot atomically replaces project.godot: write a temp file

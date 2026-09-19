@@ -330,10 +330,14 @@ func get_results(verbose: bool = false) -> Dictionary:
 	var passed := 0
 	var failed := 0
 	var skipped := 0
+	## godot-ai-cli fork patch: 聚合 assertions（= Σ results[].assertion_count），
+	## 让登记表/审计不必 --verbose 后自行求和（需求 test-run-response-fields-doc）。
+	var assertions := 0
 	var failures: Array[Dictionary] = []
 	var suites_seen := {}
 	for r in _results:
 		suites_seen[r.suite] = true
+		assertions += int(r.get("assertion_count", 0))
 		if r.get("skipped", false):
 			skipped += 1
 		elif r.passed:
@@ -347,6 +351,7 @@ func get_results(verbose: bool = false) -> Dictionary:
 		"failed": failed,
 		"skipped": skipped,
 		"total": _results.size(),
+		"assertions": assertions,
 		"duration_ms": _last_run_ms,
 		"suites_run": suites_seen.keys(),
 		"suite_count": suites_seen.size(),

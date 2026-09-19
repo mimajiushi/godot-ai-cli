@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "res://addons/godot_ai/handlers/command_handler.gd"
 
 ## TileSet management — atlas inspection helpers.
 
@@ -8,6 +8,8 @@ const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 var _connection: McpConnection
 
 
+# godot-ai-cli fork patch: 接收连接用于物理层写盘的 pause_processing 守卫
+# （register_lazy_handler 的构造参数注入）。
 func _init(connection: McpConnection = null) -> void:
 	_connection = connection
 
@@ -180,10 +182,10 @@ func _resolve_atlas_source(params: Dictionary) -> Dictionary:
 	}
 
 
-## --- godot-ai-cli fork patch: TileSet 物理层写操作 ---
-##
-## 与 spriteframes_handler 同一写盘模式：load → duplicate() 后修改副本（避免
-## 污染缓存与已打开场景持有的 Resource）→ McpResourceIO.save_to_disk。
+# --- godot-ai-cli fork patch: TileSet 物理层写操作 ---
+#
+# 与 spriteframes_handler 同一写盘模式：load → duplicate() 后修改副本（避免
+# 污染缓存与已打开场景持有的 Resource）→ McpResourceIO.save_to_disk。
 
 
 ## 为 TileSet 追加一个物理层并设置其 collision layer/mask。

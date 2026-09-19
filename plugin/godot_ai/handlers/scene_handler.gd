@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "res://addons/godot_ai/handlers/command_handler.gd"
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
@@ -9,17 +9,17 @@ var _connection: McpConnection
 var _save_scene_callable: Callable = Callable()
 var _save_scene_as_callable: Callable = Callable()
 
-## 场景"加载/保存时间戳"内存表：scene path -> 磁盘 mtime（秒）。
-## static 是有意的：handler 是 RefCounted，会随连接/插件重载重建，static
-## 让记录在编辑器会话内跨实例存活。
+# godot-ai-cli fork patch（§14）：场景"加载/保存时间戳"内存表：
+# scene path -> 磁盘 mtime（秒）。static 是有意的：handler 会随连接/插件
+# 重载重建，static 让记录在编辑器会话内跨实例存活。
 static var _scene_load_mtimes: Dictionary = {}
 
-## 磁盘过期警告文案：scene open（非 force-reload）发现磁盘 mtime 比记录新时
-## 附加到响应 data.warning。
+# 磁盘过期警告文案：scene open（非 force-reload）发现磁盘 mtime 比记录新时
+# 附加到响应 data.warning。
 const _STALE_DISK_WARNING := "scene file on disk is newer than the in-memory copy (externally modified); re-open with --force-reload to load the disk version"
 
 
-## 返回磁盘过期警告（无则空串）。force-reload 与首次打开（无记录）不报。
+# 返回磁盘过期警告（无则空串）。force-reload 与首次打开（无记录）不报。
 static func _disk_stale_warning(path: String, force_reload: bool) -> String:
 	if force_reload:
 		return ""
@@ -31,7 +31,7 @@ static func _disk_stale_warning(path: String, force_reload: bool) -> String:
 	return ""
 
 
-## 记录场景内存副本当前对应的磁盘 mtime（加载/保存后调用）。
+# 记录场景内存副本当前对应的磁盘 mtime（加载/保存后调用）。
 static func _record_scene_mtime(path: String) -> void:
 	var disk_mtime := FileAccess.get_modified_time(path)
 	if disk_mtime > 0:
@@ -183,7 +183,7 @@ func create_scene(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR, "Failed to save scene: %s" % error_string(err))
 
-	# 新建场景刚写入磁盘并被打开，内存与磁盘一致，建立 mtime 基线。
+	# godot-ai-cli fork patch：新建场景刚写入磁盘并被打开，内存与磁盘一致，建立 mtime 基线。
 	_record_scene_mtime(path)
 
 	return {
@@ -257,9 +257,9 @@ func open_scene(params: Dictionary) -> Dictionary:
 		"reason": "Scene navigation cannot be undone via editor undo",
 	}
 
-	# 磁盘过期检测：非 force-reload 且磁盘 mtime 比记录新 → 响应附带 warning。
-	# 告警时不刷新记录（内存仍是旧版本，下次 open 应继续告警）；无告警时
-	# 记录/刷新基线（含首次打开与 force-reload——这两种情形内存与磁盘一致）。
+	# godot-ai-cli fork patch：磁盘过期检测——非 force-reload 且磁盘 mtime 比记录新
+	# → 响应附带 warning。告警时不刷新记录（内存仍是旧版本，下次 open 应继续告警）；
+	# 无告警时记录/刷新基线（含首次打开与 force-reload——这两种情形内存与磁盘一致）。
 	var stale_warning := _disk_stale_warning(path, force_reload)
 	if not stale_warning.is_empty():
 		payload["warning"] = stale_warning
@@ -305,6 +305,15 @@ static func _finish_open_scene_deferred(
 	path: String,
 	prev_root_id: int,
 	payload: Dictionary,
+) -> void:
+	var work := ScriptWork.begin("open_scene")
+	await _settle_open_scene(connection, request_id, path, prev_root_id, payload)
+	ScriptWork.finish(work)
+
+
+static func _settle_open_scene(
+	connection: McpConnection, request_id: String, path: String,
+	prev_root_id: int, payload: Dictionary,
 ) -> void:
 	if not is_instance_valid(connection):
 		return
@@ -361,7 +370,7 @@ func save_scene(_params: Dictionary) -> Dictionary:
 	if err != OK:
 		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR, "Failed to save scene: %s" % error_string(err))
 
-	# 保存后内存与磁盘一致，刷新该场景的 mtime 记录（open 不应再告警）。
+	# godot-ai-cli fork patch：保存后内存与磁盘一致，刷新该场景的 mtime 记录（open 不应再告警）。
 	_record_scene_mtime(path)
 
 	return {
@@ -404,7 +413,7 @@ func save_scene_as(params: Dictionary) -> Dictionary:
 	if _connection:
 		_connection.pause_processing = false
 
-	# 另存后内存与磁盘一致，刷新目标路径的 mtime 记录。
+	# godot-ai-cli fork patch：另存后内存与磁盘一致，刷新目标路径的 mtime 记录。
 	_record_scene_mtime(path)
 
 	return {

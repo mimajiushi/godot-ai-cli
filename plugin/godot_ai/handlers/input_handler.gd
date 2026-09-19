@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "res://addons/godot_ai/handlers/command_handler.gd"
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
@@ -9,8 +9,8 @@ const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
 func list_actions(params: Dictionary) -> Dictionary:
 	var include_builtin: bool = params.get("include_builtin", false)
-	## godot-ai-cli fork patch: optional action-name glob filter (e.g. "move_*"),
-	## applied to both the InputMap-loaded and the project.godot-only lists.
+	# godot-ai-cli fork patch: 可选 action 名称 glob 过滤（如 "move_*"），
+	# 同时作用于 InputMap 已加载列表与 project.godot 仅声明列表。
 	var pattern := str(params.get("action", ""))
 	## Authoritative source for user-authored actions is the ``[input]``
 	## section of ``project.godot``. ``ProjectSettings.has_setting`` is not

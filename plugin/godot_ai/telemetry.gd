@@ -1,12 +1,12 @@
 ## Plugin-side telemetry helper — STRIPPED in the godot-ai-cli fork.
 ##
 ## The upstream implementation relays plugin-only events (dock startup,
-## self-update outcome, plugin reload, dev-server toggle) to the Python
-## MCP server via `send_event("plugin_event", {...})`. The fork removes
-## reporting entirely: no event is buffered, sent, or persisted, and no
-## data ever leaves the editor. This file keeps the original public
-## interface as no-ops so callers (plugin.gd, mcp_dock.gd, handlers,
-## update_reload_runner.gd) need no changes.
+## self-update outcome, plugin reload, dev-server toggle, telemetry opt-out)
+## to the Python MCP server via `send_event("plugin_event", {...})` /
+## `send_event(OPT_OUT_EVENT, {})`. The fork removes reporting entirely: no
+## event is buffered, sent, or persisted, and no data ever leaves the
+## editor. This file keeps the original public interface as no-ops so
+## callers (plugin.gd, mcp_dock.gd, handlers) need no changes.
 ##
 ## Upstream project: https://github.com/hi-godot/godot-ai (MIT).
 
@@ -19,6 +19,10 @@ const _ALLOWED_EVENTS := [
 	"self_update",
 	"dev_server_toggle",
 ]
+
+## v4 新增（#913）：运行时 opt-out 事件名。fork 从不发送任何事件，
+## 常量仅为接口对齐保留。
+const OPT_OUT_EVENT := "telemetry_opt_out"
 
 const _MAX_BUFFER := 32
 
@@ -75,6 +79,13 @@ func _flush() -> void:
 ## No-op in the fork: nothing is ever sent over the connection.
 func _send_one(_name: String, _data: Dictionary) -> void:
 	pass
+
+
+## v4 新增（#913）：上游把它用于"採用的服务器也投递 opt-out"。fork
+## 没有任何遥测可关——返回 false（什么都没发送，与上游"返回是否发送
+## 了事件"的契约一致）。
+func assert_opt_out() -> bool:
+	return false
 
 # --- convenience emitters (all no-ops in the fork) ----------------------
 

@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "res://addons/godot_ai/handlers/command_handler.gd"
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
@@ -362,6 +362,14 @@ func _run_project_current_liveness_response(base_data: Dictionary) -> Dictionary
 static func _finish_run_project_deferred(
 	request_id: String, base_data: Dictionary, connection, debugger_plugin
 ) -> void:
+	var work := ScriptWork.begin("run_project")
+	await _settle_run_project(request_id, base_data, connection, debugger_plugin)
+	ScriptWork.finish(work)
+
+
+static func _settle_run_project(
+	request_id: String, base_data: Dictionary, connection, debugger_plugin
+) -> void:
 	var tree: SceneTree = connection.get_tree()
 	while true:
 		await tree.process_frame
@@ -544,9 +552,8 @@ static func _format_editor_error_summary(entry: Dictionary) -> String:
 	return McpSurfacedErrorTracker.format_editor_error_summary(entry)
 
 
-## godot-ai-cli fork patch: resume a game paused at a debugger break
-## (CLI `project continue`) — the recovery path when a failed eval parked the
-## game loop. Delegates to the debugger plugin, which owns session tracking.
+# godot-ai-cli fork patch: 恢复停在调试断点处的游戏（CLI `project continue`）
+# —— 失败的 eval 把游戏循环挂起后的恢复路径。委托给持有会话跟踪的 debugger 插件。
 func continue_run(_params: Dictionary) -> Dictionary:
 	if _debugger_plugin == null:
 		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
@@ -554,9 +561,8 @@ func continue_run(_params: Dictionary) -> Dictionary:
 	return _debugger_plugin.continue_game()
 
 
-## godot-ai-cli fork patch: bring the running game's window to the foreground
-## (CLI `project focus`) — convenience for backgrounded/frozen-game recovery
-## when the game itself is live. Delegates to the debugger plugin.
+# godot-ai-cli fork patch: 把运行中的游戏窗口提到前台（CLI `project focus`）
+# —— 游戏存活但被压后台/冻结时的恢复便利操作。委托给 debugger 插件。
 func focus_game(_params: Dictionary) -> Dictionary:
 	if _debugger_plugin == null:
 		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
@@ -611,6 +617,12 @@ func stop_project(params: Dictionary) -> Dictionary:
 # server's 5s request timeout will surface the failure to the caller.
 # `static` is load-bearing (#712): see _finish_run_project_deferred.
 static func _finish_stop_project_deferred(request_id: String, connection) -> void:
+	var work := ScriptWork.begin("stop_project")
+	await _settle_stop_project(request_id, connection)
+	ScriptWork.finish(work)
+
+
+static func _settle_stop_project(request_id: String, connection) -> void:
 	var tree: SceneTree = connection.get_tree()
 	await tree.process_frame
 	await tree.process_frame

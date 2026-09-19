@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "res://addons/godot_ai/handlers/command_handler.gd"
 
 ## Discovers and runs McpTestSuite scripts from res://tests/.
 ## Exposes run_tests and get_test_results as MCP commands.
@@ -13,6 +13,12 @@ extends RefCounted
 ## See docs/test-run-transport-starvation-plan.md.
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
+
+const CACHE_WARNING := (
+	"Preloaded GDScript dependencies may be stale after source edits. "
+	+ "Restart the editor before treating this run as validation of dependency changes. "
+	+ "ResourceLoader cache modes do not invalidate GDScript's preload cache."
+)
 
 ## Clamp bounds for the server-provided ``timeout_budget_sec`` param. The
 ## floor is purely defensive (a malformed or buggy server value must not
@@ -58,6 +64,15 @@ func run_tests(params: Dictionary) -> Dictionary:
 	var test_filter: String = params.get("test_name", "")
 	var exclude_test_filter: String = params.get("exclude_test_name", "")
 	var verbose: bool = params.get("verbose", false)
+
+	## godot-ai-cli fork patch: require_idle_session——会话里有 live 游戏时直接
+	## 拒绝（EDITOR_NOT_READY/EDITOR_PLAYING），让 CI/回放脚本一键挡住"23 条假红"
+	## 而不是拿到失败再人工归因（需求 test-run-play-state-warning）。
+	var idle_refusal := idle_session_refusal(
+		params.get("require_idle_session", false), EditorInterface.is_playing_scene()
+	)
+	if not idle_refusal.is_empty():
+		return idle_refusal
 
 	var request_id: String = params.get("_request_id", "")
 	var live := _connection != null and not request_id.is_empty()
@@ -106,10 +121,11 @@ func run_tests(params: Dictionary) -> Dictionary:
 				discovery.errors.size(),
 				", ".join(discovery.errors),
 			]
-		var no_suites := {"error": msg, "total": 0, "load_errors": discovery.errors}
+		var no_suites := {"error": msg, "total": 0, "load_errors": discovery.errors, "cache_warning": CACHE_WARNING}
 		## Keep the edited_scene annotation on the no-suites error payload too,
 		## so the response contract is consistent across every return path.
 		_annotate_edited_scene(no_suites)
+		_annotate_game_status(no_suites)
 		return {"data": no_suites}
 
 	var ctx := {
@@ -155,6 +171,7 @@ static func unknown_suite_error(suite_filter: String, suites: Array) -> Dictiona
 	err["error"]["data"] = {
 		"suite": suite_filter,
 		"suites_available": Array(names),
+		"cache_warning": CACHE_WARNING,
 	}
 	return err
 
@@ -170,10 +187,12 @@ func _map_outcome(
 	started_ms: int,
 	budget_sec: float,
 ) -> Dictionary:
+	results["cache_warning"] = CACHE_WARNING
 	var elapsed_ms := Time.get_ticks_msec() - started_ms
 	match outcome:
 		"completed":
 			_annotate_edited_scene(results)
+			_annotate_game_status(results)
 			return {"data": results}
 		"transport_lost":
 			## The peer is gone (or flood-closed); the send will fail against
@@ -183,6 +202,7 @@ func _map_outcome(
 			results["aborted"] = "transport_lost"
 			results["tests_not_run"] = tests_not_run
 			_annotate_edited_scene(results)
+			_annotate_game_status(results)
 			return {"data": results}
 		"paused":
 			var depth := _connection.pause_depth() if _connection != null else 0
@@ -238,6 +258,7 @@ func _abort_data(
 ) -> Dictionary:
 	var data := {
 		"phase": phase,
+		"cache_warning": CACHE_WARNING,
 		"elapsed_ms": elapsed_ms,
 		"budget_sec": budget_sec,
 		"passed": int(results.get("passed", 0)),
@@ -264,6 +285,45 @@ func _validated_budget_sec(params: Dictionary) -> float:
 	return BUDGET_DEFAULT_SEC
 
 
+## godot-ai-cli fork patch: require_idle_session 的判定（static + pure，
+## 套件无需 live 游戏即可钉两个分支；见 demo/tests/test_runner.gd）。
+static func idle_session_refusal(require_idle: bool, playing: bool) -> Dictionary:
+	if not require_idle or not playing:
+		return {}
+	return ErrorCodes.make_not_ready(
+		ErrorCodes.SUB_EDITOR_PLAYING,
+		(
+			"A game run is live in this session — suites that assert the no-game "
+			+ "precondition (editor/project/manual_play_adoption) fail "
+			+ "deterministically. Run `project stop` and re-run, or drop "
+			+ "require_idle_session."
+		),
+		false,
+	)
+
+
+## godot-ai-cli fork patch: play 状态可见性（需求 test-run-play-state-warning）。
+## 会话里游戏活着时，editor/project/manual_play_adoption 等套件的"无游戏"前置
+## 断言会确定性假红，但 envelope 里没有任何字段说明"这个会话正在 play"。
+## 与 _annotate_edited_scene 同级、始终存在；failed>0 且游戏 live 时补一条
+## 与 scene_warning 同风格的提示。
+func _annotate_game_status(results: Dictionary) -> void:
+	var playing := EditorInterface.is_playing_scene()
+	results["game_status"] = {
+		"active": playing,
+		"status": "live" if playing else "stopped",
+		"readiness": _connection.get_readiness() if _connection != null else "",
+	}
+	if playing and int(results.get("failed", 0)) > 0:
+		results["play_state_warning"] = (
+			"A game run is live in this session (readiness=playing). Suites that "
+			+ "assert the no-game precondition (editor/project/"
+			+ "manual_play_adoption) fail deterministically — run `project stop` "
+			+ "and re-run, or start from a fresh session. Pass "
+			+ "require_idle_session=true to refuse up front instead."
+		)
+
+
 ## Many suites assume the project's main scene is the edited scene (they read
 ## /Main/... nodes directly). Running with another scene open produces a flood
 ## of phantom failures that look like real regressions. Surface the edited
@@ -288,7 +348,9 @@ func _annotate_edited_scene(results: Dictionary) -> void:
 
 func get_test_results(params: Dictionary) -> Dictionary:
 	var verbose: bool = params.get("verbose", false)
-	return {"data": _runner.get_results(verbose)}
+	var results := _runner.get_results(verbose)
+	results["cache_warning"] = CACHE_WARNING
+	return {"data": results}
 
 
 ## Returns {"suites": Array, "errors": Array[String], "outcome": String}.
@@ -330,7 +392,20 @@ func _discover_suites(
 				else:
 					errors.append("%s (not a McpTestSuite subclass)" % file_name)
 			else:
-				errors.append("%s (cannot instantiate — abstract or broken)" % file_name)
+				## Name the cause: a fresh reload prints the parse or compile error
+				## the cached load swallowed and returns its code, so a CI log says
+				## more than "abstract or broken".
+				var reload_error: Error = script.reload(true)
+				var base: Variant = script.get_base_script()
+				errors.append(
+					"%s (cannot instantiate — abstract or broken; reload=%s, base=%s, valid=%s)"
+					% [
+						file_name,
+						error_string(reload_error),
+						str(base.resource_path) if base != null else "none",
+						str(script.can_instantiate()),
+					]
+				)
 		file_name = dir.get_next()
 
 	## Sort by suite name for deterministic order.

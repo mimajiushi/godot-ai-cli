@@ -85,6 +85,8 @@ var _eval_token_counter: int = 0
 ## _handle_take_screenshot (running inside that capture) detects the freeze
 ## synchronously. -1 until the first tick.
 var _last_loop_tick_msec: int = -1
+var _mcp_runtime_process_ticks: int = 0
+var _last_debug_status_reply: Dictionary = {}
 ## Rendering-freeze beacon for the Windows-minimize state (#794 smoke, 1b):
 ## the frames_drawn value last observed in _process, and when it last
 ## advanced. -1 until the first observed advance, so a booting or
@@ -135,6 +137,7 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
+	_mcp_runtime_process_ticks += 1
 	## #777: liveness beacon for _handle_take_screenshot's stalled-loop check.
 	## Recorded before the early returns below so the signal stays truthful
 	## even when the logger or debugger channel is unavailable.
@@ -188,6 +191,9 @@ func _on_debug_message(message: String, data: Array) -> bool:
 		"eval_liveness":
 			_reply_eval_liveness(data)
 			return true
+		"debug_status":
+			_reply_debug_status(data)
+			return true
 		"eval":
 			_handle_eval(data)
 			return true
@@ -215,6 +221,35 @@ func _reply_eval_liveness(data: Array) -> void:
 	_last_eval_liveness_reply = {"request_id": request_id, "loop_live": loop_live}
 	if EngineDebugger.is_active():
 		EngineDebugger.send_message("mcp:eval_liveness_response", [request_id, loop_live])
+
+
+func _debug_status_snapshot() -> Dictionary:
+	var inside_tree := is_inside_tree()
+	var tree := get_tree() if inside_tree else null
+	return {
+		"probe_version": 1,
+		"helper_found": true,
+		## GameHelper is PROCESS_MODE_ALWAYS, so pause does not stop it; native
+		## SceneTree suspension does. This exposes Godot's debugger-owned suspend
+		## bit through Node::can_process() without conflating it with pause/time scale.
+		"suspended": inside_tree and not can_process(),
+		"loop_live": not _main_loop_appears_stalled(),
+		"loop_tick_msec": _last_loop_tick_msec,
+		"process_ticks": _mcp_runtime_process_ticks,
+		"tree_paused": tree.paused if tree != null else false,
+		"frames_drawn": Engine.get_frames_drawn(),
+		"process_frames": Engine.get_process_frames(),
+		"physics_frames": Engine.get_physics_frames(),
+		"time_scale": Engine.time_scale,
+	}
+
+
+func _reply_debug_status(data: Array) -> void:
+	var request_id: String = data[0] if data.size() > 0 else ""
+	var state := _debug_status_snapshot()
+	_last_debug_status_reply = {"request_id": request_id, "state": state.duplicate(true)}
+	if EngineDebugger.is_active():
+		EngineDebugger.send_message("mcp:debug_status_response", [request_id, state])
 
 
 func _handle_take_screenshot(data: Array) -> void:
@@ -384,6 +419,13 @@ func _handle_game_command(data: Array) -> void:
 			result = _game_input_key(json.data)
 		"input_mouse":
 			result = _game_input_mouse(json.data)
+		"input_warp":
+			## godot-ai-cli fork patch: 真正设置鼠标位置（Input.warp_mouse +
+			## 三套坐标系换算回显），服务鼠标瞄准类玩法
+			result = _game_input_warp(json.data)
+		"get_mouse":
+			## godot-ai-cli fork patch: 读回 window/canvas/world 三套坐标
+			result = _game_get_mouse()
 		"input_gamepad":
 			result = _game_input_gamepad(json.data)
 		"input_action":
@@ -682,7 +724,11 @@ func _game_input_mouse(params: Dictionary) -> Dictionary:
 			motion.position = pos
 			motion.global_position = pos
 			Input.parse_input_event(motion)
-			return {"sent": true, "event": "motion", "position": _variant_to_json(pos)}
+			## godot-ai-cli fork patch: 合成 motion 事件不进 viewport 鼠标状态
+			## （get_global_mouse_position() 不受影响）——返回值必须明说，
+			## 否则脚本会误以为瞄准已生效（需求 mouse-aim-input）。
+			return {"sent": true, "event": "motion", "position": _variant_to_json(pos),
+				"affects_mouse_position": false}
 		"button":
 			var button_event := InputEventMouseButton.new()
 			button_event.position = pos
@@ -696,8 +742,76 @@ func _game_input_mouse(params: Dictionary) -> Dictionary:
 				"button": params.get("button", "left"),
 				"pressed": button_event.pressed,
 				"position": _variant_to_json(pos),
+				## godot-ai-cli fork patch: 同 motion——合成 button 事件也不移动鼠标
+				"affects_mouse_position": false,
 			}
 	return {"sent": false, "error": "Invalid mouse event: %s" % event}
+
+
+## godot-ai-cli fork patch: 三套坐标系互转（static + pure，套件可直接钉）。
+## window = 窗口客户区物理像素（Input.warp_mouse 的参数语义）；
+## canvas = viewport 坐标（经 stretch 变换，get_viewport().get_mouse_position()）；
+## world  = 世界坐标（经 canvas_transform 逆变换，get_global_mouse_position() 同系）。
+## screen_transform: canvas→window；canvas_transform: world→canvas（root viewport 的）。
+static func _mouse_space_convert(pos: Vector2, space: String, screen_transform: Transform2D, canvas_transform: Transform2D) -> Dictionary:
+	match space:
+		"window":
+			var canvas := screen_transform.affine_inverse() * pos
+			return {"window": pos, "canvas": canvas,
+				"world": canvas_transform.affine_inverse() * canvas}
+		"canvas":
+			return {"window": screen_transform * pos, "canvas": pos,
+				"world": canvas_transform.affine_inverse() * pos}
+		"world":
+			var canvas := canvas_transform * pos
+			return {"window": screen_transform * canvas, "canvas": canvas, "world": pos}
+	return {}
+
+
+## godot-ai-cli fork patch: game input-warp——语义明确地设置鼠标位置并同步
+## viewport 鼠标状态（Input.warp_mouse 真移动 OS 光标，游戏内
+## get_global_mouse_position() 随动），回显三套坐标系；目标被系统夹住
+## （落在窗口/屏幕外）时 clamped:true 并回显实际落点（需求 mouse-aim-input）。
+func _game_input_warp(params: Dictionary) -> Dictionary:
+	var pos_result := _resolve_mouse_position(params.get("position"))
+	if pos_result.has("error"):
+		return {"applied": false, "error": pos_result.error}
+	var space := str(params.get("space", "window"))
+	if space not in ["window", "canvas", "world"]:
+		return {"applied": false, "error": "Invalid space: %s (window|canvas|world)" % space}
+	var vp := get_viewport()
+	if vp == null:
+		return {"applied": false, "error": "no viewport"}
+	var converted := _mouse_space_convert(pos_result.position, space,
+		vp.get_screen_transform(), vp.canvas_transform)
+	var target_window: Vector2 = converted.window
+	Input.warp_mouse(target_window)
+	## 读回验证：warp 是请求式的，被系统夹住时读回值会偏离目标。
+	var after := _game_get_mouse()
+	var clamped: bool = (after.mouse_window - target_window).length() > 1.0
+	return {
+		"applied": true,
+		"requested": _variant_to_json(pos_result.position),
+		"space": space,
+		"mouse_window": _variant_to_json(after.mouse_window),
+		"mouse_canvas": _variant_to_json(after.mouse_canvas),
+		"mouse_world": _variant_to_json(after.mouse_world),
+		"clamped": clamped,
+	}
+
+
+## godot-ai-cli fork patch: game get-mouse——读回当前鼠标在 window/canvas/
+## world 三套坐标系的值，用于"瞄准是否到位"的自检（需求 mouse-aim-input）。
+func _game_get_mouse() -> Dictionary:
+	var vp := get_viewport()
+	if vp == null:
+		return {"error": "no viewport"}
+	var canvas: Vector2 = vp.get_mouse_position()
+	return {
+		"mouse_window": vp.get_screen_transform() * canvas,
+		"mouse_canvas": canvas,
+		"mouse_world": vp.canvas_transform.affine_inverse() * canvas,
+	}
 
 
 func _game_input_gamepad(params: Dictionary) -> Dictionary:
@@ -1169,8 +1283,12 @@ func _handle_eval(data: Array) -> void:
 	## editor process (handler unit tests), where reload() does return.
 	var err: int = script.reload()
 	if err != OK:
+		## godot-ai-cli fork patch（F2）：带上 EVAL_COMPILE_ERROR——宽限窗口内被
+		## 外部 continue 打断时本分支才是真正回信的出口（reload 恢复执行），
+		## 编辑器侧凭白名单保住错误语义，不再退化成裸 INTERNAL_ERROR。
 		_reply_eval_error(request_id,
-			"Failed to compile GDScript (error %d). Check syntax." % err)
+			"Failed to compile GDScript (error %d). Check syntax." % err,
+			ErrorCodes.EVAL_COMPILE_ERROR)
 		return
 
 	## Compiled OK — tell the editor so its grace timer doesn't flag a compile

@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "res://addons/godot_ai/handlers/command_handler.gd"
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 const VariantSerializer := preload("res://addons/godot_ai/utils/variant_serializer.gd")
@@ -148,9 +148,11 @@ func reparent_node(params: Dictionary) -> Dictionary:
 
 	var old_parent := node.get_parent()
 	var old_idx := node.get_index()
-	## Snapshot descendants before commit: remove_child clears owner on any
-	## child whose owner sits outside the pruned subtree, so both do and undo
-	## must restore those owners as part of the recorded action (#904).
+	## Ported from upstream PR #927 at
+	## 1a95bcca51d81d29de925c2f636814eaa037c1c2 (issue #904). Snapshot
+	## descendants before commit: remove_child clears owner on any child whose
+	## owner sits outside the pruned subtree, so both do and undo must restore
+	## those owners as part of the recorded action.
 	var descendants := _collect_descendants(node)
 
 	_undo_redo.create_action("MCP: Reparent %s" % node.name)
@@ -201,6 +203,7 @@ func set_property(params: Dictionary) -> Dictionary:
 
 	var found := false
 	var prop_type: int = TYPE_NIL
+	# godot-ai-cli fork patch: $node 引用赋值需要 hint 信息判定槽位期望类型。
 	var prop_hint: int = PROPERTY_HINT_NONE
 	var prop_hint_string := ""
 	for prop in node.get_property_list():
@@ -230,10 +233,10 @@ func set_property(params: Dictionary) -> Dictionary:
 		if json.parse(value) == OK and json.data is Dictionary and (json.data as Dictionary).has("__class__"):
 			value = json.data
 
-	# {"$node": "../Sprite2D"} 编码：节点引用赋值分支（@export var target:
-	# CanvasItem 这类 Node 派生对象槽）。必须先于资源路径与 __class__ 分支
-	# 处理——Dictionary 值不会进资源分支，但混用 __class__ 等其他键时必须
-	# 在这里明确报错，而不是落入通用 coercion。
+	# godot-ai-cli fork patch: {"$node": "../Sprite2D"} 编码——节点引用赋值分支
+	# （@export var target: CanvasItem 这类 Node 派生对象槽）。必须先于资源路径
+	# 与 __class__ 分支处理——Dictionary 值不会进资源分支，但混用 __class__
+	# 等其他键时必须在这里明确报错，而不是落入通用 coercion。
 	if value is Dictionary and (value as Dictionary).has("$node"):
 		return _set_node_reference(
 			node, node_path, property, target_type, prop_hint, prop_hint_string, value, old_value
@@ -323,12 +326,12 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 
 
-## {"$node": "<NodePath>"} 节点引用赋值：把相对目标节点自身解析到的场景内
-## 节点对象赋给 Node 派生的 TYPE_OBJECT 属性（如 @export var target: CanvasItem）。
-## 序列化由引擎负责——被引用节点与持有节点同属当前编辑场景（owner 链完整）时，
-## scene save 会写出 node_paths=["<prop>"] 头字段 + <prop> = NodePath("...")，
-## 与在检查器中拖入节点完全一致；被引用节点若无 owner（不在场景存档内），
-## 赋值在内存中生效但不会落盘，这是引擎既有行为。
+# godot-ai-cli fork patch: {"$node": "<NodePath>"} 节点引用赋值——把相对目标
+# 节点自身解析到的场景内节点对象赋给 Node 派生的 TYPE_OBJECT 属性（如
+# @export var target: CanvasItem）。序列化由引擎负责——被引用节点与持有节点
+# 同属当前编辑场景（owner 链完整）时，scene save 会写出 node_paths=["<prop>"]
+# 头字段 + <prop> = NodePath("...")，与在检查器中拖入节点完全一致；被引用节点
+# 若无 owner（不在场景存档内），赋值在内存中生效但不会落盘，这是引擎既有行为。
 func _set_node_reference(
 	node: Node,
 	node_path: String,
@@ -394,13 +397,13 @@ func _set_node_reference(
 	}
 
 
-## 校验属性期望类型为 Node 派生。返回错误字典或 null。
-## - PROPERTY_HINT_NODE_TYPE：@export var x: CanvasItem 的标准形态，放行。
-## - hint_string 逗号分隔的类名中有 ClassDB 已知类且任一 Node 派生：放行；
-##   有已知类但无 Node 派生（如 RESOURCE_TYPE 的 "Texture2D"）：拒绝。
-## - 拿不到有效 hint（hint 为 NONE 且 hint_string 为空，或只列出 ClassDB
-##   不可见的脚本类）：宽容放行——无法静态证明它不是节点槽，类型安全交由
-##   引擎 setter 兜底。
+# 校验属性期望类型为 Node 派生。返回错误字典或 null。
+# - PROPERTY_HINT_NODE_TYPE：@export var x: CanvasItem 的标准形态，放行。
+# - hint_string 逗号分隔的类名中有 ClassDB 已知类且任一 Node 派生：放行；
+#   有已知类但无 Node 派生（如 RESOURCE_TYPE 的 "Texture2D"）：拒绝。
+# - 拿不到有效 hint（hint 为 NONE 且 hint_string 为空，或只列出 ClassDB
+#   不可见的脚本类）：宽容放行——无法静态证明它不是节点槽，类型安全交由
+#   引擎 setter 兜底。
 static func _node_ref_expectation_error(property: String, hint: int, hint_string: String) -> Variant:
 	if hint == PROPERTY_HINT_NODE_TYPE:
 		return null
@@ -420,8 +423,8 @@ static func _node_ref_expectation_error(property: String, hint: int, hint_string
 	return null
 
 
-## hint_string 列出 ClassDB 已知原生类时，校验解析到的节点类型符合槽位约束；
-## 只含脚本类（ClassDB 不可见）时宽容放行。返回错误字典或 null。
+# hint_string 列出 ClassDB 已知原生类时，校验解析到的节点类型符合槽位约束；
+# 只含脚本类（ClassDB 不可见）时宽容放行。返回错误字典或 null。
 static func _node_ref_conformance_error(target: Node, property: String, hint: int, hint_string: String) -> Variant:
 	if hint != PROPERTY_HINT_NODE_TYPE or hint_string.is_empty():
 		return null
@@ -441,8 +444,8 @@ static func _node_ref_conformance_error(target: Node, property: String, hint: in
 	return null
 
 
-## 节点引用属性的响应序列化：返回相对持有节点的 NodePath 字符串
-## （无引用或节点已离树则 null）。
+# 节点引用属性的响应序列化：返回相对持有节点的 NodePath 字符串
+# （无引用或节点已离树则 null）。
 static func _node_ref_display(node: Node, value: Variant) -> Variant:
 	if value is Node and node.is_inside_tree() and (value as Node).is_inside_tree():
 		return str(node.get_path_to(value))
@@ -528,9 +531,10 @@ func duplicate_node(params: Dictionary) -> Dictionary:
 	if not new_name.is_empty():
 		dup.name = new_name
 
-	## Record descendant owners inside the action so redo restores them.
-	## Undo is just remove_child of the copy; descendants live on `dup`
-	## via add_do_reference and do not need their own undo set_owner (#904).
+	## Ported from upstream PR #927 (issue #904). Record descendant owners
+	## inside the action so redo restores them. Undo is just remove_child of
+	## the copy; descendants live on `dup` via add_do_reference and do not need
+	## their own undo set_owner.
 	var descendants := _collect_descendants(dup)
 
 	_undo_redo.create_action("MCP: Duplicate %s" % node.name)
@@ -688,8 +692,8 @@ func set_selection(params: Dictionary) -> Dictionary:
 
 
 ## All descendants of `node` (not including `node` itself), depth-first.
-## Used to record per-child set_owner inside an undo action without
-## targeting the handler as an UndoRedo receiver (#904).
+## Used to record per-child set_owner inside an undo action without targeting
+## the handler as an UndoRedo receiver (upstream PR #927 / issue #904).
 static func _collect_descendants(node: Node) -> Array[Node]:
 	var out: Array[Node] = []
 	for child in node.get_children():
@@ -902,6 +906,14 @@ static func _coerce_value(value: Variant, target_type: int) -> Variant:
 		TYPE_FLOAT:
 			if value is int:
 				return float(value)
+			if value is String:
+				## #964: some MCP clients stringify float arguments ("4.0").
+				## Accept strictly-numeric strings; unparseable ones flow
+				## through unchanged so _check_coerced raises the typed
+				## WRONG_TYPE error instead of a silent zero/null write.
+				var parsed: Variant = McpJsonValues.parse_float(value)
+				if parsed != null:
+					return parsed
 		TYPE_STRING_NAME:
 			if value is String:
 				return StringName(value)

@@ -27,3 +27,12 @@ static func external_daemon_mode() -> bool:
 ## by in-editor UI or wire commands.
 static func mcp_client_config_disabled() -> bool:
 	return true
+
+
+## Always true in the fork: the v4 in-editor self-updater (signed manifest
+## verify → stage → swap) is never constructed — plugin updates ship with
+## the godot-ai-cli release and land via `godot-ai-cli plugin install`.
+## The update banner stays hidden and `_update_manager` stays null (every
+## other reference is null-guarded upstream).
+static func v4_self_update_disabled() -> bool:
+	return true

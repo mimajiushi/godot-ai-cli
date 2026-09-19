@@ -3,6 +3,7 @@ class_name McpDebuggerPlugin
 extends EditorDebuggerPlugin
 
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
+const ScriptWork := preload("res://addons/godot_ai/utils/script_work.gd")
 
 ## Editor-side half of the game-process capture bridge.
 ##
@@ -67,6 +68,9 @@ const EVAL_COMPILE_GRACE_SEC := 3.0
 ## ticking, so it drives the poll. 0.35s keeps detection well under a second
 ## without flooding the channel; most evals reply before the first probe.
 const EVAL_PROBE_INTERVAL_SEC := 0.35
+const GAME_DEBUG_CONTROL_TIMEOUT_SEC := 5.0
+const EMBED_SUSPEND_TOGGLE := 0
+const EMBED_NEXT_FRAME := 1
 
 const VisionRoutingScript := preload("res://addons/godot_ai/vision_routing.gd")
 
@@ -152,6 +156,12 @@ func _init(log_buffer: McpLogBuffer = null, game_log_buffer: McpGameLogBuffer = 
 	_editor_log_buffer = editor_log_buffer
 	_surfaced_error_tracker = surfaced_error_tracker
 	self.vision_routing = vision_routing
+
+
+func quiesce_for_script_swap() -> Dictionary:
+	if not _pending.is_empty():
+		return {"ok": false, "error": "Wait for pending game debugger requests before updating."}
+	return ScriptWork.quiescence()
 
 
 func _has_capture(prefix: String) -> bool:
@@ -244,6 +254,9 @@ func end_game_run() -> void:
 	_fail_pending_evals_not_ready(
 		"The game run ended before game_eval completed — the game stopped, crashed, or is restarting. Confirm it is running and retry."
 	)
+	_fail_pending_game_debug_controls_not_ready(
+		"The game run ended before runtime control completed — confirm it is running and retry."
+	)
 	## Never carry a held beacon across a run boundary (#891).
 	_pending_hello_session_id = -1
 	_pre_adoption_log_rotated = false
@@ -253,7 +266,7 @@ func end_game_run() -> void:
 	_ready_run_token = -1
 	_game_session_id = -1
 	clear_debug_break()
-	## 运行边界后的 break 属于新游戏进程，eval 恢复标记不能跨运行存活。
+	## godot-ai-cli fork patch: 运行边界后的 break 属于新游戏进程，eval 恢复标记不能跨运行存活。
 	for rid in _eval_break_recovery.keys():
 		_cancel_eval_break_recovery(str(rid))
 	if _surfaced_error_tracker != null:
@@ -514,7 +527,10 @@ func _schedule_break_record_synthesis() -> void:
 	for i in BREAK_FRAME_SCRAPE_DELAYS_SEC.size():
 		var final := i == BREAK_FRAME_SCRAPE_DELAYS_SEC.size() - 1
 		var timer := tree.create_timer(BREAK_FRAME_SCRAPE_DELAYS_SEC[i])
-		timer.timeout.connect(func() -> void: _on_break_scrape_tick(token, final))
+		var work := ScriptWork.begin("debugger_break_scrape")
+		timer.timeout.connect(func() -> void:
+			_on_break_scrape_tick(token, final)
+			ScriptWork.finish(work))
 
 
 func _on_break_scrape_tick(run_token: int, final: bool) -> void:
@@ -867,6 +883,9 @@ func _capture(message: String, data: Array, session_id: int) -> bool:
 		"mcp:eval_liveness_response":
 			_on_eval_liveness_response(data)
 			return true
+		"mcp:debug_status_response":
+			_on_debug_status_response(data)
+			return true
 		"mcp:eval_response":
 			_on_eval_response(data)
 			return true
@@ -959,6 +978,15 @@ func _wait_then_send(
 	max_resolution: int,
 	connection: McpConnection,
 	timeout_sec: float,
+) -> void:
+	var work := ScriptWork.begin("game_screenshot_ready")
+	await _settle_capture_ready(tree, request_id, max_resolution, connection, timeout_sec)
+	ScriptWork.finish(work)
+
+
+func _settle_capture_ready(
+	tree: SceneTree, request_id: String, max_resolution: int,
+	connection: McpConnection, timeout_sec: float,
 ) -> void:
 	var deadline := Time.get_ticks_msec() + int(GAME_READY_WAIT_SEC * 1000.0)
 	## #645: always yield at least one frame — the dispatcher registers the
@@ -1109,6 +1137,7 @@ func _send_error(connection: McpConnection, request_id: String, code: String, me
 ## #645 同帧回复竞态的统一规避：deferred 请求的注册发生在 handler 返回
 ## 之后，同步回复会被当作过期请求丢弃（connection.gd 的 "dropped late
 ## response"）。等一帧再回复；测试注入 _eval_ready_frame_waiter 同步推进。
+## godot-ai-cli fork patch: 该助手是 fork 补丁（上游无）。
 func _send_error_next_frame(connection: McpConnection, request_id: String, err: Dictionary) -> void:
 	if _eval_ready_frame_waiter.is_valid():
 		await _eval_ready_frame_waiter.call()
@@ -1168,7 +1197,7 @@ func request_game_eval(
 	request_id: String,
 	connection: McpConnection,
 	timeout_sec: float = 10.0,
-	echo_prints: bool = false,
+	echo_prints: bool = false, # godot-ai-cli fork patch: 回显 eval 的 print 行
 ) -> void:
 	if request_id.is_empty():
 		push_warning("MCP debugger: eval request missing request_id")
@@ -1197,7 +1226,17 @@ func _wait_then_eval(
 	connection: McpConnection,
 	timeout_sec: float,
 	run_token: int,
-	echo_prints: bool = false,
+	echo_prints: bool = false, # godot-ai-cli fork patch
+) -> void:
+	var work := ScriptWork.begin("game_eval_ready")
+	await _settle_eval_ready(tree, code, request_id, connection, timeout_sec, run_token, echo_prints)
+	ScriptWork.finish(work)
+
+
+func _settle_eval_ready(
+	tree: SceneTree, code: String, request_id: String,
+	connection: McpConnection, timeout_sec: float, run_token: int,
+	echo_prints: bool = false, # godot-ai-cli fork patch
 ) -> void:
 	## #500: eval uses EVAL_READY_WAIT_SEC (not the 20s GAME_READY_WAIT_SEC) so
 	## the not-ready path returns its actionable error before the 15s server-side
@@ -1258,7 +1297,7 @@ func _probe_then_eval(
 	connection: McpConnection,
 	timeout_sec: float,
 	run_token: int,
-	echo_prints: bool = false,
+	echo_prints: bool = false, # godot-ai-cli fork patch
 ) -> void:
 	## #645 同帧回复竞态：本函数会被 game_eval handler 同步调用（capture
 	## ready 时），此处的即时回复发生在调度器注册 deferred 请求之前，会被
@@ -1363,7 +1402,7 @@ func _send_eval(
 	request_id: String,
 	connection: McpConnection,
 	timeout_sec: float,
-	echo_prints: bool = false,
+	echo_prints: bool = false, # godot-ai-cli fork patch
 ) -> void:
 	var session: EditorDebuggerSession = _first_active_session()
 	if session == null:
@@ -1554,8 +1593,10 @@ func _eval_compile_message(code: String, data: Dictionary) -> String:
 
 
 ## godot-ai-cli fork patch：编译失败的错误 data —— code_echo（实际编译的代码）、
-## parse_errors（引擎 Parse Error 原文）、game_status（此时往往已停在 break）、
-## hint（自查提示）与 truncated。只回传本次 eval 之后新提升的错误行。
+## parse_errors（引擎 Parse Error 原文）、game_status（**采样当时**的游戏状态：
+## 即时路径是断点现场 break，重扫路径在补发 continue 之后故恒为 live——失败当时
+## 的现场由重扫路径并入的 game_status_before_continue 携带）、hint（自查提示）
+## 与 truncated。只回传本次 eval 之后新提升的错误行。
 func _eval_compile_error_data(code: String, editor_cursor: int, debugger_cursor: int) -> Dictionary:
 	var parse_errors: Array[Dictionary] = []
 	var truncated := false
@@ -1608,7 +1649,7 @@ func _eval_quote_hint(code: String, parse_errors_empty: bool) -> String:
 ## godot-ai-cli fork patch：编译错误带 Parse Error 原文的重扫窗口。
 ## 实测（RS-022，插件 3.2.13）：引擎的 Parse Error 行要在补发 continue、断点
 ## 恢复之后才被提升到编辑器侧（编辑器日志里可见于回复后约 0.7s），所以第一次
-## 抓不到时先补发 continue、等这么久再抓一次。失败路径本就已经等了 3s 宽限，
+## 抓不到时先补发 continue，等这么久再抓一次。失败路径本就已经等了 3s 宽限，
 ## 多 1s 换回真实引擎原文是划算的；成功路径一分钱不花。
 const EVAL_PARSE_ERROR_RESCAN_SEC := 1.0
 ## 测试/诊断探针：重扫前的等待（生产用 SceneTreeTimer；测试注入同步 waiter，
@@ -1624,6 +1665,10 @@ var _compile_error_rescan_waiter: Callable = Callable()
 const _GAME_EVAL_ERROR_CODES: Array[String] = [
 	ErrorCodes.EVAL_HUNG,
 	ErrorCodes.EVAL_RESULT_TOO_LARGE,
+	## godot-ai-cli fork patch（F2）：宽限窗口内被外部 continue 打断时，游戏侧
+	## reload() 恢复执行后会带这个 code 回 mcp:eval_error——加进白名单，回复
+	## 才保住 EVAL_COMPILE_ERROR 语义而不是退化成裸 INTERNAL_ERROR。
+	ErrorCodes.EVAL_COMPILE_ERROR,
 ]
 
 
@@ -1706,9 +1751,10 @@ func _on_eval_grace(request_id: String) -> void:
 	if data["parse_errors"].is_empty():
 		## Parse Error 行是"报错 → 断点恢复"之后才提升到编辑器侧的（实测回复
 		## 后约 0.7s），所以先补发 continue，重扫一次再回复——否则这次的 data
-		## 永远拿不到引擎原文。
+		## 永远拿不到引擎原文。首采的 game_status（失败当时的断点现场）随
+		## pre_data 一并交给重扫路径保留（需求 eval-break-snapshot）。
 		_auto_continue_after_eval_error(request_id)
-		_send_compile_error_after_rescan(conn, request_id, code, editor_cursor, debugger_cursor)
+		_send_compile_error_after_rescan(conn, request_id, code, editor_cursor, debugger_cursor, data)
 		return
 	_send_compile_error(conn, request_id, code, data)
 	if _log_buffer:
@@ -1725,8 +1771,13 @@ func _send_compile_error(conn: McpConnection, request_id: String, code: String, 
 
 ## godot-ai-cli fork patch：等 EVAL_PARSE_ERROR_RESCAN_SEC 后重扫一次再回复。
 ## 这一次回复已经是最终答案，不再循环等待（拿不到就靠 hint 指 logs read）。
+## pre_data（首采，默认空字典向后兼容）非空时把它的 game_status 以
+## game_status_before_continue 键并入——重扫采样在补发 continue 之后，
+## game_status 恒为 live，失败当时的断点现场只有首采那份才有
+## （需求 eval-break-snapshot；旧调用方忽略新键即无感）。
 func _send_compile_error_after_rescan(
-	conn: McpConnection, request_id: String, code: String, editor_cursor: int, debugger_cursor: int
+	conn: McpConnection, request_id: String, code: String, editor_cursor: int, debugger_cursor: int,
+	pre_data: Dictionary = {}
 ) -> void:
 	var tree := Engine.get_main_loop() as SceneTree
 	if _compile_error_rescan_waiter.is_valid():
@@ -1734,6 +1785,8 @@ func _send_compile_error_after_rescan(
 	elif tree != null:
 		await tree.create_timer(EVAL_PARSE_ERROR_RESCAN_SEC).timeout
 	var data := _eval_compile_error_data(code, editor_cursor, debugger_cursor)
+	if not pre_data.is_empty() and pre_data.has("game_status"):
+		data["game_status_before_continue"] = pre_data["game_status"]
 	_send_compile_error(conn, request_id, code, data)
 	if _log_buffer:
 		_log_buffer.log("[debug] !! eval compile error after rescan (%s, parse_errors=%d)"
@@ -1945,6 +1998,349 @@ func _on_eval_probe_tick(request_id: String) -> void:
 	_arm_eval_probe(request_id)
 
 
+## --- native embedded Game View runtime control (#939) ---
+
+static func game_debug_verification(
+	action: String, state_before: Dictionary, state_after: Dictionary
+) -> Dictionary:
+	var before_ticks := int(state_before.get("process_ticks", -1))
+	var after_ticks := int(state_after.get("process_ticks", -1))
+	var ticks_advanced := after_ticks - before_ticks if before_ticks >= 0 and after_ticks >= 0 else -1
+	match action:
+		"suspend":
+			return {"status": "verified" if bool(state_after.get("suspended", false)) else "pending", "ticks_advanced": ticks_advanced}
+		"resume":
+			return {"status": "verified" if not bool(state_after.get("suspended", true)) else "pending", "ticks_advanced": ticks_advanced}
+		"next_frame":
+			if before_ticks < 0 or after_ticks < 0:
+				return {"status": "failed", "reason": "missing_process_ticks", "ticks_advanced": ticks_advanced}
+			if ticks_advanced > 1:
+				return {"status": "failed", "reason": "multiple_process_ticks", "ticks_advanced": ticks_advanced}
+			if ticks_advanced == 1 and bool(state_after.get("suspended", false)):
+				return {"status": "verified", "ticks_advanced": 1}
+			return {"status": "pending", "ticks_advanced": ticks_advanced}
+	return {"status": "failed", "reason": "unsupported_action", "ticks_advanced": ticks_advanced}
+
+
+func _active_game_debug_mutation() -> Dictionary:
+	for raw_request_id in _pending.keys():
+		var pending_entry: Dictionary = _pending.get(raw_request_id, {})
+		if str(pending_entry.get("kind", "")) != "game_debug_control":
+			continue
+		var active_action := str(pending_entry.get("action", ""))
+		if active_action in ["suspend", "resume", "next_frame"]:
+			return {"request_id": str(raw_request_id), "action": active_action}
+	return {}
+
+
+func request_game_debug_control(
+	action: String,
+	request_id: String,
+	connection: McpConnection,
+	timeout_sec: float = GAME_DEBUG_CONTROL_TIMEOUT_SEC,
+) -> void:
+	if request_id.is_empty():
+		push_warning("MCP debugger: game debug control missing request_id")
+		return
+	## The dispatcher registers the deferred request only after the handler returns.
+	## Start the entire guard/control flow deferred so even fast failures cannot race
+	## that registration and get dropped as an expired response.
+	_begin_game_debug_control.call_deferred(action, request_id, connection, timeout_sec)
+
+
+func _begin_game_debug_control(
+	action: String,
+	request_id: String,
+	connection: McpConnection,
+	timeout_sec: float,
+) -> void:
+	if action not in ["suspend", "resume", "next_frame", "debug_status"]:
+		_send_error(connection, request_id, ErrorCodes.VALUE_OUT_OF_RANGE,
+			"Unsupported game debug action: %s" % action)
+		return
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		_send_error(connection, request_id, ErrorCodes.INTERNAL_ERROR,
+			"Editor main loop is not a SceneTree — cannot schedule game debug control")
+		return
+	if not is_game_capture_ready():
+		_send_error_response(connection, request_id,
+			_explain_not_live(get_game_status(-1, GAME_READY_WAIT_SEC), ErrorCodes.INTERNAL_ERROR))
+		return
+	if action != "debug_status":
+		var active_mutation := _active_game_debug_mutation()
+		if not active_mutation.is_empty():
+			var busy := ErrorCodes.make(
+				ErrorCodes.EDITOR_NOT_READY,
+				"Another game runtime-control mutation is already in flight — retry after it completes."
+			)
+			busy["error"]["data"] = {
+				"action": action,
+				"active_action": str(active_mutation.get("action", "")),
+				"retryable": true,
+			}
+			_send_error_response(connection, request_id, busy)
+			return
+	var session := _first_active_session()
+	if session == null:
+		_send_error(connection, request_id, ErrorCodes.INTERNAL_ERROR,
+			"No active debugger session — is the game actually running?")
+		return
+	var timer := tree.create_timer(timeout_sec)
+	var timeout_callable := func() -> void:
+		var pending_entry: Dictionary = _pending.get(request_id, {})
+		if pending_entry.is_empty():
+			return
+		_pending.erase(request_id)
+		var conn: McpConnection = pending_entry.get("connection")
+		if conn != null and is_instance_valid(conn):
+			var err := ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
+				"Game debug action '%s' timed out after %.0fs" % [action, timeout_sec])
+			err["error"]["data"] = {
+				"action": action,
+				"state_before": pending_entry.get("state_before", {}),
+				"state_after": pending_entry.get("state_after", {}),
+				"focus_handoff": pending_entry.get("focus_handoff", {}),
+				"path": pending_entry.get("path", ""),
+				"game_view_ui_synced": pending_entry.get("game_view_ui_synced", false),
+			}
+			_send_error_response(conn, request_id, err)
+	timer.timeout.connect(timeout_callable)
+	_pending[request_id] = {
+		"kind": "game_debug_control",
+		"phase": "before",
+		"action": action,
+		"connection": connection,
+		"timer": timer,
+		"timeout_callable": timeout_callable,
+		"run_token": _game_run_token,
+	}
+	session.send_message("mcp:debug_status", [request_id])
+
+
+func _on_debug_status_response(data: Array) -> void:
+	if data.size() < 2 or not (data[1] is Dictionary):
+		push_warning("MCP debugger: malformed debug_status response")
+		return
+	var request_id := str(data[0])
+	var pending_entry: Dictionary = _pending.get(request_id, {})
+	if str(pending_entry.get("kind", "")) != "game_debug_control":
+		return
+	var connection: McpConnection = pending_entry.get("connection")
+	if not _is_current_game_run(int(pending_entry.get("run_token", -1))):
+		_clear_pending(request_id)
+		if connection != null and is_instance_valid(connection):
+			_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
+				"The game run changed while runtime control was in flight — retry against the current run.")
+		return
+	var state: Dictionary = (data[1] as Dictionary).duplicate(true)
+	pending_entry["state_after"] = state
+	match str(pending_entry.get("phase", "before")):
+		"before":
+			_handle_game_debug_before(request_id, pending_entry, state)
+		"verify":
+			_handle_game_debug_verify(request_id, pending_entry, state)
+		_:
+			_clear_pending(request_id)
+			if connection != null and is_instance_valid(connection):
+				_send_error(connection, request_id, ErrorCodes.INTERNAL_ERROR,
+					"Invalid game debug control phase")
+
+
+func _default_focus_handoff() -> Dictionary:
+	return {"attempted": false, "main_screen": "", "embedded_process_found": false, "focused": false}
+
+
+func _handle_game_debug_before(
+	request_id: String, pending_entry: Dictionary, state: Dictionary
+) -> void:
+	var action := str(pending_entry.get("action", ""))
+	var connection: McpConnection = pending_entry.get("connection")
+	var focus_handoff := _default_focus_handoff()
+	if action == "debug_status":
+		_clear_pending(request_id)
+		if connection != null and is_instance_valid(connection):
+			connection.send_deferred_response(request_id, {"data": {
+				"action": action, "state": state, "focus_handoff": focus_handoff,
+			}})
+		return
+	var suspended := bool(state.get("suspended", false))
+	if action in ["suspend", "resume"]:
+		var desired := action == "suspend"
+		if suspended == desired:
+			_clear_pending(request_id)
+			if connection != null and is_instance_valid(connection):
+				connection.send_deferred_response(request_id, {"data": {
+					"action": action, "changed": false, "verified": true,
+					"state_before": state, "state_after": state,
+					"focus_handoff": focus_handoff,
+				}})
+			return
+	elif action == "next_frame" and not suspended:
+		_clear_pending(request_id)
+		if connection != null and is_instance_valid(connection):
+			_send_error(connection, request_id, ErrorCodes.INVALID_PARAMS,
+				"next_frame requires a suspended game — call suspend first")
+		return
+	if action == "next_frame":
+		focus_handoff = _focus_embedded_game_view()
+	var desired_suspended := action == "suspend"
+	var control := _emit_game_debug_runtime_action(action, desired_suspended)
+	if not bool(control.get("ok", false)):
+		var err := ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
+			"No active debugger path accepted the native game runtime action")
+		err["error"]["data"] = {
+			"action": action,
+			"reason": control.get("reason", "runtime_control_unavailable"),
+			"focus_handoff": focus_handoff,
+		}
+		_clear_pending(request_id)
+		if connection != null and is_instance_valid(connection):
+			_send_error_response(connection, request_id, err)
+		return
+	pending_entry["phase"] = "verify"
+	pending_entry["state_before"] = state
+	pending_entry["focus_handoff"] = focus_handoff
+	pending_entry["path"] = str(control.get("path", ""))
+	pending_entry["game_view_ui_synced"] = bool(control.get("game_view_ui_synced", false))
+	_request_game_debug_verify.call_deferred(request_id)
+
+
+func _request_game_debug_verify(request_id: String) -> void:
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+	await tree.process_frame
+	var pending_entry: Dictionary = _pending.get(request_id, {})
+	if str(pending_entry.get("phase", "")) != "verify":
+		return
+	var session := _first_active_session()
+	if session == null:
+		var connection: McpConnection = pending_entry.get("connection")
+		_clear_pending(request_id)
+		if connection != null and is_instance_valid(connection):
+			_send_error(connection, request_id, ErrorCodes.EVAL_GAME_NOT_READY,
+				"The debugger session ended before runtime control could be verified")
+		return
+	session.send_message("mcp:debug_status", [request_id])
+
+
+func _handle_game_debug_verify(
+	request_id: String, pending_entry: Dictionary, state_after: Dictionary
+) -> void:
+	var action := str(pending_entry.get("action", ""))
+	var connection: McpConnection = pending_entry.get("connection")
+	var state_before: Dictionary = pending_entry.get("state_before", {})
+	var verdict := game_debug_verification(action, state_before, state_after)
+	match str(verdict.get("status", "failed")):
+		"pending":
+			_request_game_debug_verify.call_deferred(request_id)
+			return
+		"verified":
+			pass
+		_:
+			var err := ErrorCodes.make(ErrorCodes.INTERNAL_ERROR,
+				"Game debug action '%s' violated its verification contract" % action)
+			err["error"]["data"] = {
+				"action": action,
+				"reason": verdict.get("reason", "verification_failed"),
+				"ticks_advanced": verdict.get("ticks_advanced", -1),
+				"state_before": state_before,
+				"state_after": state_after,
+				"focus_handoff": pending_entry.get("focus_handoff", {}),
+				"path": pending_entry.get("path", ""),
+				"game_view_ui_synced": pending_entry.get("game_view_ui_synced", false),
+			}
+			_clear_pending(request_id)
+			if connection != null and is_instance_valid(connection):
+				_send_error_response(connection, request_id, err)
+			return
+	var payload := {
+		"action": action,
+		"changed": true,
+		"verified": true,
+		"state_before": state_before,
+		"state_after": state_after,
+		"focus_handoff": pending_entry.get("focus_handoff", {}),
+		"path": pending_entry.get("path", ""),
+		"game_view_ui_synced": pending_entry.get("game_view_ui_synced", false),
+	}
+	if action == "next_frame":
+		payload["ticks_advanced"] = int(verdict.get("ticks_advanced", -1))
+	_clear_pending(request_id)
+	if connection != null and is_instance_valid(connection):
+		connection.send_deferred_response(request_id, {"data": payload})
+
+
+func _focus_embedded_game_view() -> Dictionary:
+	var result := {
+		"attempted": true,
+		"main_screen": "Game",
+		"embedded_process_found": false,
+		"focused": false,
+	}
+	EditorInterface.set_main_screen_editor("Game")
+	var base := EditorInterface.get_base_control()
+	if base == null:
+		return result
+	var embedded_nodes: Array[Node] = []
+	_collect_nodes_of_class(base, "EmbeddedProcess", embedded_nodes)
+	for node in embedded_nodes:
+		if node is Control:
+			var embedded := node as Control
+			result["embedded_process_found"] = true
+			embedded.grab_focus()
+			result["focused"] = embedded.has_focus()
+			break
+	return result
+
+
+static func direct_game_debug_message(action: String, desired_suspended: bool) -> Dictionary:
+	match action:
+		"suspend", "resume":
+			return {"message": "scene:suspend_changed", "data": [desired_suspended]}
+		"next_frame":
+			return {"message": "scene:next_frame", "data": []}
+	return {}
+
+
+func _emit_game_debug_runtime_action(action: String, desired_suspended: bool) -> Dictionary:
+	var embed_action := EMBED_NEXT_FRAME if action == "next_frame" else EMBED_SUSPEND_TOGGLE
+	var base := EditorInterface.get_base_control()
+	if base != null:
+		var debuggers: Array[Node] = []
+		_collect_nodes_of_class(base, "ScriptEditorDebugger", debuggers)
+		for debugger in debuggers:
+			if not debugger.has_signal("embed_shortcut_requested"):
+				continue
+			if debugger.get_signal_connection_list("embed_shortcut_requested").is_empty():
+				continue
+			debugger.emit_signal("embed_shortcut_requested", embed_action)
+			return {"ok": true, "path": "embed_signal", "game_view_ui_synced": true}
+
+	var session := _first_active_session()
+	if session == null or not session.is_active():
+		return {"ok": false, "reason": "no_active_debugger_session"}
+	var direct := direct_game_debug_message(action, desired_suspended)
+	if direct.is_empty():
+		return {"ok": false, "reason": "unsupported_action"}
+	session.send_message(str(direct.message), direct.data as Array)
+	## The direct debugger-session path works without embedding, but bypasses
+	## Game View's suspend button, so its visual pressed state is not synchronized.
+	return {"ok": true, "path": "direct_session", "game_view_ui_synced": false}
+
+
+func _fail_pending_game_debug_controls_not_ready(message: String) -> void:
+	for request_id in _pending.keys():
+		var pending_entry: Dictionary = _pending.get(request_id, {})
+		if str(pending_entry.get("kind", "")) != "game_debug_control":
+			continue
+		var connection: McpConnection = pending_entry.get("connection")
+		_clear_pending(str(request_id))
+		if connection != null and is_instance_valid(connection):
+			_send_error(connection, str(request_id), ErrorCodes.EVAL_GAME_NOT_READY, message)
+
+
 ## --- game_command: curated runtime game operations ---
 
 func request_game_command(
@@ -1980,6 +2376,15 @@ func _wait_then_game_command(
 	request_id: String,
 	connection: McpConnection,
 	timeout_sec: float,
+) -> void:
+	var work := ScriptWork.begin("game_command_ready")
+	await _settle_game_command_ready(tree, op, params, request_id, connection, timeout_sec)
+	ScriptWork.finish(work)
+
+
+func _settle_game_command_ready(
+	tree: SceneTree, op: String, params: Dictionary, request_id: String,
+	connection: McpConnection, timeout_sec: float,
 ) -> void:
 	var deadline := Time.get_ticks_msec() + int(GAME_READY_WAIT_SEC * 1000.0)
 	## #645: the leading yield guarantees the dispatcher has registered the

@@ -62,7 +62,7 @@ func newOpCommand(op ops.OpSpec) *cobra.Command {
 		Short: op.Summary,
 		Long: fmt.Sprintf(`%s
 
-Plugin command: %s (timeout %s, %s)%s
+Plugin command: %s (timeout %s, %s)%s%s
 
 Every op also accepts:
   --session <id>      pin the call to one connected editor session
@@ -72,7 +72,7 @@ Optional flags left at their zero value are omitted from the wire params
 
 Examples:
   %s`,
-			op.Summary, op.PluginCommand, op.Timeout, writeLabel(op.Write), opResponseNote(op), opExamples(op)),
+			op.Summary, op.PluginCommand, op.Timeout, writeLabel(op.Write), opResponseNote(op), opHelpNote(op), opExamples(op)),
 		Args: boolFlagValueArgs(op),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if op.Domain == "editor" && op.Name == "screenshot" {
@@ -80,6 +80,11 @@ Examples:
 			}
 			if op.Domain == "editor" && op.Name == "record" {
 				return runRecord(cmd, op)
+			}
+			// editor eval resolves its code source CLI-side (--code-file /
+			// --code-stdin / --code-b64) before the shared param collection.
+			if op.Domain == "editor" && op.Name == "eval" {
+				return runEval(cmd, op)
 			}
 			params, err := collectParams(cmd, op)
 			if err != nil {
@@ -97,6 +102,14 @@ Examples:
 		registerCLIFlag(cmd, f)
 	}
 	return cmd
+}
+
+// opHelpNote renders the optional "Note:" help section (OpSpec.HelpNote).
+func opHelpNote(op ops.OpSpec) string {
+	if op.HelpNote == "" {
+		return ""
+	}
+	return "\n\nNote:\n  " + op.HelpNote
 }
 
 // opUseSuffix lists required flags in the Use line.

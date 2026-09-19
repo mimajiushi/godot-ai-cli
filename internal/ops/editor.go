@@ -98,12 +98,34 @@ func editorOps() []OpSpec {
 			Timeout: GameTimeout,
 			ResponseNote: `{"result","source"}; result is the value of the code's explicit
   return (null for plain statements). --echo-prints adds "prints": the
-  print()/printerr() lines this eval produced.`,
-			DocNote: "Example: `editor eval --code 'print($Player.position)' --echo-prints` → `{\"result\":null,\"source\":\"game\",\"prints\":[\"(144, 136)\\n\"]}` — no follow-up `logs read` needed.\nEval code constraints: the code becomes the body of a generated function — keep it flat (no `if`/`for` blocks sharing one line after a colon, e.g. `for x in range(3): var a := 1; if ...` fails to parse); use real newlines and indentation. A parse error returns `EVAL_COMPILE_ERROR`; the game auto-resumes from the debugger break it caused (manual recovery: `project continue`).",
+  print()/printerr() lines this eval produced. Errors are
+  {"status":"error","error":{code,message,data}}; a compile failure
+  (EVAL_COMPILE_ERROR) adds data.code_echo (the exact code the plugin
+  compiled), data.parse_errors (the engine's Parse Error lines), data.hint
+  and data.game_status.`,
+			// -h 专属注意事项（catalog 不收，避免与 DocNote 重复）：Windows
+			// PowerShell 5.1 会把内嵌双引号从原生程序参数里吞掉，落库代码与
+			// 写法不一致，却只报一个语法错误码——这是本项目实测踩过的坑。
+			HelpNote: "Exactly ONE code source may be given: --code, --code-file, --code-stdin\n" +
+				"  or --code-b64 (two at once is EVAL_CODE_SOURCE_CONFLICT, never a silent\n" +
+				"  priority rule).\n" +
+				"  Windows: PowerShell 5.1 strips embedded double quotes from arguments passed\n" +
+				"  to native programs, so `--code 'return \"abc\".length()'` reaches the plugin as\n" +
+				"  `return abc.length()` and fails to parse. Escape them (\\\") or skip the shell\n" +
+				"  entirely with --code-file / --code-stdin. The failing reply echoes the code it\n" +
+				"  actually compiled as error.data.code_echo, which shows the stripped form.",
 			Params: []ParamSpec{
 				ps("code", "code", true, "", "GDScript source to evaluate in the game context"),
 				pb("echo-prints", "echo_prints", false, "false", `Also return the print()/printerr() lines produced during this eval as "prints"`),
 			},
+			// CLI-side code channels: the code travels as the one `code` wire
+			// param, so the plugin-facing contract is unchanged.
+			CLIFlags: []CLIFlagSpec{
+				cls("code-file", "", "read the GDScript source from this UTF-8 file (a leading BOM is tolerated) instead of --code"),
+				clb("code-stdin", "false", "read the GDScript source from stdin instead of --code (a terminal stdin is an error, never a hang)"),
+				cls("code-b64", "", "base64-encoded GDScript source: fallback for shells/pipelines that cannot carry quotes"),
+			},
+			DocNote: "Example: `editor eval --code 'print($Player.position)' --echo-prints` → `{\"result\":null,\"source\":\"game\",\"prints\":[\"(144, 136)\\n\"]}` — no follow-up `logs read` needed.\nEval code constraints: the code becomes the body of a generated function — keep it flat (no `if`/`for` blocks sharing one line after a colon, e.g. `for x in range(3): var a := 1; if ...` fails to parse); use real newlines and indentation. A parse error returns `EVAL_COMPILE_ERROR`; the game auto-resumes from the debugger break it caused (manual recovery: `project continue`).\nQuoting: prefer `--code-file` (or `--code-stdin`) whenever the snippet contains double quotes — Windows PowerShell 5.1 strips them from native-program arguments, and the failure surfaces only as a parse error on a snippet you never wrote. base64 (`--code-b64`) is the fallback for pipelines that cannot carry a file.",
 		},
 	}
 }

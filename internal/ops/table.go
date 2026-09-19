@@ -72,6 +72,13 @@ type OpSpec struct {
 	// usage constraints). It is deliberately NOT part of -h — help stays
 	// compact.
 	DocNote string
+	// HelpNote, when non-empty, is appended to the -h long help as a
+	// "Note:" section — the home for caveats the flag list cannot carry
+	// (e.g. the PowerShell 5.1 quote-stripping trap on `editor eval`).
+	// Deliberately NOT rendered into commands.md: the catalog already
+	// carries DocNote, and duplicating the same prose in both surfaces
+	// would drift.
+	HelpNote string
 	// WrapOp, when non-empty, routes through a wrapper plugin command:
 	// the wire params become {"op": WrapOp, "params": <collected>}.
 	// Used by the game domain (everything goes through game_command).

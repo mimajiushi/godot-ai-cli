@@ -204,7 +204,7 @@ script/build-release.sh`（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
 ## 与 hi-godot/godot-ai 的关系
 
-`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v4.1.0，移除了遥测并禁用了
+`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v4.2.3，移除了遥测并禁用了
 Python server 拉起逻辑（Go daemon 完全取代 Python 后端，并自行实现了 v4 的
 认证传输——capability 记录发现 + HMAC 证明握手）。每一处分叉都在 GDScript
 源码中以 `godot-ai-cli fork patch` 标注，并在

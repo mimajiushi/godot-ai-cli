@@ -1,7 +1,7 @@
-# Fork patches vs upstream v4.1.0
+# Fork patches vs upstream v4.2.3
 
 `plugin/godot_ai/` is a fork of [hi-godot/godot-ai](https://github.com/hi-godot/godot-ai)
-**v4.1.0** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
+**v4.2.3** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
 is the complete list of divergences. The behavioral patches are
 marked in the GDScript source with a `godot-ai-cli fork patch` comment —
 `grep -rn "godot-ai-cli fork patch" plugin/godot_ai` audits them — and gated
@@ -690,3 +690,74 @@ Regression fixes caught by the beta.24 cold-start replay (Agent Teams,
   peers fail closed (4002/4003) by design.
 
 
+
+## 18. Full alignment to upstream v4.2.3 + CLI coverage of the v4.2.x tool surface (beta.25)
+
+`plugin.cfg` version 4.1.0 → **4.2.3** (upstream v4.2.0…v4.2.3: navigation
+baking/path queries, compile-validated shader authoring, VisualShader graph
+authoring/editing, filesystem move/rename/remove, physics-collider refresh,
+live native-resource inspection, theme font/icon slots + per-node stylebox
+override + richtext, animation typed-property coercion, `.cs` text-only
+script contract, omp/zcode clients, plus lifecycle/transport hardening the
+fork already covered structurally). Re-based the same way as §16: mirror the
+upstream tree wholesale, re-apply every fork patch via three-way merge
+(`git merge-file` with upstream v4.1.0 as base — 26 files clean, the
+server_lifecycle occupied-probe hunk and the connection buffer refactor
+resolved by hand), then re-verify with the sentinel strip. The Go daemon's
+protocol is unchanged (auth handshake, capability record, error surface all
+identical), so this sync is plugin-side plus version pins.
+
+- **Protocol verification**: `connection.gd`'s v4.2.x change only refactors
+  peer-buffer setup into `_configure_peer_buffers` (#1050-class 8 KiB→4 MiB
+  fix); the auth transcript, close codes, and capability record format are
+  byte-identical in behaviour. `pluginmeta`'s pinned tests move to 4.2.3.
+- **19 new CLI ops** (`internal/ops/navigation_shader.go`,
+  `script_project_test_fs_batch.go`, `theme_ui_resource_api.go`):
+  `navigation bake|path-get`, `shader create|get|patch|validate`,
+  `visual-shader create-graph|get|edit|node-catalog`,
+  `filesystem move|rename|remove`, `resource inspect`,
+  `theme set-font|set-icon|set-stylebox-texture|stylebox-override`,
+  `ui set-richtext`, plus `resource physics-shape-generate --overwrite`
+  (undoable refresh). `TestPluginCommandParity` keeps the CLI surface equal
+  to the plugin's registered command set (182 ops).
+- **INFERRED_DECLARATION hardening**: the demo project's warning config
+  treats inferred-Variant declarations as errors; 37 upstream lines across
+  `client_configurator.gd`, `node_handler.gd`, `shader_handler.gd`,
+  `visual_shader_handler.gd`, `spriteframes_handler.gd` gained explicit
+  `: Variant` annotations (fork-marked).
+- **Upstream test absorption**: five new upstream suites copied verbatim
+  into `demo/tests/` (`navigation`, `shader`, `visual_shader`,
+  `physics_refresh`, `resource_inspect`) plus refreshed `netstat_parser` and
+  `physics_shape` (the beta.24 copies targeted the v4.1.0 internal APIs —
+  `PortResolver.windows_listener_*` and `PhysicsShapeHandler._plan_generate_mesh`
+  signatures moved in v4.2.x, so both failed to load with Parse errors and
+  silently skipped entire suites under a green `failed:0`) — all pass
+  unmodified; baseline moves to 84 suites / 2689 tests / 0 failed /
+  0 load_errors. Adaptations elsewhere:
+  `test_dock.gd` seeds the port picker's occupancy snapshot explicitly
+  (Windows now consults the real listener snapshot instead of the mock
+  probe), `test_client_attach_config.gd` gains #838 shape expectations for
+  the new `zcode`/`omp` clients, `test_dispatcher.gd` re-pins the lazy
+  handler count at 33.
+- **Install-path test** (`plugin/install_test.go`):
+  `TestInstallUpgrades41xTo42x` pins the minor-crossing upgrade detection
+  (4.1.0 → 4.2.3 reports `Upgraded` and rewrites the addon).
+- **D1 self-heal widened to launch-failure BLOCKED reasons**
+  (`utils/server_lifecycle.gd`, RS-035): runner-3's slow-replacement replay
+  caught the plugin parking at `BLOCKED(no_command)` forever — the fork's
+  default environment cannot spawn a Go daemon from the editor (the
+  fallback finds no server command), and the recheck whitelist only covered
+  `incompatible`/`occupied`. `BLOCKED_RECHECK_REASONS` now also arms
+  `no_command` / `launch_failed` / `launch_unproven` /
+  `capability_dir_unwritable`, so a CLI/manually started compatible daemon
+  arriving later is adopted on the next recheck (5/15/30 s, then 60 s)
+  instead of the editor wedging until Restart. Pinned by two new
+  `server_lifecycle` suite tests.
+- **Known upstream limitation (not forked)**: v4.2.x `filesystem_mutation`
+  refuses any move/rename/remove when a single owner-extension file under
+  `res://` exceeds 256 KiB (`MAX_FILE_BYTES` — the reference scan reads
+  every `.gd/.cs/.gdshader/.tres/...` to find uid/path references, and the
+  bounded-read guard fails the whole order). Upstream's own
+  `test_project/tests/test_clients.gd` is 329 KiB, so live mutations are
+  unusable there too; the RS-030/032/033 scenarios park the oversized file
+  out of `res://` for the duration of the mutation steps.

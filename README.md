@@ -237,7 +237,7 @@ script/build-release.sh` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Relationship to hi-godot/godot-ai
 
-The editor plugin under `plugin/godot_ai/` is a fork of upstream v4.1.0 with
+The editor plugin under `plugin/godot_ai/` is a fork of upstream v4.2.3 with
 telemetry removed and the Python server spawn disabled (the Go daemon replaces
 the Python backend entirely and implements the v4 authenticated transport —
 capability-record discovery plus an HMAC proof handshake — itself). Every

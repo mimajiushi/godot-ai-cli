@@ -21,8 +21,8 @@ func newProject(t *testing.T, projectGodot string) string {
 }
 
 func TestPluginVersion(t *testing.T) {
-	if got := plugin.PluginVersion(); got != "4.2.3" {
-		t.Fatalf("PluginVersion() = %q, want 4.2.3", got)
+	if got := plugin.PluginVersion(); got != "4.2.4" {
+		t.Fatalf("PluginVersion() = %q, want 4.2.4", got)
 	}
 }
 
@@ -47,7 +47,7 @@ func TestInstallClearsStaleUpstreamUpdateMarkers(t *testing.T) {
 	}
 }
 
-// TestInstallUpgrades41xTo42x：v4.1.x → v4.2.3 的 minor 跨越升级
+// TestInstallUpgrades41xTo42x：v4.1.x → v4.2.x 的 minor 跨越升级
 // （上游 v4.2.x 同步批次的真实路径）必须被识别为升级并重写 addon——
 // plugin.gd 的 SpawnConfig 以 major.minor 兼容为准，跨 minor 时旧插件
 // 树连不上新 daemon，install 是唯一的对齐通道。

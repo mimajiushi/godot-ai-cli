@@ -761,3 +761,92 @@ identical), so this sync is plugin-side plus version pins.
   `test_project/tests/test_clients.gd` is 329 KiB, so live mutations are
   unusable there too; the RS-030/032/033 scenarios park the oversized file
   out of `res://` for the duration of the mutation steps.
+
+## 19. beta.25 requirement batch (6 user requirement docs)
+
+`plugin.cfg` 4.2.3 → **4.2.4**. Six requirement docs landed, each with unit
+tests + a `tools/regression-scenarios.md` entry (RS-036…RS-041):
+
+- **`resource create --properties-file`** (`internal/ops/theme_ui_resource_api.go`,
+  `internal/cli/ops.go`, RS-037): the `properties` JSON object can come from a
+  UTF-8 file (BOM tolerated) — PowerShell 5.1 strips embedded quotes from
+  native-program arguments, so the `--properties '{...}'` form was unusable on
+  Windows; an explicit `--properties` flag still wins over the file.
+- **Non-@tool script Resources instantiate via the placeholder path**
+  (`handlers/resource_handler.gd`, same RS): `_instantiate_resource` no longer
+  rejects a concrete non-@tool `class_name` Resource with WRONG_TYPE — it
+  instantiates the script's native base via ClassDB and `set_script()`s it
+  (the editor "create resource" dialog's own path; the PlaceHolderScriptInstance
+  holds exported vars and survives ResourceSaver.save). Live-verified in a real
+  editor: write → save → reload roundtrip preserves properties and the script
+  reference. The required-arg `_init` static guard stays on the real
+  (`scr.new()`) path only — placeholders never run `_init`.
+- **Editor discovery / attach** (`internal/godot/editors_scan*.go`,
+  `internal/cli/status_stop.go`, `internal/cli/launch.go`, RS-036/038/039):
+  `status` prints `known_daemons`/`live_daemons` on the failure path too, and
+  the hint only suggests `launch` when NO daemon on the machine is alive;
+  every known-daemon entry carries `version_relation` (same/newer/older vs the
+  bundled plugin); `status --project <dir>` detects an editor that is open but
+  connected to no daemon and fails with `EDITOR_OPEN_UNCONNECTED`
+  (editor pid + running game + live daemons + a `--attach` suggestion);
+  `launch --attach` pins the daemon ports for the project and waits for the
+  already-open editor's plugin to connect — spawning nothing, timing out
+  loudly with `EDITOR_NOT_CONNECTED`; plain `launch` refuses to double-open
+  against such an editor (scan: `--editor` + absolute `--path`, or a
+  `--remote-debug`/`--editor-pid` game process backfilling the project for
+  `--path ./` forms); `status --prune` deletes dead `daemon-*.json` records.
+- **Handshake-rejection visibility** (`internal/bridge/server.go`,
+  `internal/daemon/daemon.go`, `internal/cli/rejections.go`, `internal/cli/plugin.go`,
+  RS-040): the bridge records every refused v4 handshake (version gate,
+  malformed frames, nonce/proof failures, godot-version gate, duplicate
+  session) into an 8-entry ring — with peer version, expected version, editor
+  pid and project path — and exposes it as `GET /godot-ai/cli/rejections`;
+  a v3-era first frame (`type:"handshake"`, the original incident's shape) is
+  refused with the peer identity best-effort extracted into the record
+  (`legacy_v3_handshake`, `legacyRejectionFrom`) — a beta.18 live replay showed
+  peer 3.2.10/pid/project in all three CLI surfaces;
+  `PLUGIN_DISCONNECTED(no_active_session)` carries `recent_rejections` +
+  a full-editor-restart hint; `status` merges rejections from every live known
+  daemon (newest 5) with a hint; `launch`'s timeout envelopes
+  (`LAUNCH_TIMEOUT` / `EDITOR_NOT_CONNECTED`) include them; `plugin install`
+  probes the daemon and, when a connected session or rejected handshake for
+  the project reports an in-memory plugin version different from the freshly
+  installed disk version, answers with a `PROJECT_PLUGIN_MISMATCH` warning and
+  `next_steps` — installing files never replaces code an already-open editor
+  loaded.
+- **`update` proxy/diagnostics** (`internal/update/update.go`,
+  `internal/cli/update.go`, RS-041): `--proxy <url>` and `--proxy auto`
+  (HTTPS_PROXY/HTTP_PROXY env, then the Windows registry system proxy);
+  downloads retry 3× with exponential backoff (not on 4xx) and failures carry
+  `url`/`http_status`/`content_length`/`bytes_read`/`redirect_host`/
+  `proxy_used`/`attempts` plus actionable guidance (explicit-proxy retry or
+  manual install); `unexpected EOF` is rendered as an interrupted-at-X/Y-bytes
+  message naming the TUN/proxy suspect; `--check` answers availability only;
+  a failed download never performs the `.old` rename.
+- **Eval single-line loop semantics** (`internal/ops/editor.go`, SKILL.md,
+  RS-036): the docs now state the verified GDScript inline-suite behaviour —
+  `for i in range(5): k += 1; return k` COMPILES but returns after the first
+  iteration (the return is inside the loop body) — and point loops at
+  `--code-file`; the previous "fails to parse" claim was wrong. A GDScript
+  wrap test pins multi-line loop indentation through
+  `_build_eval_script_source`.
+
+- **Attach port re-resolution** (`utils/server_lifecycle.gd`, `plugin.gd`,
+  same RS-039): the lifecycle plan captures its http/ws ports once at editor
+  startup (`configure()` is one-shot), so a pin written later by
+  `launch --attach` was invisible to BLOCKED rechecks — the recheck re-probed
+  the stale port forever. A fork patch adds `endpoint_policy_refresher`: before
+  `_begin_start_episode` (fresh starts AND rechecks) the plugin re-reads the
+  project pin (project file > EditorSettings > default) and merges the
+  endpoint fields. Live-verified: a blocked windowed editor adopted the daemon
+  minutes after startup (`adopted external server` in the editor log).
+  Companion lessons pinned in RS-039: the plugin self-disables in headless
+  editors, and WMI quotes argument values which the CLI scan must strip.
+
+Test-hermeticity fixes that landed in the same batch: `resolveDaemonPort`
+gained a `daemonReachableFn` seam (the recorded-then-dead-port test used to
+fail whenever ANY daemon occupied the real default port — e.g. the user's own
+session), and the CLI's record path plumbing (`daemonRecordPath`) goes through
+the same `userCacheDir` seam as enumeration (`daemon.PIDFilePath` reads the
+real `os.UserCacheDir` directly, so `--prune` testing and the stale-pid
+diagnostic were unstubbable).

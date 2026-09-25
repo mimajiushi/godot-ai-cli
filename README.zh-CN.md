@@ -180,6 +180,11 @@ PNG/JPEG 的指定坐标像素——贴图配色分析与截图验证都不再�
 `godot-ai-cli update` 查询 GitHub Releases 的最新版本（stable 与 prerelease 标签都计入），
 与当前构建做语义化版本比较，经确认提示后下载对应平台的 zip、按 release 校验和文件验证 SHA256，然后原地替换可执行文件
 （Windows 上先改名留底；残留的 `.old` 会在下次启动时清理）。更新后需要重启。
+下载失败会自动退避重试，并在错误里给出可机读诊断（`url`/`http_status`/`content_length`/
+`bytes_read`/`redirect_host`/`proxy_used`/`attempts`）——TUN/fake-ip 代理环境下不再是
+一句没头没尾的 `unexpected EOF`。`--proxy <url>` 显式指定代理；`--proxy auto` 依次读
+`HTTPS_PROXY`/`HTTP_PROXY` 环境变量与 Windows 注册表系统代理——系统栈能用但 Go 下载
+被掐的现场，这就是解法。`--check` 只回答「有没有新版本」，不下载不替换。
 `--yes` 跳过确认提示；在无终端环境（脚本、CI、agent 管道）下不会静默执行更新——
 结果为 `"status":"cancelled"` 并附带 release 详情与提示，调用方据此以 `--yes` 重跑即可应用更新。
 

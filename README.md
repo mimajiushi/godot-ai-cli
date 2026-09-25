@@ -211,6 +211,13 @@ it semantically against the running build, and — after a confirmation prompt �
 downloads the platform zip, verifies its SHA256 against the release checksums
 file, and swaps the executable in place (rename-aside on Windows; the leftover
 `.old` binary is removed on the next startup). A restart is required afterwards.
+Downloads retry with backoff and report machine-readable diagnostics
+(`url`/`http_status`/`content_length`/`bytes_read`/`redirect_host`/`proxy_used`/
+`attempts`) on failure, so a TUN/fake-ip proxy setup is diagnosable instead of
+a bare `unexpected EOF`. `--proxy <url>` forces a proxy and `--proxy auto`
+reads `HTTPS_PROXY`/`HTTP_PROXY` (then the Windows system proxy from the
+registry) — the fix when the system stack works but Go's downloads die.
+`--check` answers only the availability question (no download, no replace).
 `--yes` skips the prompt; without a terminal (scripts, CI, agent pipes) the
 update is NOT applied silently — the result is `"status":"cancelled"` plus the
 release details and a hint, so the caller can re-run with `--yes` to apply.

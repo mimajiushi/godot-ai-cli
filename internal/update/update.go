@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/godot"
 	"github.com/mimajiushi/godot-ai-cli/internal/ops"
 	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
@@ -94,6 +96,15 @@ type Options struct {
 	// PromptOut receives the confirmation prompt (default os.Stderr), so
 	// stdout stays pure JSON.
 	PromptOut io.Writer
+	// CheckOnly (--check) stops after the version-availability check: the
+	// result carries update_available and the release details, nothing is
+	// downloaded or replaced.
+	CheckOnly bool
+	// Proxy (--proxy)："" 走默认（net/http 的 ProxyFromEnvironment，认
+	// HTTPS_PROXY/HTTP_PROXY 环境变量）；"auto" 先读环境变量，未设置时
+	// Windows 再读注册表系统代理（HKCU Internet Settings）；其它值按
+	// 显式代理 URL 解析（如 http://127.0.0.1:7897）。
+	Proxy string
 }
 
 // withDefaults fills zero-value fields with their production defaults.
@@ -105,7 +116,7 @@ func (o Options) withDefaults() Options {
 		o.BaseURL = DefaultAPIBase
 	}
 	if o.HTTPClient == nil {
-		o.HTTPClient = &http.Client{Timeout: 2 * time.Minute}
+		o.HTTPClient = proxyHTTPClient(o.Proxy)
 	}
 	if o.GOOS == "" {
 		o.GOOS = runtime.GOOS
@@ -122,6 +133,44 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// proxyHTTPClient 按 Proxy 设置构造 HTTP client：显式/auto 命中时代理
+// 进 transport（诊断数据里能如实报 proxy_used）；空值保持默认行为
+// （ProxyFromEnvironment 依旧生效）。
+func proxyHTTPClient(proxy string) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if urlStr, ok := ResolveProxy(proxy); ok {
+		if u, err := urlpkg.Parse(urlStr); err == nil {
+			transport.Proxy = http.ProxyURL(u)
+		}
+	}
+	return &http.Client{Timeout: 2 * time.Minute, Transport: transport}
+}
+
+// ResolveProxy 解析 --proxy 的取值为「实际代理 URL」：
+//   - "auto"：HTTPS_PROXY/HTTP_PROXY（含小写形式）→ Windows 注册表系统代理；
+//   - 显式 URL：原样返回；
+//   - ""/未命中：("", false)——调用方保持默认行为。
+//
+// 单独成函数是为了让 CLI 能在错误诊断里如实报 proxy_used。
+func ResolveProxy(proxy string) (string, bool) {
+	switch proxy {
+	case "":
+		return "", false
+	case "auto":
+		for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+			if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+				return v, true
+			}
+		}
+		if v := godot.WindowsSystemProxy(); v != "" {
+			return v, true
+		}
+		return "", false
+	default:
+		return proxy, true
+	}
+}
+
 // Run executes the full update flow and returns the JSON-ready result map.
 // A nil error always carries a printable result; failures come back as
 // *Error so the CLI can emit its standard envelope.
@@ -130,6 +179,14 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 
 	rel, err := FetchLatestRelease(ctx, opts.HTTPClient, opts.BaseURL, version.RepoOwner, version.RepoName)
 	if err != nil {
+		// 查询失败也带上代理诊断：TUN/fake-ip 现场里「API 通不通」与
+		// 「走没走代理」是同一个问题（需求 update-behind-tun-fakeip）。
+		var uerr *Error
+		if errors.As(err, &uerr) && uerr.Data != nil {
+			if proxy, ok := ResolveProxy(opts.Proxy); ok {
+				uerr.Data["proxy_used"] = proxy
+			}
+		}
 		return nil, err
 	}
 	latest := strings.TrimPrefix(rel.TagName, "v")
@@ -153,6 +210,14 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 		"current_version":   opts.CurrentVersion,
 		"latest_version":    latest,
 		"release_notes_url": rel.HTMLURL,
+	}
+
+	// --check：只回答「有没有新版本」，不下载不替换（需求 §4.4——行为等价
+	// 于非 tty 的 cancelled，但显式、可发现、写进 help 示例）。
+	if opts.CheckOnly {
+		result := withStatus(availability, "ok")
+		result["message"] = "new version available; re-run without --check to apply"
+		return result, nil
 	}
 
 	if !opts.AssumeYes {
@@ -546,15 +611,36 @@ func SelectAssets(rel Release, goos, goarch string) (asset, checksums Asset, err
 	return asset, checksums, nil
 }
 
+// downloadAttempts / downloadBackoff 是 release 资产下载的重试预算：
+// TUN/fake-ip 代理环境下的典型失败是「连接中途被掐断」，一次重试常常
+// 就过；4xx 不重试（重试无意义），指数退避避免对脆弱链路雪上加霜。
+const (
+	downloadAttempts = 3
+	downloadBackoff  = time.Second
+)
+
+// downloadDiag 是一次下载尝试的诊断快照——UPDATE_DOWNLOAD_FAILED 的
+// data 字段全部来自这里（需求 update-behind-tun-fakeip §4.2：错误必须
+// 可诊断，机器侧能据此自动切代理重试）。
+type downloadDiag struct {
+	URL           string `json:"url"`                     // 资产 URL
+	HTTPStatus    int    `json:"http_status"`             // 0 = 连接层失败
+	ContentLength int64  `json:"content_length"`          // 声明长度（-1 = 未知）
+	BytesRead     int64  `json:"bytes_read"`              // 实际读到
+	RedirectHost  string `json:"redirect_host,omitempty"` // 302 后的最终落点
+	ProxyUsed     string `json:"proxy_used,omitempty"`    // 生效的代理
+	Attempts      int    `json:"attempts"`                // 总尝试次数
+}
+
 // DownloadAndVerify fetches the asset and the checksums file and returns
 // the asset bytes only when the SHA256 matches. Everything happens in
 // memory, so a mismatch provably leaves the install untouched.
 func DownloadAndVerify(ctx context.Context, client *http.Client, asset, checksums Asset) ([]byte, error) {
-	zipData, err := download(ctx, client, asset.BrowserDownloadURL)
+	zipData, err := downloadWithRetry(ctx, client, asset.BrowserDownloadURL)
 	if err != nil {
 		return nil, err
 	}
-	sumsData, err := download(ctx, client, checksums.BrowserDownloadURL)
+	sumsData, err := downloadWithRetry(ctx, client, checksums.BrowserDownloadURL)
 	if err != nil {
 		return nil, err
 	}
@@ -564,28 +650,120 @@ func DownloadAndVerify(ctx context.Context, client *http.Client, asset, checksum
 	return zipData, nil
 }
 
-// download GETs one URL and returns the body.
-func download(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+// downloadWithRetry 包一层重试：连接层失败 / 5xx / 读取中断都重试到
+// downloadAttempts 次，最后一次失败的诊断进 Error.Data。
+func downloadWithRetry(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= downloadAttempts; attempt++ {
+		data, diag, err := downloadOnce(ctx, client, url)
+		if err == nil {
+			return data, nil
+		}
+		diag.Attempts = attempt
+		lastErr = downloadError(url, diag, err)
+		if !retryableDownload(err, diag) {
+			break // 4xx 等确定性失败不重试
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(downloadBackoff << (attempt - 1)):
+		}
+	}
+	return nil, lastErr
+}
+
+// retryableDownload：4xx（客户端错误）重试无意义，其余（连接层/5xx/
+// 读取中断）都值得再试。判定看原始 err（EOF 系=中断）与 diag.HTTPStatus
+// （0=连接层、>=500=服务端）；包装后的 *Error 只带 http_status 的副本，
+// 2xx 中断会被误判成「成功响应」。
+func retryableDownload(err error, diag downloadDiag) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	return diag.HTTPStatus == 0 || diag.HTTPStatus >= 500
+}
+
+// downloadError 把最后一次失败包装成带诊断 data 的 Error：unexpected
+// EOF 换成「中断」文案并给出可执行下一步（显式代理示例 + 手动安装三
+// 步），不再是一句没头没尾的连接错误。
+func downloadError(url string, diag downloadDiag, cause error) *Error {
+	message := fmt.Sprintf("download %s: %v", url, cause)
+	if errors.Is(cause, io.ErrUnexpectedEOF) || errors.Is(cause, io.EOF) {
+		message = fmt.Sprintf("download %s: 连接在 %d/%d 字节处中断（可能被本地代理/TUN 中断）",
+			url, diag.BytesRead, diag.ContentLength)
+	}
+	message += ("；可尝试：① 显式代理重试：godot-ai-cli update --proxy http://127.0.0.1:7897" +
+		"（--proxy auto 读取系统代理）② 手动安装：下载 zip → 按 checksums 校验 sha256 → 替换可执行文件")
+	data := map[string]any{
+		"url":            diag.URL,
+		"http_status":    diag.HTTPStatus,
+		"content_length": diag.ContentLength,
+		"bytes_read":     diag.BytesRead,
+		"attempts":       diag.Attempts,
+	}
+	if diag.RedirectHost != "" {
+		data["redirect_host"] = diag.RedirectHost
+	}
+	if diag.ProxyUsed != "" {
+		data["proxy_used"] = diag.ProxyUsed
+	}
+	return &Error{Code: CodeDownloadFailed, Message: message, Data: data}
+}
+
+// countingReader 给 io.ReadAll 挂上字节计数——「声明 100 只收到 30」
+// 这类中断必须可观测。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// downloadOnce 单次下载尝试：返回 body 与诊断快照。失败也带回快照
+// （bytes_read 等字段对诊断一样有价值）。
+func downloadOnce(ctx context.Context, client *http.Client, url string) ([]byte, downloadDiag, error) {
+	diag := downloadDiag{URL: url, ContentLength: -1}
 	if url == "" {
-		return nil, &Error{Code: CodeDownloadFailed, Message: "the release asset carries no download URL"}
+		return nil, diag, &Error{Code: CodeDownloadFailed, Message: "the release asset carries no download URL"}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, diag, err
+	}
+	// 如实上报生效代理：显式 transport 从 client 的 Transport 读；
+	// 默认 client 用 ProxyFromEnvironment 判定（含 HTTPS_PROXY 环境变量）。
+	if transport, ok := client.Transport.(*http.Transport); ok && transport.Proxy != nil {
+		if u, _ := transport.Proxy(req); u != nil {
+			diag.ProxyUsed = u.String()
+		}
+	} else if u, _ := http.ProxyFromEnvironment(req); u != nil {
+		diag.ProxyUsed = u.String()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, &Error{Code: CodeDownloadFailed, Message: fmt.Sprintf("download %s: %v", url, err)}
+		return nil, diag, err
 	}
 	defer resp.Body.Close()
+	diag.HTTPStatus = resp.StatusCode
+	diag.ContentLength = resp.ContentLength
+	if resp.Request != nil && resp.Request.URL != nil {
+		diag.RedirectHost = resp.Request.URL.Host
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, &Error{Code: CodeDownloadFailed, Message: fmt.Sprintf("download %s: server answered %s", url, resp.Status)}
+		return nil, diag, fmt.Errorf("server answered %s", resp.Status)
 	}
-	data, err := io.ReadAll(resp.Body)
+	cr := &countingReader{r: resp.Body}
+	data, err := io.ReadAll(cr)
+	diag.BytesRead = cr.n
 	if err != nil {
-		return nil, &Error{Code: CodeDownloadFailed, Message: fmt.Sprintf("read %s: %v", url, err)}
+		return nil, diag, err
 	}
-	return data, nil
+	return data, diag, nil
 }
 
 // verifyChecksum looks up the asset's `sha256  filename` line and compares

@@ -606,3 +606,210 @@ func assertFileContent(t *testing.T, path, want string) {
 		t.Errorf("%s = %q, want %q", path, data, want)
 	}
 }
+
+// TestDownloadTruncatedStreamRetries：声明 100 字节只收到 30 的连接中断
+// （TUN/fake-ip 现场的典型形状）必须重试到 3 次，且最终错误的 data 带
+// url/http_status/content_length/bytes_read/attempts，message 说明中断
+// 位置与下一步（需求 update-behind-tun-fakeip §4.2/4.3）。
+func TestDownloadTruncatedStreamRetries(t *testing.T) {
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 30)) // 声明 100 实发 30 后挂起关闭
+	}))
+	defer server.Close()
+
+	_, err := DownloadAndVerify(context.Background(), server.Client(),
+		Asset{Name: "a.zip", BrowserDownloadURL: server.URL + "/a.zip"},
+		Asset{Name: "sums.txt", BrowserDownloadURL: server.URL + "/sums.txt"})
+	if err == nil {
+		t.Fatal("truncated download must fail")
+	}
+	derr, ok := err.(*Error)
+	if !ok || derr.Code != CodeDownloadFailed {
+		t.Fatalf("err = %v", err)
+	}
+	if hits != downloadAttempts {
+		t.Errorf("hits = %d, want %d attempts", hits, downloadAttempts)
+	}
+	for _, key := range []string{"url", "http_status", "content_length", "bytes_read", "attempts"} {
+		if _, present := derr.Data[key]; !present {
+			t.Errorf("diag missing %s: %v", key, derr.Data)
+		}
+	}
+	if derr.Data["http_status"] != 200 || derr.Data["content_length"] != int64(100) ||
+		derr.Data["bytes_read"] != int64(30) || derr.Data["attempts"] != downloadAttempts {
+		t.Errorf("diag = %v", derr.Data)
+	}
+	if !strings.Contains(derr.Message, "30/100 字节处中断") || !strings.Contains(derr.Message, "--proxy") {
+		t.Errorf("message = %q", derr.Message)
+	}
+}
+
+// TestDownloadNotFoundNoRetry：4xx 是确定性失败，重试无意义——只试 1 次。
+func TestDownloadNotFoundNoRetry(t *testing.T) {
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	_, err := DownloadAndVerify(context.Background(), server.Client(),
+		Asset{Name: "a.zip", BrowserDownloadURL: server.URL + "/a.zip"},
+		Asset{Name: "sums.txt", BrowserDownloadURL: server.URL + "/sums.txt"})
+	derr, ok := err.(*Error)
+	if !ok || derr.Code != CodeDownloadFailed {
+		t.Fatalf("err = %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("hits = %d, want 1 (no retry on 4xx)", hits)
+	}
+	if derr.Data["http_status"] != 404 || derr.Data["attempts"] != 1 {
+		t.Errorf("diag = %v", derr.Data)
+	}
+}
+
+// TestDownloadRedirectHostRecorded：302 落点（GitHub 资产的
+// objects.githubusercontent.com 形态）必须进诊断 data。
+func TestDownloadRedirectHostRecorded(t *testing.T) {
+	var finalHits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			http.Redirect(w, r, "/final", http.StatusFound)
+		case "/final":
+			finalHits++
+			w.Header().Set("Content-Length", "50")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, 10)) // 同样中断，触发带诊断的错误
+		}
+	}))
+	defer server.Close()
+
+	_, err := DownloadAndVerify(context.Background(), server.Client(),
+		Asset{Name: "a.zip", BrowserDownloadURL: server.URL + "/start"},
+		Asset{Name: "sums.txt", BrowserDownloadURL: server.URL + "/sums.txt"})
+	derr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("err = %v", err)
+	}
+	host, _ := derr.Data["redirect_host"].(string)
+	if !strings.Contains(host, "127.0.0.1") || finalHits == 0 {
+		t.Errorf("redirect_host = %q, finalHits = %d", host, finalHits)
+	}
+}
+
+// TestResolveProxy：显式 URL 原样返回；auto 命中环境变量；环境变量缺失时
+// 返回未命中或注册表值（本机是否配了系统代理不可控，两种都合法）。
+func TestResolveProxy(t *testing.T) {
+	if got, ok := ResolveProxy("http://127.0.0.1:7897"); !ok || got != "http://127.0.0.1:7897" {
+		t.Errorf("explicit = %q, %v", got, ok)
+	}
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+	if got, ok := ResolveProxy("auto"); !ok || got != "http://127.0.0.1:7890" {
+		t.Errorf("auto+env = %q, %v", got, ok)
+	}
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("http_proxy", "")
+	got, ok := ResolveProxy("auto")
+	if ok && !strings.HasPrefix(got, "http://") {
+		t.Errorf("auto without env = %q, %v", got, ok)
+	}
+	if _, ok := ResolveProxy(""); ok {
+		t.Error("empty proxy must stay default")
+	}
+}
+
+// TestRunCheckOnly：--check 只回答可用性（status ok + update_available +
+// release 详情），绝不触达下载端点。
+func TestRunCheckOnly(t *testing.T) {
+	var downloadHits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"tag_name": "v9.9.9", "html_url": base + "/tag/v9.9.9", "draft": false,
+				"assets": []map[string]any{
+					{"name": "godot-ai-cli-9.9.9-windows-amd64.zip", "browser_download_url": base + "/dl/zip"},
+				},
+			}})
+		case strings.HasPrefix(r.URL.Path, "/dl/"):
+			downloadHits++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := Run(context.Background(), Options{
+		CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+		GOOS: "windows", GOARCH: "amd64", CheckOnly: true, PromptOut: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["status"] != "ok" || result["update_available"] != true || result["latest_version"] != "9.9.9" {
+		t.Errorf("result = %v", result)
+	}
+	if downloadHits != 0 {
+		t.Errorf("--check touched the download endpoint %d times", downloadHits)
+	}
+
+	// 已是最新时 --check 同样干净。
+	result, err = Run(context.Background(), Options{
+		CurrentVersion: "9.9.9", BaseURL: server.URL, HTTPClient: server.Client(),
+		GOOS: "windows", GOARCH: "amd64", CheckOnly: true, PromptOut: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["update_available"] != false {
+		t.Errorf("up-to-date --check = %v", result)
+	}
+}
+
+// TestRunFailedDownloadLeavesNoOld：下载失败路径绝不能留下 .old 半成品
+// （需求 §4.5——重命名只许发生在下载+校验+解压全部成功之后）。
+func TestRunFailedDownloadLeavesNoOld(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "godot-ai-cli.exe")
+	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"tag_name": "v0.2.0", "html_url": base + "/tag", "draft": false,
+				"assets": []map[string]any{
+					{"name": "godot-ai-cli-0.2.0-windows-amd64.zip", "browser_download_url": base + "/truncated.zip"},
+				},
+			}})
+		default:
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, 20))
+		}
+	}))
+	defer server.Close()
+
+	_, err := Run(context.Background(), Options{
+		CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+		GOOS: "windows", GOARCH: "amd64", InstallDir: dir, AssumeYes: true, PromptOut: io.Discard,
+	})
+	if err == nil {
+		t.Fatal("truncated download must fail the update")
+	}
+	assertFileContent(t, target, "old-binary")
+	if _, statErr := os.Stat(target + ".old"); !os.IsNotExist(statErr) {
+		t.Errorf("failed update left a .old behind (stat err = %v)", statErr)
+	}
+}

@@ -21,6 +21,8 @@ func newUpdateCommand() *cobra.Command {
 	var (
 		yes     bool
 		fromDir string
+		check   bool
+		proxy   string
 	)
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -35,7 +37,24 @@ touching the install.
 
 On Windows the current binary is renamed to <exe>.old first (a running
 executable cannot be overwritten); the next startup removes the
-leftover. On Unix the binary is replaced atomically.
+leftover. On Unix the binary is replaced atomically. A FAILED download
+never performs that rename — no half-finished install is left behind.
+
+Downloads retry up to 3 times with exponential backoff; a failure
+reports machine-readable diagnostics (url, http_status, content_length,
+bytes_read, redirect_host, proxy_used, attempts) plus the actionable
+next steps (an explicit --proxy retry, or manual install).
+
+--proxy selects a download proxy: an explicit URL
+(http://127.0.0.1:7897) or "auto" — environment HTTPS_PROXY/HTTP_PROXY
+first, then the Windows system proxy (registry) when unset. Without
+--proxy the Go default applies (environment variables only) — note a
+TUN/fake-ip setup may still break Go's downloads where the system
+stack works, which is exactly what --proxy auto is for.
+
+--check stops after the availability answer: {"status":"ok",
+"update_available":true, ...release details} — nothing is downloaded
+or replaced.
 
 The update applies only after an interactive confirmation; --yes skips
 the prompt. Without a terminal there is no prompt: the result is
@@ -44,7 +63,9 @@ apply.
 
 Examples:
   godot-ai-cli update
-  godot-ai-cli update --yes`,
+  godot-ai-cli update --yes
+  godot-ai-cli update --check
+  godot-ai-cli update --yes --proxy auto`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			result, err := update.Run(cmd.Context(), update.Options{
@@ -52,6 +73,8 @@ Examples:
 				BaseURL:        updateAPIBase,
 				InstallDir:     fromDir,
 				AssumeYes:      yes,
+				CheckOnly:      check,
+				Proxy:          proxy,
 				In:             cmd.InOrStdin(),
 				IsTerminal:     stdinIsTerminal(cmd.InOrStdin()),
 				PromptOut:      cmd.ErrOrStderr(),
@@ -67,6 +90,8 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply the update without the interactive confirmation")
+	cmd.Flags().BoolVar(&check, "check", false, "only report whether a newer version exists (no download, no replace)")
+	cmd.Flags().StringVar(&proxy, "proxy", "", `download proxy: an explicit URL (http://127.0.0.1:7897) or "auto" (HTTPS_PROXY/HTTP_PROXY env, then the Windows system proxy)`)
 	cmd.Flags().StringVar(&fromDir, "from", "", "update the godot-ai-cli install in this directory instead of the running executable")
 	// --from exists so tests can drive the replace mechanics against a fake
 	// install dir; hidden because end users should never need it.

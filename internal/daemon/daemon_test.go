@@ -16,7 +16,7 @@ import (
 )
 
 // testVersion mirrors the vendored plugin version the daemon advertises.
-const testVersion = "4.1.0"
+const testVersion = "4.2.3"
 
 // startDaemon boots a daemon on ephemeral loopback ports.
 func startDaemon(t *testing.T) *daemon.Daemon {
@@ -220,10 +220,10 @@ func TestSessionsExposeOrigin(t *testing.T) {
 // handshake was accepted with a patch-level version drift (major.minor
 // compatible, patch unequal) — the flag is absent for aligned sessions.
 func TestSessionsExposePluginStale(t *testing.T) {
-	d := startDaemon(t) // daemon version testVersion = "4.1.0"
+	d := startDaemon(t) // daemon version testVersion = "4.2.3"
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
 	aligned := mockplugin.Dial(t, addr, d.Bridge().WSCapability, nil) // default plugin_version == testVersion
-	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.1.1"})
+	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.2.4"})
 
 	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
 	if code != http.StatusOK {
@@ -244,8 +244,8 @@ func TestSessionsExposePluginStale(t *testing.T) {
 	}
 
 	st := byID[stale.SessionID]
-	if st["plugin_version"] != "4.1.1" {
-		t.Errorf("stale session plugin_version = %v, want 4.1.1", st["plugin_version"])
+	if st["plugin_version"] != "4.2.4" {
+		t.Errorf("stale session plugin_version = %v, want 4.2.4", st["plugin_version"])
 	}
 	if st["plugin_stale"] != true {
 		t.Errorf("stale session plugin_stale = %v, want true", st["plugin_stale"])

@@ -21,8 +21,8 @@ func newProject(t *testing.T, projectGodot string) string {
 }
 
 func TestPluginVersion(t *testing.T) {
-	if got := plugin.PluginVersion(); got != "4.1.0" {
-		t.Fatalf("PluginVersion() = %q, want 4.1.0", got)
+	if got := plugin.PluginVersion(); got != "4.2.3" {
+		t.Fatalf("PluginVersion() = %q, want 4.2.3", got)
 	}
 }
 
@@ -44,6 +44,42 @@ func TestInstallClearsStaleUpstreamUpdateMarkers(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf(".godot_ai_update 未被清除（stat err = %v）", err)
+	}
+}
+
+// TestInstallUpgrades41xTo42x：v4.1.x → v4.2.3 的 minor 跨越升级
+// （上游 v4.2.x 同步批次的真实路径）必须被识别为升级并重写 addon——
+// plugin.gd 的 SpawnConfig 以 major.minor 兼容为准，跨 minor 时旧插件
+// 树连不上新 daemon，install 是唯一的对齐通道。
+func TestInstallUpgrades41xTo42x(t *testing.T) {
+	dir := newProject(t, "; engine config\n")
+	cfgPath := filepath.Join(dir, "addons", "godot_ai", "plugin.cfg")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟 beta.24（插件 4.1.0）已安装的项目。
+	oldCfg := "[plugin]\n\nname=\"Godot AI\"\ndescription=\"MCP server and AI tools for Godot\"\nauthor=\"Godot AI\"\nversion=\"4.1.0\"\nscript=\"plugin.gd\"\n"
+	if err := os.WriteFile(cfgPath, []byte(oldCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := plugin.InstalledVersion(dir)
+	if err != nil || v != "4.1.0" {
+		t.Fatalf("InstalledVersion = %q, %v", v, err)
+	}
+
+	upgraded, err := plugin.EnsureInstalled(dir)
+	if err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	if !upgraded.Installed || !upgraded.Upgraded {
+		t.Errorf("4.1.0 → %s 未被识别为升级: %+v", plugin.PluginVersion(), upgraded)
+	}
+	if upgraded.PreviousVersion != "4.1.0" || upgraded.Version != plugin.PluginVersion() {
+		t.Errorf("versions: %+v", upgraded)
+	}
+	if v, _ := plugin.InstalledVersion(dir); v != plugin.PluginVersion() {
+		t.Errorf("安装后版本 = %q, want %q", v, plugin.PluginVersion())
 	}
 }
 

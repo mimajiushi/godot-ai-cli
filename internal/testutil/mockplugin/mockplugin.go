@@ -231,7 +231,7 @@ func dialAndAuth(t *testing.T, addr, capability string, fields map[string]any) (
 		"session_id":         fmt.Sprintf("mock-%d", nextID.Add(1)),
 		"godot_version":      "4.7-stable (official)",
 		"project_path":       "C:/projects/mock",
-		"plugin_version":     "4.1.0",
+		"plugin_version":     "4.2.3",
 		"readiness":          "ready",
 		"editor_pid":         4321,
 		"server_launch_mode": "manual",

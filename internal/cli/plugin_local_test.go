@@ -80,9 +80,9 @@ func TestPluginStatusReportsDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 与 bundled（4.1.x）同 major.minor 的 patch 漂移——握手仍判兼容。
+	// 与 bundled（4.2.x）同 major.minor 的 patch 漂移——握手仍判兼容。
 	if err := os.WriteFile(cfgPath,
-		[]byte(strings.Replace(string(cfg), `version="`+plugin.PluginVersion()+`"`, `version="4.1.9"`, 1)), 0o644); err != nil {
+		[]byte(strings.Replace(string(cfg), `version="`+plugin.PluginVersion()+`"`, `version="4.2.9"`, 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,13 +94,13 @@ func TestPluginStatusReportsDrift(t *testing.T) {
 		t.Errorf("installed/enabled = %v / %v", out["installed"], out["enabled"])
 	}
 	if out["compatible"] != true {
-		t.Errorf("4.1.9 vs %s is major.minor compatible: %v", plugin.PluginVersion(), out["compatible"])
+		t.Errorf("4.2.9 vs %s is major.minor compatible: %v", plugin.PluginVersion(), out["compatible"])
 	}
 	plan, _ := out["plugin"].(map[string]any)
 	if plan["version_match"] != false {
 		t.Errorf("version_match = %v, want false", plan["version_match"])
 	}
-	if plan["installed_version"] != "4.1.9" {
+	if plan["installed_version"] != "4.2.9" {
 		t.Errorf("installed_version = %v", plan["installed_version"])
 	}
 	update, _ := plan["would_update"].([]any)

@@ -19,7 +19,7 @@ import (
 
 // testVersion is the server version every test bridge reports; it must
 // equal the vendored plugin.cfg version for real deployments.
-const testVersion = "4.1.0"
+const testVersion = "4.2.3"
 
 // startServer boots a bridge on an ephemeral loopback port.
 func startServer(t *testing.T) *bridge.Server {
@@ -623,7 +623,7 @@ func TestDisconnectFailsInFlightCommand(t *testing.T) {
 // mismatches and malformed versions are rejected before any session
 // registers.
 func TestHandshakeVersionMatrix(t *testing.T) {
-	s := startServer(t) // server version testVersion = "4.1.0"
+	s := startServer(t) // server version testVersion = "4.2.3"
 
 	t.Run("equal version accepted without stale", func(t *testing.T) {
 		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": testVersion})
@@ -638,7 +638,7 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 	})
 
 	t.Run("patch-newer plugin accepted stale", func(t *testing.T) {
-		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": "4.1.1"})
+		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": "4.2.4"})
 		if p.Ack["plugin_stale"] != true {
 			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
 		}
@@ -654,12 +654,12 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 
 	t.Run("patch-older plugin accepted stale", func(t *testing.T) {
 		// 另起一台 patch 更高的服务端，让"插件更旧"有落差可言。
-		older := bridge.NewServer("4.1.3")
+		older := bridge.NewServer("4.2.5")
 		if err := older.Start(0); err != nil {
 			t.Fatalf("bridge start: %v", err)
 		}
 		t.Cleanup(func() { _ = older.Shutdown(context.Background()) })
-		p := mockplugin.Dial(t, older.Addr(), older.WSCapability, map[string]any{"plugin_version": "4.1.0"})
+		p := mockplugin.Dial(t, older.Addr(), older.WSCapability, map[string]any{"plugin_version": testVersion})
 		if p.Ack["plugin_stale"] != true {
 			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
 		}
@@ -667,7 +667,7 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 
 	t.Run("minor mismatch rejected", func(t *testing.T) {
 		_, reason := mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
-			"session_id": "rej-minor@0001", "plugin_version": "4.2.0"})
+			"session_id": "rej-minor@0001", "plugin_version": "4.3.0"})
 		if !strings.Contains(reason, "incompatible plugin version") {
 			t.Errorf("close reason = %q, want an incompatible-version explanation", reason)
 		}

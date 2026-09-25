@@ -1,7 +1,7 @@
 // auth.go — v4 认证握手的服务端实现。
 //
 // 逐字节镜像上游 src/godot_ai/transport/websocket.py 与
-// protocol/envelope.py（v4.1.0）：编辑器插件先证明持有本实例的
+// protocol/envelope.py（v4.2.3）：编辑器插件先证明持有本实例的
 // WebSocket capability（HMAC 挑战-应答），通过后才允许注册会话。
 // v3 插件与未知对端一律 fail-closed（4002/4003），不存在降级通道。
 package bridge

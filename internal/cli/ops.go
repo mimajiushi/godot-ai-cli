@@ -363,6 +363,24 @@ func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 			params["commands"] = commands
 		}
 	}
+	// resource create 的 --properties-file（需求 resource-create-payload-file）：
+	// 文件内容必须是 JSON object，作为 params["properties"] 的基值；
+	// 显式 --properties flag 在其后应用，仍然优先（与 --params 基值语义一致）。
+	if op.Domain == "resource" && op.Name == "create" {
+		if file, _ := cmd.Flags().GetString("properties-file"); file != "" {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return nil, fmt.Errorf("--properties-file: %v", err)
+			}
+			var props map[string]any
+			// PowerShell 5.1 的 Set-Content -Encoding utf8 会写 UTF-8 BOM，
+			// BOM 在 JSON 解析眼里就是非法字符——与 eval --code-file 同策略剥掉。
+			if err := json.Unmarshal([]byte(stripUTF8BOM(string(data))), &props); err != nil || props == nil {
+				return nil, fmt.Errorf("--properties-file must contain a JSON object: %v", err)
+			}
+			params["properties"] = props
+		}
+	}
 	if op.Domain == "node" && op.Name == "set-property" {
 		// CLI-side shorthand: --node-ref <path> expands to the $node
 		// reference encoding. It is a BASE value — an explicit --value

@@ -237,6 +237,9 @@ func batchOps() []OpSpec {
 			Domain: "batch", Name: "execute", PluginCommand: "batch_execute",
 			Summary: "Run multiple plugin commands atomically (rollback on first error); use --file or --params",
 			Timeout: BatchTimeout, Write: true,
+			// 命名对照（需求 resource-create-payload-file 附带项）：batch_execute
+			// 只认插件命令名，CLI op 名会被拒并在 suggestions 里提示合法插件名。
+			DocNote: "Command naming: batch_execute entries take PLUGIN command names (`create_node`), not CLI op names (`node create`) — an unknown name fails with fuzzy `suggestions`. Rule of thumb: the CLI name is `<domain> <kebab-name>`, the plugin name the snake_case verb_noun shown as `Plugin command:` in every op's -h and entry below (`scene open` → `open_scene`); `call <plugin_command>` accepts the plugin form directly.",
 			Params: []ParamSpec{
 				pj("commands", "commands", false, `JSON array of {"command": ..., "params": {...}} (or pass --file)`),
 				pb("undo", "undo", false, "true", "Roll back applied commands on first error"),

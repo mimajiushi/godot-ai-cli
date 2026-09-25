@@ -268,7 +268,19 @@ static func _instantiate_resource(type_str: String) -> Variant:
 			if not ClassDB.is_parent_class(base_type, "Resource"):
 				return ErrorCodes.make(ErrorCodes.WRONG_TYPE, "%s is not a Resource type (extends %s)" % [type_str, base_type])
 			if not scr.can_instantiate():
-				return ErrorCodes.make(ErrorCodes.WRONG_TYPE, "%s cannot be instantiated in the editor (abstract, or a non-@tool script — add @tool to instantiate it here)" % type_str)
+				# godot-ai-cli fork patch（需求 resource-create-payload-file）：
+				# 非 @tool 的纯数据 Resource 不再硬拒绝——编辑器「创建资源」对话框
+				# 同路径的 placeholder 实例化：按脚本原生基类 ClassDB 实例化后
+				# set_script()，编辑器上下文为不可实例化脚本挂
+				# PlaceHolderScriptInstance；导出属性可写、可 ResourceSaver.save
+				# （demo test_zz_placeholder_probe 实测：写/存/回读全通过）。
+				# placeholder 不执行脚本代码，_init 不会跑；required-arg _init 的
+				# 静态拒绝只约束下面 scr.new() 的真实实例化路径。
+				var placeholder_base: Variant = ClassDB.instantiate(base_type)
+				if placeholder_base == null or not (placeholder_base is Resource):
+					return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR, "Failed to instantiate base %s for %s" % [base_type, type_str])
+				placeholder_base.set_script(scr)
+				return placeholder_base
 			# Reject scripts whose _init() requires arguments BEFORE scr.new():
 			# scr.new() passes no args, so a required-arg _init raises and aborts
 			# this handler mid-call, null-cascading into a generic "malformed

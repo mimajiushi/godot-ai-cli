@@ -240,6 +240,12 @@ func resourceOps() []OpSpec {
 				ps("resource-path", "resource_path", false, "", "res:// path to save to"),
 				pb("overwrite", "overwrite", false, "false", "Replace an existing file"),
 			},
+			// CLI 侧文件载荷通道（需求 resource-create-payload-file）：Windows
+			// PowerShell 5.1 会剥掉原生传参里 --properties 的内嵌双引号，三种
+			// 转义写法全失败；文件通道与 batch execute --file 同模式，绕开 shell。
+			CLIFlags: []CLIFlagSpec{
+				cls("properties-file", "", `read the "properties" JSON object from this UTF-8 file (a leading BOM is tolerated) instead of --properties; an explicit --properties flag still wins`),
+			},
 		},
 		{
 			Domain: "resource", Name: "curve-set-points", PluginCommand: "curve_set_points",

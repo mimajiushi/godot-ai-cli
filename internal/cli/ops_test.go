@@ -266,6 +266,107 @@ func TestCollectParamsNullParams(t *testing.T) {
 	}
 }
 
+// TestCollectParamsPropertiesFile: resource create --properties-file 把文件里的
+// JSON object 作为 params["properties"] 的基值（需求 resource-create-payload-file：
+// PowerShell 5.1 会剥掉 --properties 原生传参里的引号，文件通道绕开 shell）；
+// 显式 --properties flag 仍然优先；缺失/非 object/坏 JSON 三种文件错误都必须是
+// collectParams 阶段的干净报错，而不是落到 daemon 侧。
+func TestCollectParamsPropertiesFile(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "props.json")
+	if err := os.WriteFile(good, []byte(`{"enemy_type":0,"display_name":"普通源石虫"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 正常路径：文件内容成为 properties 基值。
+	op, cmd := leafFor(t, "resource", "create")
+	if err := cmd.Flags().Set("type", "EnemyConfig"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("properties-file", good); err != nil {
+		t.Fatal(err)
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok || props["enemy_type"] != 0.0 || props["display_name"] != "普通源石虫" {
+		t.Errorf("properties = %v", params["properties"])
+	}
+
+	// 显式 --properties 优先于文件（与 --params 基值语义一致）。
+	op, cmd = leafFor(t, "resource", "create")
+	if err := cmd.Flags().Set("type", "EnemyConfig"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("properties-file", good); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("properties", `{"enemy_type":9}`); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	props, ok = params["properties"].(map[string]any)
+	if !ok || props["enemy_type"] != 9.0 {
+		t.Errorf("explicit --properties must win over --properties-file, got %v", params["properties"])
+	}
+
+	// 三种文件错误：缺失 / 非 object / 坏 JSON。
+	for name, content := range map[string]string{
+		"array": `[1,2]`,
+		"bad":   `{not json`,
+	} {
+		bad := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(bad, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		op, cmd = leafFor(t, "resource", "create")
+		if err := cmd.Flags().Set("type", "EnemyConfig"); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Flags().Set("properties-file", bad); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := collectParams(cmd, op); err == nil {
+			t.Errorf("%s content accepted: %s", name, content)
+		}
+	}
+	op, cmd = leafFor(t, "resource", "create")
+	if err := cmd.Flags().Set("type", "EnemyConfig"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("properties-file", filepath.Join(dir, "missing.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("missing --properties-file accepted")
+	}
+
+	// PowerShell 5.1 的 Set-Content -Encoding utf8 会写 UTF-8 BOM——必须容忍。
+	bom := filepath.Join(dir, "bom.json")
+	if err := os.WriteFile(bom, append([]byte("\xef\xbb\xbf"), []byte(`{"enemy_type":3}`)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op, cmd = leafFor(t, "resource", "create")
+	if err := cmd.Flags().Set("type", "EnemyConfig"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("properties-file", bom); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatalf("BOM-prefixed --properties-file rejected: %v", err)
+	}
+	if props, ok := params["properties"].(map[string]any); !ok || props["enemy_type"] != 3.0 {
+		t.Errorf("BOM-prefixed properties = %v", params["properties"])
+	}
+}
+
 // TestOpExamplesParamsDemo: ops without required params get a second
 // example line teaching the --params JSON form with one real optional key;
 // ops with required params keep the single flag-form line; ops without any

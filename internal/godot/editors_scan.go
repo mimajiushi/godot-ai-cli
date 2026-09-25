@@ -90,7 +90,7 @@ func parseEditorProcesses(procs []processCmdline) []EditorProcess {
 			// 游戏进程的 --path 必为绝对路径（引擎展开后写入命令行），
 			// 顺手记下给「--path ./」启动的编辑器回填工程。
 			if g.Editor > 0 {
-				if project := flagValue(args, "--path"); project != "" && filepath.IsAbs(project) {
+				if project := flagValue(args, "--path"); project != "" && isAbsProjectPath(project) {
 					gameProjects[g.Editor] = normalizeProjectPath(project)
 				}
 			}
@@ -98,7 +98,7 @@ func parseEditorProcesses(procs []processCmdline) []EditorProcess {
 		}
 		if hasFlag(args, "--editor") {
 			ed := EditorProcess{PID: p.pid, Args: truncate(p.line, 4096)}
-			if project := flagValue(args, "--path"); project != "" && filepath.IsAbs(project) {
+			if project := flagValue(args, "--path"); project != "" && isAbsProjectPath(project) {
 				ed.Project = normalizeProjectPath(project)
 			}
 			editors = append(editors, ed)
@@ -219,6 +219,21 @@ func cutProxyHost(raw string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// isAbsProjectPath 判定 --path 是否为「可直接采用的工程路径」：平台文件系统
+// 绝对路径，或 Windows 盘符形态（X:/…、X:\…）。后者让同一份 WMI 样本在
+// 非 Windows 平台也能确定性解析、可单测（filepath.IsAbs 是平台相关的，
+// "D:/..." 在 Linux/macOS 上为 false）。
+func isAbsProjectPath(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '/' || p[2] == '\\') {
+		c := p[0]
+		return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+	}
+	return false
 }
 
 // normalizeProjectPath 归一工程路径：正斜杠、去尾斜杠（与 CLI 侧

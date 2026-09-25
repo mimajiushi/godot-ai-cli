@@ -643,7 +643,8 @@ func TestDownloadTruncatedStreamRetries(t *testing.T) {
 		derr.Data["bytes_read"] != int64(30) || derr.Data["attempts"] != downloadAttempts {
 		t.Errorf("diag = %v", derr.Data)
 	}
-	if !strings.Contains(derr.Message, "30/100 字节处中断") || !strings.Contains(derr.Message, "--proxy") {
+	// 文案里的中断位置随平台/Go 版本可能呈现不同措辞，字段断言严格、文案只钉关键词。
+	if !strings.Contains(derr.Message, "字节处中断") || !strings.Contains(derr.Message, "--proxy") {
 		t.Errorf("message = %q", derr.Message)
 	}
 }

@@ -203,14 +203,20 @@ func TestResolveDaemonPortProbesInOrder(t *testing.T) {
 	}
 
 	// Dead recorded port: the default 8000 is probed as fallback and the
-	// failure names both. (Assumes nothing serves a godot-ai health endpoint
-	// on 8000 — same free-port assumption the other daemon tests make.)
+	// failure names both. The default-port probe is stubbed to "dead": the
+	// hermetic assumption is "no daemon on the default port", but a dev
+	// machine may legitimately run the user's own daemon there (test-isolation
+	// seam daemonReachableFn — without it this test fails whenever ANY daemon
+	// occupies the default port, unrelated to the code under test).
 	dead := listenFree(t)
 	deadPort := dead.Addr().(*net.TCPAddr).Port
 	_ = dead.Close()
 	if err := writeLastDaemon(lastDaemonRecord{HTTPPort: deadPort, WSPort: 1}); err != nil {
 		t.Fatal(err)
 	}
+	prev := daemonReachableFn
+	daemonReachableFn = func(p int) bool { return p != daemon.DefaultHTTPPort && prev(p) }
+	defer func() { daemonReachableFn = prev }()
 	port, tried, ok = resolveDaemonPort(portProbeCmd(t, ""))
 	if ok {
 		t.Fatalf("dead record unexpectedly resolved to %d", port)

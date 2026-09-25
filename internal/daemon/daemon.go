@@ -115,6 +115,7 @@ func Start(ctx context.Context, cfg Config) (*Daemon, error) {
 	mux.HandleFunc("GET /godot-ai/status", d.handleStatus)
 	mux.HandleFunc("GET /godot-ai/cli/health", d.handleHealth)
 	mux.HandleFunc("GET /godot-ai/cli/sessions", d.handleSessions)
+	mux.HandleFunc("GET /godot-ai/cli/rejections", d.handleRejections)
 	mux.HandleFunc("GET /godot-ai/cli/custom-tools", d.handleCustomTools)
 	mux.HandleFunc("POST /godot-ai/cli/activate", d.handleActivate)
 	mux.HandleFunc("POST /godot-ai/cli/execute", d.handleExecute)
@@ -349,6 +350,16 @@ func (d *Daemon) handleSessions(w http.ResponseWriter, _ *http.Request) {
 		sessions = append(sessions, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+// handleRejections lists the bridge's recent handshake rejections (newest
+// first; empty is []). The CLI merges these into status / launch --attach /
+// plugin install output so a refused handshake is diagnosable without opening
+// the editor（需求 handshake-rejection-visibility）。
+func (d *Daemon) handleRejections(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rejections": d.bridge.RejectionMaps(),
+	})
 }
 
 // handleCustomTools serves the cached custom-tool catalog of one session

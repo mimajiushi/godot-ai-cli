@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/testutil/mockplugin"
 	"github.com/mimajiushi/godot-ai-cli/plugin"
 )
 
@@ -188,5 +191,59 @@ func TestPluginStatusRejectsNonProject(t *testing.T) {
 	}
 	if env := errorEnvelope(t, out); env["code"] != "INVALID_PROJECT" {
 		t.Errorf("error code = %v", env["code"])
+	}
+}
+
+// TestPluginInstallWarnsOnInMemoryMismatch：磁盘安装成功后，若 daemon 报告
+// 本工程的编辑器内存里仍是旧插件版本（已连接 session 的 plugin_version
+// 或被拒握手的 peer_version），install 输出必须带 PROJECT_PLUGIN_MISMATCH
+// warning + next_steps（需求 handshake-rejection-visibility §4.2）。
+func TestPluginInstallWarnsOnInMemoryMismatch(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.4")
+	projectDir := writeProjectFile(t)
+
+	// 该工程有一个被拒的握手：peer 插件 4.1.0（旧 minor），磁盘将装 4.2.4。
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	mockplugin.DialRejected(t, addr, d.Bridge().WSCapability, map[string]any{
+		"session_id": "pi@0001", "plugin_version": "4.1.0", "editor_pid": 5020,
+		"project_path": projectDir,
+	})
+
+	out, err := runPluginCmd(t, "install", "--project", projectDir,
+		"--http-port", strconv.Itoa(d.HTTPPort()))
+	if err != nil {
+		t.Fatalf("plugin install: %v (%v)", err, out)
+	}
+	if out["version"] != plugin.PluginVersion() {
+		t.Fatalf("installed version = %v", out["version"])
+	}
+	warning, _ := out["warning"].(string)
+	if !strings.Contains(warning, "PROJECT_PLUGIN_MISMATCH") || !strings.Contains(warning, "完全退出并重新打开编辑器") {
+		t.Errorf("warning = %q", warning)
+	}
+	if !strings.Contains(warning, "4.1.0") {
+		t.Errorf("warning must name the in-memory version: %q", warning)
+	}
+	steps, ok := out["next_steps"].([]any)
+	if !ok || len(steps) != 2 {
+		t.Errorf("next_steps = %v", out["next_steps"])
+	}
+}
+
+// TestPluginInstallCleanDaemonNoWarning：daemon 上没有本工程的旧版本痕迹
+// 时，install 输出保持原形状（无 warning 键）。
+func TestPluginInstallCleanDaemonNoWarning(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.4")
+	projectDir := writeProjectFile(t)
+
+	out, err := runPluginCmd(t, "install", "--project", projectDir,
+		"--http-port", strconv.Itoa(d.HTTPPort()))
+	if err != nil {
+		t.Fatalf("plugin install: %v (%v)", err, out)
+	}
+	if _, present := out["warning"]; present {
+		t.Errorf("unexpected warning on a clean daemon: %v", out["warning"])
 	}
 }

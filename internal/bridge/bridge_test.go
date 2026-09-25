@@ -19,7 +19,7 @@ import (
 
 // testVersion is the server version every test bridge reports; it must
 // equal the vendored plugin.cfg version for real deployments.
-const testVersion = "4.2.3"
+const testVersion = "4.2.4"
 
 // startServer boots a bridge on an ephemeral loopback port.
 func startServer(t *testing.T) *bridge.Server {
@@ -638,7 +638,7 @@ func TestHandshakeVersionMatrix(t *testing.T) {
 	})
 
 	t.Run("patch-newer plugin accepted stale", func(t *testing.T) {
-		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": "4.2.4"})
+		p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"plugin_version": "4.2.5"})
 		if p.Ack["plugin_stale"] != true {
 			t.Errorf("ack plugin_stale = %v, want true", p.Ack["plugin_stale"])
 		}

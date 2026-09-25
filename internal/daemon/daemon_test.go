@@ -16,7 +16,7 @@ import (
 )
 
 // testVersion mirrors the vendored plugin version the daemon advertises.
-const testVersion = "4.2.3"
+const testVersion = "4.2.4"
 
 // startDaemon boots a daemon on ephemeral loopback ports.
 func startDaemon(t *testing.T) *daemon.Daemon {
@@ -189,6 +189,46 @@ func TestSessionsEmpty(t *testing.T) {
 	}
 }
 
+// TestRejectionsEndpoint：/godot-ai/cli/rejections 暴露 bridge 的最近握手
+// 拒绝（新→旧；空为 []）——CLI 侧 status/launch --attach/plugin install
+// 合并这些记录回答「为什么编辑器连不上」（需求 handshake-rejection-visibility）。
+func TestRejectionsEndpoint(t *testing.T) {
+	d := startDaemon(t)
+
+	// 干净 daemon：空数组（不是 null）。
+	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/rejections")
+	if code != http.StatusOK {
+		t.Fatalf("status code = %d", code)
+	}
+	if rejections, ok := body["rejections"].([]any); !ok || len(rejections) != 0 {
+		t.Fatalf("rejections = %v, want empty array", body["rejections"])
+	}
+
+	// 一次 minor 不匹配拒绝后：端点必须带齐 peer/expected 身份。
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	mockplugin.DialRejected(t, addr, d.Bridge().WSCapability, map[string]any{
+		"session_id": "ep@0001", "plugin_version": "4.9.9", "editor_pid": 77,
+	})
+	code, body = getJSON(t, baseURL(d)+"/godot-ai/cli/rejections")
+	if code != http.StatusOK {
+		t.Fatalf("status code = %d", code)
+	}
+	rejections := body["rejections"].([]any)
+	if len(rejections) != 1 {
+		t.Fatalf("rejections = %v", rejections)
+	}
+	r := rejections[0].(map[string]any)
+	if r["reason"] != "plugin_version_mismatch" || r["peer_version"] != "4.9.9" {
+		t.Errorf("rejection = %v", r)
+	}
+	if r["expected"] != testVersion || r["editor_pid"].(float64) != 77 {
+		t.Errorf("rejection identity = %v", r)
+	}
+	if _, present := r["at"].(string); !present {
+		t.Errorf("rejection missing at: %v", r)
+	}
+}
+
 // TestSessionsExposeOrigin: the sessions endpoint reports each session's
 // provenance — "cli" for a handshake with launched_by="cli", "user" for a
 // legacy handshake without the field.
@@ -220,10 +260,10 @@ func TestSessionsExposeOrigin(t *testing.T) {
 // handshake was accepted with a patch-level version drift (major.minor
 // compatible, patch unequal) — the flag is absent for aligned sessions.
 func TestSessionsExposePluginStale(t *testing.T) {
-	d := startDaemon(t) // daemon version testVersion = "4.2.3"
+	d := startDaemon(t) // daemon version testVersion
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
 	aligned := mockplugin.Dial(t, addr, d.Bridge().WSCapability, nil) // default plugin_version == testVersion
-	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.2.4"})
+	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.2.5"})
 
 	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
 	if code != http.StatusOK {
@@ -244,8 +284,8 @@ func TestSessionsExposePluginStale(t *testing.T) {
 	}
 
 	st := byID[stale.SessionID]
-	if st["plugin_version"] != "4.2.4" {
-		t.Errorf("stale session plugin_version = %v, want 4.2.4", st["plugin_version"])
+	if st["plugin_version"] != "4.2.5" {
+		t.Errorf("stale session plugin_version = %v, want 4.2.5", st["plugin_version"])
 	}
 	if st["plugin_stale"] != true {
 		t.Errorf("stale session plugin_stale = %v, want true", st["plugin_stale"])

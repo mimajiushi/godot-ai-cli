@@ -682,6 +682,10 @@ func _activate_startup_endpoints() -> void:
 	var configure_started := _startup_trace_call_begin("lifecycle_configure")
 	_lifecycle.configure(plan)
 	_startup_trace_call_end("lifecycle_configure", configure_started)
+	# fork patch（launch --attach 支持）：recheck/重开 episode 前重读端口钉
+	# （工程文件 > EditorSettings > 默认）。已打开的编辑器启动时钉可能还不
+	# 存在；不重读则 BLOCKED recheck 永远打启动时捕获的旧端口。
+	_lifecycle.endpoint_policy_refresher = _refresh_endpoint_policy
 	var release_started := _startup_trace_call_begin("startup_release")
 	_begin_startup_release()
 	_startup_trace_call_end("startup_release", release_started)
@@ -1464,6 +1468,20 @@ func _capture_lifecycle_plan() -> Dictionary:
 		"disable_telemetry": not bool(policy.get("telemetry_enabled", true)),
 		"automatic_effects": true,
 		"defer_effects": true,
+	}
+
+
+## fork patch（launch --attach 支持）：lifecycle 重开 episode（含 BLOCKED
+## recheck）前的端口重解析——重读 工程文件 > EditorSettings > 默认 的端口
+## 钉并返回端点字段子集；lifecycle 只合并这几个键，plan 其余部分不动。
+func _refresh_endpoint_policy() -> Dictionary:
+	var refreshed := ClientConfigurator.capture_endpoint_policy()
+	var http_port := int(refreshed.get("http_port", ClientConfigurator.DEFAULT_HTTP_PORT))
+	var ws_port := _resolve_ws_port(int(refreshed.get("ws_port", ClientConfigurator.DEFAULT_WS_PORT)))
+	return {
+		"http_port": http_port,
+		"ws_port": ws_port,
+		"capability_path": TransportCapability.path_for_http_port(http_port),
 	}
 
 

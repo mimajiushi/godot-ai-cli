@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -463,5 +466,187 @@ func TestStopKeepsRepinnedPortFile(t *testing.T) {
 	ports, ok := godot.ReadProjectPorts(projectDir)
 	if !ok || ports.HTTPPort != 29999 {
 		t.Errorf("repinned port file lost: %+v, %v", ports, ok)
+	}
+}
+
+// TestStatusFailureShowsLiveDaemons：目标端口无 daemon 时（最常见的裸调用
+// 形态）失败载荷也带 known_daemons + live_daemons，且 hint 指向活着的
+// 端口而不是 launch——launch 在工程编辑器已开时会双开（需求
+// editor-attach-and-daemon-discovery §3.1）。
+func TestStatusFailureShowsLiveDaemons(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.4")
+
+	dead := listenFree(t)
+	deadPort := dead.Addr().(*net.TCPAddr).Port
+	_ = dead.Close()
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(deadPort)})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("status against a dead port must exit non-zero")
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	if out["status"] != "daemon_not_running" {
+		t.Fatalf("status = %v", out["status"])
+	}
+	known, ok := out["known_daemons"].([]any)
+	if !ok || len(known) == 0 {
+		t.Fatalf("known_daemons missing on the failure path: %v", out)
+	}
+	live, ok := out["live_daemons"].([]any)
+	if !ok || len(live) != 1 {
+		t.Fatalf("live_daemons = %v, want the one live daemon", out["live_daemons"])
+	}
+	entry := live[0].(map[string]any)
+	if int(entry["http_port"].(float64)) != d.HTTPPort() {
+		t.Errorf("live daemon port = %v, want %d", entry["http_port"], d.HTTPPort())
+	}
+	hint, _ := out["hint"].(string)
+	if !strings.Contains(hint, strconv.Itoa(d.HTTPPort())) {
+		t.Errorf("hint must name the live port: %q", hint)
+	}
+	if strings.Contains(hint, "launch --project") {
+		t.Errorf("hint must NOT suggest launch while a daemon is alive: %q", hint)
+	}
+	// known_daemons 的每条都要带 version_relation（same/newer/older/unknown）。
+	for _, e := range known {
+		m := e.(map[string]any)
+		if _, ok := m["version_relation"].(string); !ok {
+			t.Errorf("known_daemons entry missing version_relation: %v", m)
+		}
+	}
+}
+
+// TestStatusPruneDeletesDeadRecords：--prune 删掉探测死的 daemon-*.json，
+// 活记录与 last-daemon.json 保留。
+func TestStatusPruneDeletesDeadRecords(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.4")
+
+	dead := listenFree(t)
+	deadPort := dead.Addr().(*net.TCPAddr).Port
+	_ = dead.Close()
+	writeDaemonRecord(t, dir, deadPort, deadPort+1, "3.2.9")
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--prune", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status --prune: %v\n%s", err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	pruned, ok := out["pruned"].([]any)
+	if !ok || len(pruned) != 1 || int(pruned[0].(float64)) != deadPort {
+		t.Errorf("pruned = %v, want [%d]", out["pruned"], deadPort)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", deadPort))); !os.IsNotExist(err) {
+		t.Errorf("dead record file still present (stat err = %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", d.HTTPPort()))); err != nil {
+		t.Errorf("live record file removed: %v", err)
+	}
+}
+
+// TestStatusProjectDetectsUnconnectedEditor：status --project 在工程无已连接
+// session 但扫描发现其编辑器进程活着时，报 EDITOR_OPEN_UNCONNECTED 并给出
+// launch --attach 建议（需求 §3.2 的验收形状）。
+func TestStatusProjectDetectsUnconnectedEditor(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.4")
+
+	restore := godot.SetEditorScannerForTest(func() ([]godot.EditorProcess, error) {
+		return []godot.EditorProcess{
+			{PID: 5020, Project: "D:/games/rpg", GameRunning: &godot.EditorGameProcess{PID: 38004, Scene: "res://test.tscn", Editor: 5020}},
+			{PID: 25548, Project: "D:/other/demo"}, // 别的工程：不得误报
+		}, nil
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--project", "D:\\games\\rpg", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("status --project with an unconnected editor must fail")
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, buf.String())
+	}
+	if out["status"] != "error" {
+		t.Fatalf("status = %v", out["status"])
+	}
+	env := out["error"].(map[string]any)
+	if env["code"] != "EDITOR_OPEN_UNCONNECTED" {
+		t.Fatalf("error code = %v", env["code"])
+	}
+	data := env["data"].(map[string]any)
+	editors, ok := data["editors"].([]any)
+	if !ok || len(editors) != 1 {
+		t.Fatalf("editors = %v", data["editors"])
+	}
+	ed := editors[0].(map[string]any)
+	if int(ed["pid"].(float64)) != 5020 {
+		t.Errorf("editor pid = %v", ed["pid"])
+	}
+	game := ed["game_running"].(map[string]any)
+	if int(game["pid"].(float64)) != 38004 {
+		t.Errorf("game pid = %v", game["pid"])
+	}
+	suggest, ok := data["suggest"].([]any)
+	if !ok || len(suggest) == 0 || !strings.Contains(suggest[0].(string), "--attach") {
+		t.Errorf("suggest = %v", data["suggest"])
+	}
+}
+
+// TestStatusMergesRecentRejections：活 daemon 上有握手拒绝记录时，status
+// 必须合并展示并给可执行 hint（需求 handshake-rejection-visibility §4.1）。
+func TestStatusMergesRecentRejections(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.4")
+
+	// 一个 minor 不匹配的插件被拒握手。
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	mockplugin.DialRejected(t, addr, d.Bridge().WSCapability, map[string]any{
+		"session_id": "strej@0001", "plugin_version": "4.9.0", "editor_pid": 5020,
+		"project_path": "D:/games/rpg",
+	})
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v\n%s", err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	rj, ok := out["recent_rejections"].([]any)
+	if !ok || len(rj) != 1 {
+		t.Fatalf("recent_rejections = %v", out["recent_rejections"])
+	}
+	entry := rj[0].(map[string]any)
+	if entry["reason"] != "plugin_version_mismatch" || entry["peer_version"] != "4.9.0" || entry["expected"] != "4.2.4" {
+		t.Errorf("rejection entry = %v", entry)
+	}
+	hint, _ := out["hint"].(string)
+	if !strings.Contains(hint, "recent_rejections") {
+		t.Errorf("hint = %q", hint)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,26 @@ type wsConn struct {
 	wmu  sync.Mutex
 }
 
+// HandshakeRejection 是一次被拒绝的 v4 握手。daemon 把它留在环形缓冲里，
+// 让 CLI/agent 侧能回答「编辑器明明活着、daemon 也活着，为什么 sessions
+// 是空的」（需求 handshake-rejection-visibility）：真实现场只有坐在编辑器
+// 前的人能在 Godot AI 面板上看到 "Incompatible server"，CLI 侧此前只有
+// 一句 no_active_session。
+type HandshakeRejection struct {
+	At           time.Time `json:"at"`                      // 拒绝时刻（RFC3339）
+	Reason       string    `json:"reason"`                  // plugin_version_mismatch / malformed_hello / godot_version_unsupported / nonce_mismatch / proof_failed / duplicate_session / handshake_timeout ...
+	PeerVersion  string    `json:"peer_version,omitempty"`  // 对端插件版本（auth_response 携带时）
+	Expected     string    `json:"expected,omitempty"`      // 本 daemon 版本（版本类拒绝时）
+	SessionID    string    `json:"session_id,omitempty"`    // 对端自报的 session id（可用时）
+	EditorPID    int       `json:"editor_pid,omitempty"`    // 对端自报的编辑器 pid（可用时）
+	ProjectPath  string    `json:"project_path,omitempty"`  // 对端自报的工程路径（可用时）
+	GodotVersion string    `json:"godot_version,omitempty"` // 对端自报的 Godot 版本（可用时）
+}
+
+// maxHandshakeRejections 是拒绝记录的环形缓冲容量：足够覆盖「多版本
+// CLI 交替试连」的诊断窗口，又不让长活 daemon 无限积累。
+const maxHandshakeRejections = 8
+
 // Server is the WebSocket backend the godot_ai plugin connects to.
 type Server struct {
 	version string
@@ -168,6 +189,12 @@ type Server struct {
 	listeners []EventListener
 	closed    bool
 	wg        sync.WaitGroup
+
+	// rejectMu/rejections：握手拒绝环形缓冲。独立于 mu——握手路径绝不
+	// 与 session 注册互斥；record 只在关闭连接前发生，RecentRejections
+	// 读副本，两者都在 rejectMu 下完成。
+	rejectMu   sync.Mutex
+	rejections []HandshakeRejection
 }
 
 // NewServer builds a Server that reports version in handshake_ack frames.
@@ -367,6 +394,122 @@ func isLoopbackOrigin(origin string) bool {
 	return false
 }
 
+// recordRejection 记一条握手拒绝（环形缓冲，新→旧，容量
+// maxHandshakeRejections）。失败形状也记——「something connected and never
+// spoke」对排查同样有价值；字段允许稀疏（传输层失败没有对端身份）。
+func (s *Server) recordRejection(r HandshakeRejection) {
+	r.At = time.Now().UTC()
+	s.rejectMu.Lock()
+	defer s.rejectMu.Unlock()
+	s.rejections = append([]HandshakeRejection{r}, s.rejections...)
+	if len(s.rejections) > maxHandshakeRejections {
+		s.rejections = s.rejections[:maxHandshakeRejections]
+	}
+}
+
+// RecentRejections 返回拒绝记录副本（新→旧）。从无拒绝到上限不等；
+// 调用方按 nil/空区分「没有拒绝」。
+func (s *Server) RecentRejections() []HandshakeRejection {
+	s.rejectMu.Lock()
+	defer s.rejectMu.Unlock()
+	return append([]HandshakeRejection(nil), s.rejections...)
+}
+
+// rejectionMaps 把记录转成 JSON-ready 的 map 切片（daemon 端点直接用），
+// At 序列化为 RFC3339。
+func (s *Server) RejectionMaps() []map[string]any {
+	recs := s.RecentRejections()
+	out := make([]map[string]any, 0, len(recs))
+	for _, r := range recs {
+		m := map[string]any{
+			"at":     r.At.Format(time.RFC3339),
+			"reason": r.Reason,
+		}
+		if r.PeerVersion != "" {
+			m["peer_version"] = r.PeerVersion
+		}
+		if r.Expected != "" {
+			m["expected"] = r.Expected
+		}
+		if r.SessionID != "" {
+			m["session_id"] = r.SessionID
+		}
+		if r.EditorPID > 0 {
+			m["editor_pid"] = r.EditorPID
+		}
+		if r.ProjectPath != "" {
+			m["project_path"] = r.ProjectPath
+		}
+		if r.GodotVersion != "" {
+			m["godot_version"] = r.GodotVersion
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// handshakeRejectionFrom 用 auth_response 里已披露的对端身份填充拒绝记录
+// （帧 3 之后所有拒绝路径都能带出 pid/工程/版本；早退路径没有这些字段，
+// 记稀疏记录即可）。
+func handshakeRejectionFrom(resp *authResponse, reason, expected string) HandshakeRejection {
+	return HandshakeRejection{
+		Reason:       reason,
+		PeerVersion:  resp.PluginVersion,
+		Expected:     expected,
+		SessionID:    resp.SessionID,
+		EditorPID:    resp.EditorPID,
+		ProjectPath:  resp.ProjectPath,
+		GodotVersion: resp.GodotVersion,
+	}
+}
+
+// legacyRejectionFrom 处理首帧解析失败：v3 插件（旧 fork 线 3.2.x）的首帧
+// 是 type:"handshake"——被拒时在记录里 best-effort 拆出对端身份（peer
+// 版本/pid/工程），让「旧插件连新 daemon」的现场在 CLI 侧同样可见（需求
+// handshake-rejection-visibility 的原始事故形态）。其它畸形帧记
+// malformed_hello。
+func legacyRejectionFrom(raw []byte) HandshakeRejection {
+	rej := HandshakeRejection{Reason: "malformed_hello"}
+	var frame map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		return rej
+	}
+	var typeStr string
+	if err := json.Unmarshal(frame["type"], &typeStr); err != nil || typeStr != "handshake" {
+		return rej
+	}
+	rej.Reason = "legacy_v3_handshake"
+	rej.PeerVersion = rawString(frame["plugin_version"])
+	rej.SessionID = rawString(frame["session_id"])
+	rej.ProjectPath = rawString(frame["project_path"])
+	rej.GodotVersion = rawString(frame["godot_version"])
+	rej.EditorPID = rawInt(frame["editor_pid"])
+	return rej
+}
+
+// rawString best-effort 从 RawMessage 里取字符串。
+func rawString(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// rawInt best-effort 从 RawMessage 里取整数（兼容 JSON number 与数字字符串）。
+func rawInt(raw json.RawMessage) int {
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
+	}
+	if s := rawString(raw); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
 // handleConn runs the lifecycle of one plugin connection: the v4
 // authenticated handshake (auth_hello → auth_challenge → auth_response →
 // handshake_ack, mirrored from upstream transport/websocket.py), then the
@@ -380,6 +523,7 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	if !validWSCapability(s.WSCapability) {
 		// 上游语义：无 capability 是"锁定"而非"免认证"——fail closed。
 		slog.Warn("bridge: rejecting editor connection: no v4 capability configured")
+		s.recordRejection(HandshakeRejection{Reason: "server_locked_no_capability"})
 		_ = c.Close(closeCodeAuthFailed, "server has no v4 editor capability; restart it from Godot")
 		return
 	}
@@ -398,12 +542,14 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	rawHello, err := readFrame()
 	if err != nil {
 		slog.Warn("bridge: auth_hello read failed", "err", err)
+		s.recordRejection(HandshakeRejection{Reason: "hello_read_failed"})
 		_ = c.Close(closeCodeHandshakePolicy, "v4 editor handshake timed out")
 		return
 	}
 	hello, code, reason := parseAuthHello(rawHello)
 	if hello == nil {
 		slog.Warn("bridge: rejecting first frame", "code", code, "reason", reason)
+		s.recordRejection(legacyRejectionFrom(rawHello))
 		_ = c.Close(websocket.StatusCode(code), reason)
 		return
 	}
@@ -428,6 +574,7 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	writeCancel()
 	if err != nil {
 		slog.Warn("bridge: auth_challenge send failed", "err", err)
+		s.recordRejection(HandshakeRejection{Reason: "challenge_send_failed"})
 		_ = c.CloseNow()
 		return
 	}
@@ -436,16 +583,19 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	rawResp, err := readFrame()
 	if err != nil {
 		slog.Warn("bridge: auth_response read failed", "err", err)
+		s.recordRejection(HandshakeRejection{Reason: "auth_response_read_failed"})
 		_ = c.Close(closeCodeHandshakePolicy, "v4 editor handshake timed out")
 		return
 	}
 	resp, code, reason := parseAuthResponse(rawResp)
 	if resp == nil {
 		slog.Warn("bridge: rejecting auth_response", "code", code, "reason", reason)
+		s.recordRejection(HandshakeRejection{Reason: "malformed_auth_response"})
 		_ = c.Close(websocket.StatusCode(code), reason)
 		return
 	}
 	if resp.ClientNonce != hello.ClientNonce || resp.ServerNonce != serverNonce {
+		s.recordRejection(handshakeRejectionFrom(resp, "nonce_mismatch", ""))
 		_ = c.Close(closeCodeAuthFailed, "v4 handshake nonce mismatch")
 		return
 	}
@@ -453,10 +603,12 @@ func (s *Server) handleConn(c *websocket.Conn) {
 	// 纯上游插件无此字段，按上游原样转录验，origin 归一为 "user"。
 	expected := clientProofExpectation(s.WSCapability, s.version, resp, resp.HasLaunchedBy)
 	if !hmac.Equal([]byte(resp.ClientProof), []byte(expected)) {
+		s.recordRejection(handshakeRejectionFrom(resp, "proof_failed", ""))
 		_ = c.Close(closeCodeAuthFailed, "v4 editor proof failed")
 		return
 	}
 	if !supportsV4Editor(resp.GodotVersion) {
+		s.recordRejection(handshakeRejectionFrom(resp, "godot_version_unsupported", ""))
 		_ = c.Close(closeCodeProtocolMismatch,
 			"Godot 4.7 or newer within the 4.x line is required by the v4 editor protocol")
 		return
@@ -468,15 +620,19 @@ func (s *Server) handleConn(c *websocket.Conn) {
 
 	// 版本门禁：插件本应在 HTTP 探针阶段就完成 major.minor 评估（fork
 	// 放宽），这里只是纵深防御——畸形 plugin_version 拒绝，patch 漂移
-	// 接受并标记 stale。
+	// 接受并标记 stale。拒绝必须留痕（需求 handshake-rejection-visibility）：
+	// 「编辑器面板显示 Incompatible server、CLI 侧永远 sessions:[]」的现场
+	// 只有拒绝记录能解释。
 	stale, rejectReason := s.checkPluginVersion(resp.PluginVersion)
 	if rejectReason != "" {
 		slog.Warn("bridge: rejecting handshake", "session", resp.SessionID, "reason", rejectReason)
+		s.recordRejection(handshakeRejectionFrom(resp, "plugin_version_mismatch", s.version))
 		_ = c.Close(websocket.StatusPolicyViolation, rejectReason)
 		return
 	}
 
 	if !s.registerSession(resp, wc, stale) {
+		s.recordRejection(handshakeRejectionFrom(resp, "duplicate_session", ""))
 		_ = c.Close(closeCodeDuplicateSession, "session id already registered")
 		return
 	}
@@ -755,10 +911,18 @@ func (s *Server) SendCommand(ctx context.Context, sessionID, command string, par
 		sessionID = s.activeID
 		if sessionID == "" {
 			s.mu.Unlock()
+			data := map[string]any{"retryable": true, "reason": "no_active_session"}
+			// 有握手拒绝记录时一并带出（需求 handshake-rejection-visibility
+			// §4.1 第 3 点）：「没有已连接编辑器」不再是无信息结论，调用方
+			// 能看到「有编辑器在试、但被拒绝及拒绝原因」。
+			if rj := s.RejectionMaps(); len(rj) > 0 {
+				data["recent_rejections"] = rj
+				data["hint"] = "有编辑器尝试连接但被拒绝：见 recent_rejections；磁盘插件版本已对齐时，修法通常是【完全退出并重启编辑器】（reload-plugin 不会替换已加载的插件代码）"
+			}
 			return nil, &CommandError{
 				Code:    "PLUGIN_DISCONNECTED",
 				Message: "No Godot editor is connected to this server",
-				Data:    map[string]any{"retryable": true, "reason": "no_active_session"},
+				Data:    data,
 			}
 		}
 	}

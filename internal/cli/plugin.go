@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 	"github.com/mimajiushi/godot-ai-cli/plugin"
 )
@@ -38,9 +39,10 @@ func resolveProjectDir(project string) (string, error) {
 // plugin in one project.
 func newPluginInstallCommand() *cobra.Command {
 	var (
-		project string
-		dryRun  bool
-		version string
+		project  string
+		dryRun   bool
+		version  string
+		httpPort int
 	)
 	cmd := &cobra.Command{
 		Use:   "install --project PATH",
@@ -54,6 +56,14 @@ not belong to the plugin.
 
 This CLI embeds exactly ONE plugin version, so --version is a guard rather
 than a picker: asking for anything else fails with PLUGIN_VERSION_UNSUPPORTED.
+
+After a successful install it ALSO probes the local daemon (best-effort;
+--http-port defaults to the recorded/default port): when a connected session
+or a rejected handshake for THIS project reports an in-memory plugin version
+different from the freshly installed disk version, the payload carries a
+PROJECT_PLUGIN_MISMATCH warning plus next_steps — installing files does not
+replace the plugin code an already-open editor loaded, and only a full editor
+restart does（需求 handshake-rejection-visibility §4.2）.
 
 --dry-run prints the same write plan as ` + "`launch --dry-run`" + ` and touches
 nothing.
@@ -88,19 +98,31 @@ Examples:
 			if err != nil {
 				return jsonError(cmd, "PLUGIN_INSTALL_FAILED", err.Error(), nil)
 			}
-			return printJSON(cmd.OutOrStdout(), map[string]any{
+			payload := map[string]any{
 				"installed":        result.Installed,
 				"upgraded":         result.Upgraded,
 				"version":          result.Version,
 				"previous_version": result.PreviousVersion,
 				"path":             result.Path,
 				"enabled":          result.Enabled,
-			}, false)
+			}
+			// 磁盘已对齐但编辑器内存可能仍是旧代码：探测 daemon（best-effort，
+			// 没有 daemon/探测失败都只是少一句 warning，绝不阻断安装结果）。
+			if port, _, ok := resolveDaemonPort(cmd); ok {
+				inMemory := inMemoryPluginVersions(port, projectDir)
+				if warning, nextSteps := editorRestartWarning(result.Version, inMemory); warning != "" {
+					payload["warning"] = warning
+					payload["next_steps"] = nextSteps
+					payload["in_memory_plugin"] = inMemory
+				}
+			}
+			return printJSON(cmd.OutOrStdout(), payload, false)
 		},
 	}
 	cmd.Flags().StringVar(&project, "project", "", "Godot project directory containing project.godot (required)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be written (files + git impact) without touching the project")
 	cmd.Flags().StringVar(&version, "version", "", "assert this exact plugin version (this CLI bundles only one — any other value fails)")
+	cmd.Flags().IntVar(&httpPort, "http-port", daemon.DefaultHTTPPort, "daemon HTTP port for the post-install in-memory plugin check")
 	_ = cmd.MarkFlagRequired("project")
 	return cmd
 }

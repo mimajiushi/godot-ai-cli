@@ -43,16 +43,29 @@ type knownDaemonRecord struct {
 	Project   string `json:"project,omitempty"`
 }
 
+// daemonRecordsDir 是 daemon-*.json 记录目录：与 enumerateKnownDaemons
+// 同一取值（走 userCacheDir seam，测试可隔离）。daemon.PIDFilePath 直接
+// 调 os.UserCacheDir() 不经 seam，测试里会和枚举层错位——凡 CLI 侧要
+// 定位/删除记录文件的地方一律用这里的路径。
+func daemonRecordsDir() string {
+	dir, err := userCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "godot-ai-cli")
+}
+
+// daemonRecordPath 返回一条端口记录的落盘路径（文件不存在也无妨）。
+func daemonRecordPath(httpPort int) string {
+	return filepath.Join(daemonRecordsDir(), fmt.Sprintf("daemon-%d.json", httpPort))
+}
+
 // enumerateKnownDaemons merges the per-port pid files and the last-daemon
 // record into one deterministic list keyed by HTTP port. Corrupt or
 // port-less files are skipped; the pid file wins on a collision, with the
 // last-daemon record's project filled in.
 func enumerateKnownDaemons() []knownDaemonRecord {
-	dir, err := userCacheDir()
-	if err != nil {
-		dir = os.TempDir()
-	}
-	base := filepath.Join(dir, "godot-ai-cli")
+	base := daemonRecordsDir()
 
 	byPort := map[int]knownDaemonRecord{}
 	if entries, err := os.ReadDir(base); err == nil {
@@ -236,6 +249,29 @@ func findProjectOnOtherDaemons(exceptPort int, projectDir string) (hit map[strin
 	return nil, warnings
 }
 
+// versionRelation 标注一条 daemon 记录版本与当前 CLI 自带插件版本的相对
+// 关系（需求 editor-attach-and-daemon-discovery §3.4：多版本共存时
+// known_daemons 里看不出新旧，排查很难判断该不该复用）。两者都是插件
+// 版本（同一 scheme）；任一解析失败标 "unknown"。
+func versionRelation(recordVersion string) string {
+	rv, err := pluginmeta.ParseSemver(recordVersion)
+	if err != nil {
+		return "unknown"
+	}
+	bv, err := pluginmeta.ParseSemver(pluginmeta.PluginVersion())
+	if err != nil {
+		return "unknown"
+	}
+	switch pluginmeta.Compare(rv, bv) {
+	case 0:
+		return "same"
+	case -1:
+		return "older"
+	default:
+		return "newer"
+	}
+}
+
 // knownDaemonsReport builds status's known_daemons array: every recorded
 // daemon, probed live. A running daemon reports its live
 // version/pid/ws_port and the project paths of its sessions; an unreachable
@@ -253,6 +289,7 @@ func knownDaemonsReport(currentPort int) []any {
 		status, ok := probeKnownDaemonGET(rec.HTTPPort, "/godot-ai/status")
 		if !ok || status["name"] != "godot-ai" {
 			entry["running"] = false
+			entry["version_relation"] = versionRelation(rec.Version)
 			if rec.WSPort > 0 {
 				entry["ws_port"] = rec.WSPort
 			}
@@ -273,6 +310,8 @@ func knownDaemonsReport(currentPort int) []any {
 		}
 		entry["running"] = true
 		entry["version"] = status["version"]
+		// 活 daemon 以实时版本为准标注新旧（记录文件可能先于重启。
+		entry["version_relation"] = versionRelation(fmt.Sprint(status["version"]))
 		entry["ws_port"] = status["ws_port"]
 		entry["pid"] = status["pid"]
 		var projects []string
@@ -296,6 +335,45 @@ func knownDaemonsReport(currentPort int) []any {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// liveDaemonEntries 从 knownDaemonsReport 的结果里挑出活着的 daemon，
+// 收成 {http_port, ws_port, version?} 的轻量列表——status 在目标端口无
+// daemon 时用它回答「本机还有谁活着」（需求 editor-attach-and-daemon-discovery
+// §3.1：hint 只允许在确实一个活 daemon 都没有时提 launch）。
+func liveDaemonEntries(known []any) []map[string]any {
+	var live []map[string]any
+	for _, e := range known {
+		m, ok := e.(map[string]any)
+		if !ok || m["running"] != true {
+			continue
+		}
+		entry := map[string]any{"http_port": m["http_port"], "ws_port": m["ws_port"]}
+		if v, ok := m["version"].(string); ok && v != "" {
+			entry["version"] = v
+		}
+		live = append(live, entry)
+	}
+	return live
+}
+
+// pruneDaemonRecords 删除 daemon-*.json 里探测不应答的死记录（需求
+// editor-attach-and-daemon-discovery §3.4：%LOCALAPPDATA%\godot-ai-cli 下
+// 死记录只增不减）。活记录与 last-daemon.json 绝不触碰——记录是 daemon
+// 自己清理的，这里只收拾「死无葬身之地」的残留。返回删除与保留端口。
+func pruneDaemonRecords() (pruned []int, kept []int) {
+	for _, rec := range enumerateKnownDaemons() {
+		if _, ok := probeDaemonHealth(rec.HTTPPort); ok {
+			kept = append(kept, rec.HTTPPort)
+			continue
+		}
+		if err := os.Remove(daemonRecordPath(rec.HTTPPort)); err != nil && !os.IsNotExist(err) {
+			kept = append(kept, rec.HTTPPort) // 删不掉的保留，报错交给 warnings
+			continue
+		}
+		pruned = append(pruned, rec.HTTPPort)
+	}
+	return pruned, kept
 }
 
 // shutdownDaemonKeepEditors is the --upgrade-daemon migration step: it

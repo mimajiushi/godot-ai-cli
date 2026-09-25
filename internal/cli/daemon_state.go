@@ -112,12 +112,17 @@ func daemonPortCandidates(cmd *cobra.Command) []int {
 func resolveDaemonPort(cmd *cobra.Command) (port int, tried []int, ok bool) {
 	for _, p := range daemonPortCandidates(cmd) {
 		tried = append(tried, p)
-		if daemonReachable(p) {
+		if daemonReachableFn(p) {
 			return p, tried, true
 		}
 	}
 	return 0, tried, false
 }
+
+// daemonReachableFn 是 daemonReachable 的测试 seam：resolveDaemonPort 的
+// 单测必须假设「默认端口上什么都没有」，但开发机上常常真有一个 daemon
+// 占着 8000（用户自己的会话）——注入探测函数才能让测试与机器状态无关。
+var daemonReachableFn = daemonReachable
 
 // describePorts renders a tried-port list for error and help text.
 func describePorts(tried []int) string {

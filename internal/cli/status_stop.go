@@ -23,14 +23,17 @@ func fileExists(path string) bool {
 // newStatusCommand reports the daemon and its connected editor sessions.
 func newStatusCommand() *cobra.Command {
 	var httpPort int
+	var projectDir string
+	var prune bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the daemon status and connected Godot editor sessions",
 		Long: `status probes the local godot-ai daemon and prints one JSON object
 describing the daemon and every connected Godot editor session. It also
 lists EVERY recorded daemon on this machine (known_daemons, probed live:
-running daemons report version/ports/session projects, dead records report
-running:false), so a multi-daemon setup is visible in one call.
+running daemons report version/ports/version_relation/session projects,
+dead records report running:false), so a multi-daemon setup is visible in
+one call.
 
 Port resolution: an explicit --http-port flag wins; otherwise the port the
 last launch/serve recorded (last-daemon.json in the user cache dir) is
@@ -38,31 +41,104 @@ tried first, falling back to the default 8000 when the recorded port is
 unreachable.
 
 When no daemon answers, it prints {"status":"daemon_not_running", ...,
-"ports_tried":[...]} and exits 1. (stop reports the same condition as
-{"status":"not_running"} with exit 0 — the different spelling is
-intentional: status is a probe, stop an idempotent teardown.)
+"ports_tried":[...], "known_daemons":[...], "live_daemons":[...]} and
+exits 1. known_daemons/live_daemons are included on the failure path too
+(需求 editor-attach-and-daemon-discovery §3.1): "this machine has another
+live daemon on port X" must be visible exactly when the user is most
+likely to call status bare (their own daemon dead). The hint only suggests
+launch when NO daemon on this machine is alive — otherwise it names a live
+port, because a bare launch would double-open the editor.
+(stop reports the same condition as {"status":"not_running"} with exit 0 —
+the different spelling is intentional: status is a probe, stop an
+idempotent teardown.)
+
+With --project <dir> status additionally detects "the editor for THIS
+project is already open but connected to no daemon" (process command-line
+scan, best-effort): when found, it fails with EDITOR_OPEN_UNCONNECTED
+naming the editor pid, its running game (if any), the live daemons, and
+the non-spawning next step (launch --attach) — so the failure explains
+WHY the CLI channel is unavailable instead of pushing the caller towards
+a double-open.
+
+With --prune it deletes the dead daemon-*.json records in the user cache
+dir (running daemons and last-daemon.json are never touched) and reports
+{"pruned":[...ports], "kept":[...ports]} alongside the normal status.
 
 Examples:
   godot-ai-cli status
-  godot-ai-cli status --http-port 9000`,
+  godot-ai-cli status --http-port 9000
+  godot-ai-cli status --project C:/games/rpg
+  godot-ai-cli status --prune`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
+
+			// --prune：先收拾死记录再出常规状态——打扫结果作为附加字段
+			// 与正常 status 输出合并（prune 自身不改变 daemon 探活结果）。
+			var pruned, kept []int
+			if prune {
+				pruned, kept = pruneDaemonRecords()
+				// JSON 消费者按数组解析这些字段：nil 切片序列化成 null，
+				// 统一成 []（pruned:null 与「没删」语义混淆）。
+				if pruned == nil {
+					pruned = []int{}
+				}
+				if kept == nil {
+					kept = []int{}
+				}
+			}
+
 			port, tried, ok := resolveDaemonPort(cmd)
 			if !ok {
 				payload := map[string]any{
 					"status":      "daemon_not_running",
-					"hint":        "Run: godot-ai-cli launch --project <path>",
 					"ports_tried": tried,
 				}
 				// A leftover PID file means a daemon ran here once and died
 				// without cleanup — worth one extra diagnostic field.
 				for _, p := range tried {
-					if _, err := os.Stat(daemon.PIDFilePath(p)); err == nil {
-						payload["stale_pid_file"] = daemon.PIDFilePath(p)
+					if _, err := os.Stat(daemonRecordPath(p)); err == nil {
+						payload["stale_pid_file"] = daemonRecordPath(p)
 						break
 					}
 				}
+				// 失败路径同样给全景（需求 §3.1）：「本机另一个端口有活
+				// daemon」在最常调用裸 status 的时刻必须可见。
+				known := knownDaemonsReport(0)
+				payload["known_daemons"] = known
+				live := liveDaemonEntries(known)
+				if len(live) > 0 {
+					payload["live_daemons"] = live
+					payload["hint"] = fmt.Sprintf(
+						"last-daemon 记录已失效；另有 daemon 在 %v 上活着：godot-ai-cli status --http-port %v",
+						live[0]["http_port"], live[0]["http_port"])
+				} else {
+					payload["hint"] = "Run: godot-ai-cli launch --project <path>"
+				}
+				if prune {
+					payload["pruned"] = pruned
+					payload["kept_records"] = kept
+				}
+				// --project：daemon 死了但工程的编辑器可能正开着——把
+				// EDITOR_OPEN_UNCONNECTED 的线索插进失败载荷，而不是让
+				// 调用方退回纯文本读 .tscn。
+				if projectDir != "" {
+					if editors, scanErr := unconnectedEditorsReport(projectDir); len(editors) > 0 {
+						payload["editors_open_unconnected"] = editors
+						payload["hint"] = fmt.Sprintf(
+							"检测到该工程的编辑器已打开但未连接任何 daemon——不要 launch（会再开一个编辑器实例）：godot-ai-cli launch --project %s --attach", projectDir)
+						if scanErr != "" {
+							payload["scan_note"] = scanErr
+						}
+					}
+				}
+				// 失败路径也合并拒绝线索：被拒绝的编辑器连的往往就是另一
+				// 个端口上活着的 daemon（需求 handshake-rejection-visibility）。
+				if rj := mergedRecentRejections(live); len(rj) > 0 {
+					payload["recent_rejections"] = rj
+					payload["hint"] = fmt.Sprintf("%v；有编辑器在尝试连接但被拒绝：见 recent_rejections（修法通常是完全退出并重启编辑器）", payload["hint"])
+				}
+
 				_ = printJSON(out, payload, false)
 				return errExit("daemon_not_running")
 			}
@@ -79,6 +155,27 @@ Examples:
 				return jsonError(cmd, "DAEMON_UNREACHABLE", err.Error(), nil)
 			}
 			sessions, compatWarnings := enrichSessions(sessionsBody["sessions"], fmt.Sprint(statusBody["version"]))
+			// --project 且该工程在已解析 daemon 上无 session：检测未连接
+			// 编辑器，命中即 EDITOR_OPEN_UNCONNECTED（需求 §3.2 的形状）。
+			if projectDir != "" && findProjectSession(mustSessionList(sessions), projectDir) == nil {
+				if editors, scanErr := unconnectedEditorsReport(projectDir); len(editors) > 0 {
+					live := liveDaemonEntries(knownDaemonsReport(port))
+					return jsonError(cmd, "EDITOR_OPEN_UNCONNECTED",
+						fmt.Sprintf("检测到工程 %s 的编辑器进程已打开，但它没有连接任何 daemon；launch 会再开一个编辑器实例（场景锁/保存互相覆盖风险）", projectDir),
+						map[string]any{
+							"editors":      editors,
+							"live_daemons": live,
+							"suggest": []string{
+								"godot-ai-cli launch --project " + projectDir + " --attach",
+								fmt.Sprintf("godot-ai-cli status --http-port %v", port),
+							},
+							"retryable":         false,
+							"scan_note":         scanErr,
+							"recent_rejections": mergedRecentRejections(live),
+						})
+				}
+			}
+			known := knownDaemonsReport(port)
 			payload := map[string]any{
 				"status": "ok",
 				"daemon": map[string]any{
@@ -97,16 +194,60 @@ Examples:
 				// Every recorded daemon on this machine, probed live — a
 				// multi-daemon setup (old versions, parallel ports) is
 				// visible in one call, not just the resolved port's daemon.
-				"known_daemons": knownDaemonsReport(port),
+				"known_daemons": known,
+			}
+			// 握手拒绝线索（需求 handshake-rejection-visibility）：本机任意
+			// 活 daemon 上的拒绝记录合并展示——「编辑器面板显示 Incompatible
+			// server、CLI 侧 sessions 永远空」的现场由此可诊断。
+			if rj := mergedRecentRejections(liveDaemonEntries(known)); len(rj) > 0 {
+				payload["recent_rejections"] = rj
+				payload["hint"] = "有编辑器在尝试连接但被拒绝：见 recent_rejections；修法通常是【完全退出并重启编辑器】（磁盘插件已对齐时 reload-plugin 不够）"
 			}
 			if len(compatWarnings) > 0 {
 				payload["warnings"] = compatWarnings
+			}
+			if prune {
+				payload["pruned"] = pruned
+				payload["kept_records"] = kept
 			}
 			return printJSON(out, payload, false)
 		},
 	}
 	cmd.Flags().IntVar(&httpPort, "http-port", daemon.DefaultHTTPPort, "daemon HTTP port")
+	cmd.Flags().StringVar(&projectDir, "project", "", "also detect editors already open for this project but connected to no daemon (fails with EDITOR_OPEN_UNCONNECTED)")
+	cmd.Flags().BoolVar(&prune, "prune", false, "delete dead daemon-*.json records from the user cache dir (running daemons and last-daemon.json are never touched)")
 	return cmd
+}
+
+// mustSessionList 把 enrichSessions 处理过的 sessions 值规回 []any
+// （enrich 失败/空时返回空切片，调用方据此判「无 session」）。
+func mustSessionList(raw any) []any {
+	list, _ := raw.([]any)
+	return list
+}
+
+// unconnectedEditorsReport 扫描本机编辑器进程，返回属于 projectDir 但
+// （显然）未连接任何 daemon 的编辑器条目（形状：
+// {pid, project, game_running:{pid, scene}}）。扫描失败不致命——返回已
+// 有结果附一句 scan_note 说明可见性受限。
+func unconnectedEditorsReport(projectDir string) ([]map[string]any, string) {
+	editors, err := godot.ScanEditors()
+	note := ""
+	if err != nil {
+		note = fmt.Sprintf("editor scan unavailable: %v", err)
+	}
+	var out []map[string]any
+	for _, ed := range editors {
+		if !sameProjectPath(ed.Project, projectDir) {
+			continue
+		}
+		entry := map[string]any{"pid": ed.PID, "project": ed.Project}
+		if ed.GameRunning != nil {
+			entry["game_running"] = map[string]any{"pid": ed.GameRunning.PID, "scene": ed.GameRunning.Scene}
+		}
+		out = append(out, entry)
+	}
+	return out, note
 }
 
 // newStopCommand asks CLI-launched editors to quit, then shuts the daemon

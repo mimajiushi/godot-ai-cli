@@ -66,6 +66,7 @@ func newLaunchCommand() *cobra.Command {
 		forceSpawn      bool
 		noPluginUpgrade bool
 		dryRun          bool
+		attach          bool
 	)
 	cmd := &cobra.Command{
 		Use:   "launch --project PATH",
@@ -85,6 +86,21 @@ func newLaunchCommand() *cobra.Command {
   6. Launch the Godot editor detached (skipped when THIS project's editor
      already has a connected session)
   7. Wait for the plugin session handshake and print a ready JSON line
+
+With --attach, step 6 is REPLACED: launch only pins the daemon ports for the
+project (<project>/.godot/godot_ai_ports.json — the plugin resolves project
+file > EditorSettings > default, and its BLOCKED recheck adopts a compatible
+daemon arriving later) and waits for the ALREADY-OPEN editor's plugin to
+connect. Nothing is spawned, so the user's own editor keeps running as the
+only instance. A timeout fails loudly with EDITOR_NOT_CONNECTED (never a
+silent success). --attach also composes with --http-port to reuse an
+existing daemon.
+
+Before spawning (without --attach), launch scans for an already-open editor
+for THIS project that is connected to no daemon; when found it fails with
+EDITOR_OPEN_UNCONNECTED instead of double-opening (scene file locks / saves
+overwriting each other). --force-spawn overrides, as with the existing
+EDITOR_ALREADY_OPEN guard.
 
 Steps 1-2 never touch the daemon, the editor or the Godot binary, so both
 --dry-run and the --no-plugin-upgrade refusal work fully offline.
@@ -145,6 +161,7 @@ Examples:
 				forceSpawn:      forceSpawn,
 				noPluginUpgrade: noPluginUpgrade,
 				dryRun:          dryRun,
+				attach:          attach,
 			})
 		},
 	}
@@ -159,6 +176,7 @@ Examples:
 	cmd.Flags().BoolVar(&forceSpawn, "force-spawn", false, "open a second editor even when another daemon hosts one for this project (RISK: scene file locks / saves can overwrite each other)")
 	cmd.Flags().BoolVar(&noPluginUpgrade, "no-plugin-upgrade", false, "refuse to rewrite addons/godot_ai when the project plugin version differs from the bundled one (fails with PLUGIN_VERSION_MISMATCH instead of dirtying the project)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview the plugin install step (files written, git impact) and exit — no Godot probe, no daemon, no editor, nothing written")
+	cmd.Flags().BoolVar(&attach, "attach", false, "do NOT spawn an editor: pin the daemon ports for the project and wait for the ALREADY-OPEN editor's plugin to connect (fails with EDITOR_NOT_CONNECTED on timeout)")
 	_ = cmd.MarkFlagRequired("project")
 	return cmd
 }
@@ -191,7 +209,19 @@ type launchOptions struct {
 	forceSpawn      bool
 	noPluginUpgrade bool // --no-plugin-upgrade: refuse a version-rewriting install
 	dryRun          bool // --dry-run: print the plugin plan and exit before any mutation
+	// attach：--attach 不 spawn 编辑器——只写工程端口钉 + 确保 daemon，
+	// 等已打开编辑器的插件重连（需求 editor-attach-and-daemon-discovery §3.3）。
+	attach bool
 }
+
+// 以下三个 seam 让 runLaunch 的编辑器相关副作用可在测试中注入：launch
+// 全流程单测必须假设「本机没有 Godot、绝不真开编辑器」，否则在 CI（无
+// Godot）与开发机（有用户的编辑器）上都不可复现。
+var (
+	launchEditorFn    = godot.LaunchEditor
+	resolveGodotBinFn = godot.Find
+	probeGodotVerFn   = godot.VersionFromBinary
+)
 
 // runLaunch executes the launch pipeline and prints the result JSON.
 func runLaunch(cmd *cobra.Command, opts launchOptions) error {
@@ -240,7 +270,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	}
 
 	// Step 3: resolve and version-check the Godot binary.
-	binary, err := godot.Find(opts.godotBin)
+	binary, err := resolveGodotBinFn(opts.godotBin)
 	if err != nil {
 		return jsonError(cmd, "GODOT_NOT_FOUND", err.Error(), nil)
 	}
@@ -254,7 +284,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 				"Godot resolved via --godot; save it as the default with `godot-ai-cli godot use %s`", binary))
 		}
 	}
-	gv, err := godot.VersionFromBinary(binary)
+	gv, err := probeGodotVerFn(binary)
 	if err != nil {
 		return jsonError(cmd, "GODOT_VERSION_UNKNOWN", err.Error(), nil)
 	}
@@ -283,7 +313,10 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		WSPort:   opts.wsPort,
 		Version:  pluginmeta.PluginVersion(),
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// 以 cmd.Context() 为父上下文：生产上 cobra 默认 Background（行为与
+	// 原来一致，信号仍生效）；测试可 SetContext 一个可取消上下文，让
+	// foreground 模式（打印 ready 后阻塞等中断）能够干净退出。
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// keptEditors counts the editors an --upgrade-daemon swap preserved;
@@ -416,10 +449,36 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 			}
 		}
 
+		// 未连接编辑器守卫（需求 editor-attach-and-daemon-discovery §3.2）：
+		// 进程扫描发现该工程的编辑器活着、但没连任何 daemon 时，再 spawn
+		// 就是双开（场景锁/保存互覆）——拒绝并指向 launch --attach。
+		// --attach 本身就是这种现场的入口，跳过守卫与 spawn；
+		// --force-spawn 保持既有「自担风险」语义。
+		if !opts.attach && !opts.forceSpawn {
+			if editors, scanErr := unconnectedEditorsReport(projectDir); len(editors) > 0 {
+				live := liveDaemonEntries(knownDaemonsReport(opts.httpPort))
+				return jsonError(cmd, "EDITOR_OPEN_UNCONNECTED",
+					fmt.Sprintf("检测到工程 %s 的编辑器进程已打开，但它没有连接任何 daemon；launch 会再开一个编辑器实例（场景锁/保存互相覆盖风险）", projectDir),
+					map[string]any{
+						"editors":      editors,
+						"live_daemons": live,
+						"suggest": []string{
+							"godot-ai-cli launch --project " + projectDir + " --attach",
+							fmt.Sprintf("godot-ai-cli status --http-port %v", opts.httpPort),
+						},
+						"retryable": false,
+						"scan_note": scanErr,
+					})
+			} else if scanErr != "" {
+				warnings = append(warnings, scanErr)
+			}
+		}
+
 		// Pin the daemon ports PER PROJECT: the plugin resolves ports as
 		// project file > EditorSettings > default, so this file (written for
 		// default ports too, for determinism) replaces the old global
-		// EditorSettings overrides entirely.
+		// EditorSettings overrides entirely. --attach 依赖这个文件让已打开的
+		// 编辑器在下一轮 recheck 时收养本 daemon。
 		if err := godot.WriteProjectPorts(projectDir, opts.httpPort, opts.wsPort); err != nil {
 			return jsonError(cmd, "PROJECT_PORTS_FAILED",
 				fmt.Sprintf("write %s: %v", godot.ProjectPortsPath(projectDir), err), nil)
@@ -435,13 +494,16 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 				otherPort, otherPort))
 		}
 
-		editorPID, err = godot.LaunchEditor(godot.LaunchOptions{
-			Binary:     binary,
-			ProjectDir: projectDir,
-			Headless:   opts.headless,
-		})
-		if err != nil {
-			return jsonError(cmd, "EDITOR_LAUNCH_FAILED", err.Error(), nil)
+		// --attach 不 spawn：等已打开编辑器的插件重连（步骤 6 的等待不变）。
+		if !opts.attach {
+			editorPID, err = launchEditorFn(godot.LaunchOptions{
+				Binary:     binary,
+				ProjectDir: projectDir,
+				Headless:   opts.headless,
+			})
+			if err != nil {
+				return jsonError(cmd, "EDITOR_LAUNCH_FAILED", err.Error(), nil)
+			}
 		}
 	}
 
@@ -450,9 +512,33 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	// ready while its own editor never connected.
 	session, err := waitForSession(ctx, opts.httpPort, projectDir, opts.wait)
 	if err != nil {
+		// --attach 超时是显式失败（EDITOR_NOT_CONNECTED），绝不静默成功——
+		// 调用方需要知道「等不到已打开的编辑器」而不是把超时的 daemon
+		// 当作 ready 继续（需求 editor-attach-and-daemon-discovery §3.3）。
+		if opts.attach {
+			data := map[string]any{
+				"http_port": opts.httpPort,
+				"ws_port":   opts.wsPort,
+				"wait_s":    opts.wait.Seconds(),
+				"retryable": true,
+				"hint": ("editor not connected within the wait window — confirm the editor is still open and its Godot AI panel shows no incompatible-server block; " +
+					"when the panel shows a version mismatch, fully quit and reopen the editor (a plugin reload does not replace loaded plugin code)"),
+			}
+			if rj := recentRejectionsFrom(opts.httpPort); len(rj) > 0 {
+				data["recent_rejections"] = rj
+			}
+			return jsonError(cmd, "EDITOR_NOT_CONNECTED",
+				fmt.Sprintf("no plugin session for this project connected within %s", opts.wait), data)
+		}
 		return jsonError(cmd, "LAUNCH_TIMEOUT",
 			fmt.Sprintf("no plugin session for this project connected within %s — the editor may still be starting; retry or raise --wait", opts.wait),
-			map[string]any{"retryable": true})
+			map[string]any{
+				"retryable": true,
+				// 等待超时同样带拒绝线索（需求 handshake-rejection-visibility
+				// §4.2）：spawn 出去的编辑器若因版本不匹配被拒握手，这里能
+				// 直接看到原因与修法，而不是盲等。
+				"recent_rejections": recentRejectionsFrom(opts.httpPort),
+			})
 	}
 
 	// Pin the session active so the ops following a launch target the
@@ -517,6 +603,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		"project":        projectDir,
 		"editor_pid":     session["editor_pid"],
 		"headless":       opts.headless,
+		"spawned_editor": editorPID != 0,
 		"daemon":         map[string]any{"http_port": opts.httpPort, "ws_port": opts.wsPort},
 		"plugin_version": pluginmeta.PluginVersion(),
 		"plugin": map[string]any{

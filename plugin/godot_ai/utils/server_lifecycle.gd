@@ -108,6 +108,14 @@ var _process_grant
 var _replacement_authorization
 var _effect: Dictionary = {}
 
+# godot-ai-cli fork patch（launch --attach 支持）：episode 重开前的端口重解析
+# 回调（由 plugin.gd 注入，重读 工程文件 > EditorSettings > 默认 的端口钉）。
+# launch --attach 会把端口钉写进 <project>/.godot/godot_ai_ports.json，而已经
+# 打开的编辑器启动时钉可能还不存在——configure() 的 plan 捕获于启动一刻，
+# BLOCKED recheck 重走 _begin_start_episode 时若不重读钉，recheck 永远打旧
+# 端口，attach 永远等不到握手。空 Callable = 保持上游行为。
+var endpoint_policy_refresher: Callable = Callable()
+
 func configure(plan: Dictionary) -> void:
 	## Capture caller-owned values once. Configuration is intentionally inert.
 	if not _plan.is_empty():
@@ -139,6 +147,16 @@ func _begin_start_episode(existing_id := 0, probe := true) -> void:
 	_cancel_effect()
 	_replacement_authorization = null
 	_transport = null
+	# fork patch（attach 支持）：重探前重读端口钉——已打开的编辑器启动时
+	# 钉可能尚不存在，而 recheck 必须能发现后来写入的钉（见
+	# endpoint_policy_refresher 声明处注释）。
+	if endpoint_policy_refresher.is_valid():
+		var refreshed: Dictionary = endpoint_policy_refresher.call()
+		if not refreshed.is_empty():
+			_plan["http_port"] = int(refreshed.get("http_port", _plan.get("http_port", 0)))
+			_plan["ws_port"] = int(refreshed.get("ws_port", _plan.get("ws_port", 0)))
+			if str(refreshed.get("capability_path", "")) != "":
+				_plan["capability_path"] = str(refreshed.capability_path)
 	var config_error := McpAllowHosts.configuration_error(str(_plan.get("allow_hosts", "")))
 	if not config_error.is_empty():
 		_block_without_effect("unsupported_remote_access", config_error)

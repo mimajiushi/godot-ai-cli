@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -89,20 +88,4 @@ func WindowsSystemProxy() string {
 		return "http://" + host
 	}
 	return ""
-}
-
-// cutProxyHost 从 ProxyServer 值里取 HTTP 代理地址：支持 "host:port" 与
-// "http=host:port;https=host:port;socks=..." 两种注册表形态。
-func cutProxyHost(raw string) (string, bool) {
-	for _, seg := range bytes.Split([]byte(raw), []byte(";")) {
-		k, v, found := bytes.Cut(seg, []byte("="))
-		if !found {
-			// 纯 host:port 形态。
-			return string(seg), len(seg) > 0
-		}
-		if strings.EqualFold(string(k), "http") && len(v) > 0 {
-			return string(v), true
-		}
-	}
-	return "", false
 }

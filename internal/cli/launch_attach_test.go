@@ -54,6 +54,38 @@ func freeTCPPort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
+// lockedBuffer 是并发安全的输出缓冲：runLaunch 在后台 goroutine 里写，
+// 测试 goroutine 轮询长度/读内容——裸 bytes.Buffer 会被 -race 判为数据
+// 竞态（Windows CI 实测）。
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *lockedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf.Bytes()...)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // runLaunchAttachFlow 以 foreground daemon 跑 runLaunch：ready/error 打印
 // 后 foreground 分支会阻塞等 ctx 取消——helper 在输出落盘后主动 cancel，
 // 让调用方拿到解析后的 envelope 时进程内 daemon 也已关闭。
@@ -72,7 +104,7 @@ func runLaunchAttachFlow(t *testing.T, dir string, mutate func(*launchOptions)) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := newLaunchCommand()
-	buf := &bytes.Buffer{}
+	buf := &lockedBuffer{}
 	cmd.SetOut(buf)
 	cmd.SetErr(buf)
 	cmd.SilenceUsage = true

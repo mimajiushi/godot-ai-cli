@@ -203,6 +203,24 @@ func flagInt(args []string, name string) int {
 	return n
 }
 
+// cutProxyHost 从注册表 ProxyServer 值里取 HTTP 代理地址：支持 "host:port"
+// 与 "http=host:port;https=host:port;socks=..." 两种形态。放在共享文件
+// （而非 windows 专属）是为了跨平台可编译、可单测——它是纯字符串解析，
+// 唯一平台相关的是读取注册表本身（WindowsSystemProxy）。
+func cutProxyHost(raw string) (string, bool) {
+	for _, seg := range strings.Split(raw, ";") {
+		k, v, found := strings.Cut(seg, "=")
+		if !found {
+			// 纯 host:port 形态。
+			return seg, seg != ""
+		}
+		if strings.EqualFold(k, "http") && v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // normalizeProjectPath 归一工程路径：正斜杠、去尾斜杠（与 CLI 侧
 // sameProjectPath 的归一规则一致，跨包保持同一比较口径）。
 func normalizeProjectPath(p string) string {

@@ -71,6 +71,51 @@ func themeOps() []OpSpec {
 				ps("theme-path", "theme_path", false, "", "res:// path of the theme"),
 			},
 		},
+		{
+			// 上游 v4.2.x 新增：theme 的 font/icon 资源槽与 stylebox 纹理。
+			Domain: "theme", Name: "set-font", PluginCommand: "theme_set_font",
+			Summary: "Assign a Font resource to a theme font slot (button/body/heading fonts)",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("theme-path", "theme_path", true, "", "res:// path of the theme"),
+				ps("class-name", "class_name", true, "", "Control class"),
+				ps("name", "name", true, "", "Item name, e.g. font"),
+				ps("font-path", "font_path", true, "", "res:// path of the Font resource"),
+			},
+		},
+		{
+			Domain: "theme", Name: "set-icon", PluginCommand: "theme_set_icon",
+			Summary: "Assign a Texture2D to a theme icon slot (checkbox marks, dropdown arrows)",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("theme-path", "theme_path", true, "", "res:// path of the theme"),
+				ps("class-name", "class_name", true, "", "Control class"),
+				ps("name", "name", true, "", "Item name, e.g. checked"),
+				ps("texture-path", "texture_path", true, "", "res:// path of the Texture2D"),
+			},
+		},
+		{
+			Domain: "theme", Name: "set-stylebox-texture", PluginCommand: "theme_set_stylebox_texture",
+			Summary: "Set a texture on a theme's StyleBoxTexture item",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("theme-path", "theme_path", true, "", "res:// path of the theme"),
+				ps("class-name", "class_name", true, "", "Control class"),
+				ps("name", "name", true, "", "Item name, e.g. panel"),
+				ps("texture-path", "texture_path", true, "", "res:// path of the Texture2D"),
+			},
+		},
+		{
+			// 上游 v4.2.x 新增：按节点覆盖 stylebox（不改 theme 资源本身）。
+			Domain: "theme", Name: "stylebox-override", PluginCommand: "theme_stylebox_override",
+			Summary: "Override one Control node's theme stylebox slot with a patched StyleBoxFlat",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "Scene path of the Control node"),
+				ps("slot", "slot", true, "", "Theme stylebox slot, e.g. panel/normal/pressed"),
+				pj("patch", "patch", true, `StyleBoxFlat property patch, e.g. {"bg_color":..,"corner_radius_top_left":..} (unknown keys rejected)`),
+			},
+		},
 	}
 }
 
@@ -116,6 +161,16 @@ func uiOps() []OpSpec {
 				pb("clear-existing", "clear_existing", false, "true", "Replace existing draw operations"),
 			},
 		},
+		{
+			// 上游 v4.2.x 新增：RichTextLabel 的 bbcode 文本设置。
+			Domain: "ui", Name: "set-richtext", PluginCommand: "set_richtext",
+			Summary: "Set the BBCode text of a RichTextLabel",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "Scene path of the RichTextLabel"),
+				ps("text", "text", true, "", "BBCode text content"),
+			},
+		},
 	}
 }
 
@@ -159,6 +214,18 @@ func resourceOps() []OpSpec {
 			Timeout: DefaultTimeout,
 			Params: []ParamSpec{
 				ps("type", "type", true, "", "Resource class name"),
+			},
+		},
+		{
+			// 上游 v4.2.x 新增：检视节点原生 Resource 属性的活对象图
+			// （bounded output，depth 0..3）。
+			Domain: "resource", Name: "inspect", PluginCommand: "inspect_resource",
+			Summary: "Inspect the live native resource graph behind a node's built-in Resource property",
+			Timeout: DefaultTimeout,
+			Params: []ParamSpec{
+				ps("node-path", "node_path", true, "", "Scene path of the node"),
+				ps("property", "property", true, "", "Native Resource property name on the node's class"),
+				pi("depth", "depth", false, "2", "Sub-resource recursion depth (0-3)"),
 			},
 		},
 		{
@@ -219,6 +286,7 @@ func resourceOps() []OpSpec {
 				ps("shape-type", "shape_type", false, "box", "box | sphere | capsule | cylinder"),
 				ps("body-type", "body_type", false, "static", "static | area"),
 				ps("scene-file", "scene_file", false, "", "Scene file to edit (default: currently edited scene)"),
+				pb("overwrite", "overwrite", false, "false", "Refresh colliders that already carry generated provenance (undoable)"),
 			},
 		},
 		{

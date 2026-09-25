@@ -194,6 +194,39 @@ func filesystemOps() []OpSpec {
 				pi("limit", "limit", false, "100", "Maximum matches to return"),
 			},
 		},
+		{
+			// 上游 v4.2.x 新增：deferred 文件系统变更（30s 预算）。引用检查
+			// 在插件侧完成，被引用时拒绝 unless force。
+			Domain: "filesystem", Name: "move", PluginCommand: "move_file",
+			Summary: "Move a file or directory tree within the project (uid-preserving, reference-checked)",
+			Timeout: ScanTimeout, Write: true,
+			ResponseNote: `deferred reply; requires a direct command (batch_execute cannot await it). Path-style references block the move — rewrite them to uid:// first.`,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "Source res:// file or directory"),
+				ps("new-path", "new_path", true, "", "Destination res:// path (parent directory must exist)"),
+			},
+		},
+		{
+			Domain: "filesystem", Name: "rename", PluginCommand: "rename_file",
+			Summary: "Rename a file or directory in place (uid-preserving, reference-checked)",
+			Timeout: ScanTimeout, Write: true,
+			ResponseNote: `deferred reply; same reference policy as filesystem move.`,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "Source res:// file or directory"),
+				ps("new-name", "new_name", true, "", "New bare name (no path separators)"),
+			},
+		},
+		{
+			Domain: "filesystem", Name: "remove", PluginCommand: "remove_file",
+			Summary: "Remove a file or directory (OS trash by default; reference-checked)",
+			Timeout: ScanTimeout, Write: true,
+			ResponseNote: `deferred reply. referenced_by lists blockers; pass force=true only for known dangling references. Permanent deletion is file-only.`,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "res:// file or directory to remove"),
+				pb("permanent", "permanent", false, "false", "Delete permanently instead of OS trash (files only)"),
+				pb("force", "force", false, "false", "Proceed despite remaining references (dangling references only)"),
+			},
+		},
 	}
 }
 

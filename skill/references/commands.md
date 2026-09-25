@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --format md` (163 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --format md` (182 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --format md
@@ -22,7 +22,7 @@ Conventions applying to every op:
 - Every op also accepts `--session <id>` (pin to one connected editor when several are attached) and `--params '<json>'` (base wire params; explicit flags override colliding keys).
 - Optional flags left at their zero value are omitted from the wire params.
 - `[write]` ops are gated on editor writability: while the editor is importing or playing they fail with `EDITOR_NOT_READY` (see references/troubleshooting.md).
-- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem scan` 30s, `resource physics-shape-generate` 30s, `batch execute` 30s.
+- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem move` 30s, `filesystem remove` 30s, `filesystem rename` 30s, `filesystem scan` 30s, `navigation bake` 30s, `resource physics-shape-generate` 30s, `batch execute` 30s.
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
 - CLI-side extras not in the wire params: `editor eval` also accepts `--code-file`, `--code-stdin`, `--code-b64`; `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`; `node set-property` also accepts `--node-ref`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
@@ -423,13 +423,25 @@ Response: Echoes all three coordinate spaces: mouse_window (window client pixels
 ### `autoload remove` — Remove an autoload
 `remove_autoload` · 8s · **[write]** · --name string (required)
 
-## filesystem (5 ops)
+## filesystem (8 ops)
+
+### `filesystem move` — Move a file or directory tree within the project (uid-preserving, reference-checked)
+`move_file` · 30s · **[write]** · --path string (required), --new-path string (required)
+Response: deferred reply; requires a direct command (batch_execute cannot await it). Path-style references block the move — rewrite them to uid:// first.
 
 ### `filesystem read-text` — Read a project text file
 `read_file` · 8s · --path string (required)
 
 ### `filesystem reimport` — Reimport assets (textures, models, audio — NOT scripts)
 `reimport` · 8s · **[write]** · --paths json (required)
+
+### `filesystem remove` — Remove a file or directory (OS trash by default; reference-checked)
+`remove_file` · 30s · **[write]** · --path string (required), --permanent bool (default "false"), --force bool (default "false")
+Response: deferred reply. referenced_by lists blockers; pass force=true only for known dangling references. Permanent deletion is file-only.
+
+### `filesystem rename` — Rename a file or directory in place (uid-preserving, reference-checked)
+`rename_file` · 30s · **[write]** · --path string (required), --new-name string (required)
+Response: deferred reply; same reference policy as filesystem move.
 
 ### `filesystem scan` — Scan the project filesystem and settle imports
 `scan_filesystem` · 30s · no flags
@@ -440,7 +452,45 @@ Response: Echoes all three coordinate spaces: mouse_window (window client pixels
 ### `filesystem write-text` — Write a project text file
 `write_file` · 8s · **[write]** · --path string (required), --content string
 
-## theme (6 ops)
+## navigation (2 ops)
+
+### `navigation bake` — Bake a NavigationRegion2D/3D mesh (threaded, scene-anchored swap, undoable)
+`navigation_bake` · 30s · **[write]** · --region-path string (required), --force-sync bool (default "true")
+Response: deferred reply (threaded engine bake, 30s budget); batch_execute cannot await it.
+
+### `navigation path-get` — Query a path on an explicitly selected navigation map (2D or 3D)
+`navigation_path_get` · 8s · --dimension string (required), --from-point json (required), --to-point json (required), --region-path string, --scene-file string, --navigation-layers int (default "1"), --optimize bool (default "true"), --force-sync bool (default "false")
+
+## shader (4 ops)
+
+### `shader create` — Create a .gdshader/.gdshaderinc file (engine-parse validated before write)
+`shader_create` · 8s · **[write]** · --resource-path string (required), --code string (required), --shader-type string (default "spatial"), --overwrite bool (default "false")
+
+### `shader get` — Read a shader file back (code, uniforms, render modes, includes)
+`shader_get` · 8s · --path string (required)
+
+### `shader patch` — Apply a text replacement to a shader file and re-validate before writing
+`shader_patch` · 8s · **[write]** · --path string (required), --old-text string (required), --new-text string (required), --replace-all bool (default "false"), --shader-type string (default "spatial")
+
+### `shader validate` — Parse-check shader code through the engine compiler without writing
+`shader_validate` · 8s · --code string (required), --kind string (default "shader"), --shader-type string (default "spatial"), --base-dir string
+
+## visual-shader (4 ops)
+
+### `visual-shader create-graph` — Create a VisualShader .tres with selected stages and varyings
+`visual_shader_create_graph` · 8s · **[write]** · --resource-path string (required), --shader-type string (default "spatial"), --stages json, --varyings json, --overwrite bool (default "false")
+
+### `visual-shader edit` — Apply a batch of graph edit operations (add/replace/remove/connect/disconnect nodes, varyings)
+`visual_shader_edit` · 8s · **[write]** · --resource-path string (required), --operations json (required)
+Response: operations[]: {"op":"add_node"|"replace_node"|"remove_node"|"connect_nodes"|"disconnect_nodes"|"add_varying"|"remove_varying", ...}; string ids may reference nodes added earlier in the same batch.
+
+### `visual-shader get` — Read a VisualShader graph (nodes, connections, varyings) as JSON
+`visual_shader_get` · 8s · --path string (required)
+
+### `visual-shader node-catalog` — List instantiable VisualShaderNode classes (filter/paginate) with settable properties
+`visual_shader_node_catalog` · 8s · --filter string, --offset int (default "0"), --limit int (default "100")
+
+## theme (10 ops)
 
 ### `theme apply` — Apply a theme to a Control node (empty theme-path clears)
 `apply_theme` · 8s · **[write]** · --node-path string (required), --theme-path string
@@ -454,13 +504,25 @@ Response: Echoes all three coordinate spaces: mouse_window (window client pixels
 ### `theme set-constant` — Set a constant item on a theme
 `theme_set_constant` · 8s · **[write]** · --theme-path string (required), --class-name string (required), --name string (required), --value int (required)
 
+### `theme set-font` — Assign a Font resource to a theme font slot (button/body/heading fonts)
+`theme_set_font` · 8s · **[write]** · --theme-path string (required), --class-name string (required), --name string (required), --font-path string (required)
+
 ### `theme set-font-size` — Set a font size item on a theme
 `theme_set_font_size` · 8s · **[write]** · --theme-path string (required), --class-name string (required), --name string (required), --value int (required)
+
+### `theme set-icon` — Assign a Texture2D to a theme icon slot (checkbox marks, dropdown arrows)
+`theme_set_icon` · 8s · **[write]** · --theme-path string (required), --class-name string (required), --name string (required), --texture-path string (required)
 
 ### `theme set-stylebox-flat` — Set a StyleBoxFlat item on a theme
 `theme_set_stylebox_flat` · 8s · **[write]** · --theme-path string (required), --class-name string (required), --name string (required), --bg-color json, --border-color json, --border json, --corners json, --margins json, --shadow json, --anti-aliasing bool
 
-## ui (4 ops)
+### `theme set-stylebox-texture` — Set a texture on a theme's StyleBoxTexture item
+`theme_set_stylebox_texture` · 8s · **[write]** · --theme-path string (required), --class-name string (required), --name string (required), --texture-path string (required)
+
+### `theme stylebox-override` — Override one Control node's theme stylebox slot with a patched StyleBoxFlat
+`theme_stylebox_override` · 8s · **[write]** · --path string (required), --slot string (required), --patch json (required)
+
+## ui (5 ops)
 
 ### `ui build-layout` — Build a Control subtree from a declarative layout tree
 `build_layout` · 8s · **[write]** · --tree json (required), --parent-path string
@@ -471,10 +533,13 @@ Response: Echoes all three coordinate spaces: mouse_window (window client pixels
 ### `ui set-anchor-preset` — Apply an anchor preset to a Control
 `set_anchor_preset` · 8s · **[write]** · --path string (required), --preset string (required), --resize-mode string (default "minsize"), --margin int (default "0")
 
+### `ui set-richtext` — Set the BBCode text of a RichTextLabel
+`set_richtext` · 8s · **[write]** · --path string (required), --text string (required)
+
 ### `ui set-text` — Set the text of a Label/Button/RichTextLabel
 `set_text` · 8s · **[write]** · --path string (required), --text string (required)
 
-## resource (16 ops)
+## resource (17 ops)
 
 ### `resource assign` — Assign a resource to a node's property
 `assign_resource` · 8s · **[write]** · --path string (required), --property string (required), --resource-path string (required)
@@ -494,6 +559,9 @@ Response: Echoes all three coordinate spaces: mouse_window (window client pixels
 ### `resource gradient-texture-create` — Create a GradientTexture2D resource
 `gradient_texture_create` · 8s · **[write]** · --stops json (required), --width int (default "256"), --height int (default "1"), --fill string (default "linear"), --path string, --property string, --resource-path string, --overwrite bool (default "false")
 
+### `resource inspect` — Inspect the live native resource graph behind a node's built-in Resource property
+`inspect_resource` · 8s · --node-path string (required), --property string (required), --depth int (default "2")
+
 ### `resource load` — Load a resource and read its properties
 `load_resource` · 8s · --path string (required)
 
@@ -504,7 +572,7 @@ Response: Echoes all three coordinate spaces: mouse_window (window client pixels
 `physics_shape_autofit` · 8s · **[write]** · --path string (required), --source-path string, --shape-type string
 
 ### `resource physics-shape-generate` — Batch-generate collision bodies+shapes for MeshInstance3D nodes
-`physics_shape_generate` · 30s · **[write]** · --paths json (required), --shape-type string (default "box"), --body-type string (default "static"), --scene-file string
+`physics_shape_generate` · 30s · **[write]** · --paths json (required), --shape-type string (default "box"), --body-type string (default "static"), --scene-file string, --overwrite bool (default "false")
 
 ### `resource search` — Search resources by type and path prefix
 `search_resources` · 8s · --type string, --path string, --offset int (default "0"), --limit int (default "100")

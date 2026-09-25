@@ -143,41 +143,45 @@ var InternalOnly = []InternalOnlySpec{
 var domainOrder = []string{
 	"editor", "scene", "node", "script", "project", "session", "test",
 	"animation", "material", "audio", "particle", "camera", "signal",
-	"input-map", "game", "autoload", "filesystem", "theme", "ui",
+	"input-map", "game", "autoload", "filesystem", "navigation", "shader",
+	"visual-shader", "theme", "ui",
 	"resource", "api", "tilemap", "tileset", "gridmap", "csg", "custom",
 	"batch", "logs",
 }
 
 // domainSummaries backs the parent-group help text.
 var domainSummaries = map[string]string{
-	"editor":     "Editor state, selection, screenshots, and lifecycle",
-	"scene":      "Scene tree inspection and scene file management",
-	"node":       "Create, find, mutate, and organize scene nodes",
-	"script":     "Create, patch, read, and attach GDScript files",
-	"project":    "Project settings and running the project",
-	"session":    "Connected editor sessions (daemon-side, no plugin command)",
-	"test":       "Run GDScript test suites in the editor",
-	"animation":  "AnimationPlayers, animations, tracks, and presets",
-	"material":   "Material resources and shader parameters",
-	"audio":      "Audio players, streams, and playback",
-	"particle":   "Particle nodes, process materials, and presets",
-	"camera":     "Camera nodes, 2D follow/limits, and presets",
-	"signal":     "List, connect, and disconnect node signals",
-	"input-map":  "Project input actions and event bindings",
-	"game":       "Introspect and drive the RUNNING game (input, scene reads)",
-	"autoload":   "Project autoload singletons",
-	"filesystem": "Project filesystem reads, writes, reimport, and scan",
-	"theme":      "Theme resources and styleboxes",
-	"ui":         "Control layout, text, anchors, and draw recipes",
-	"resource":   "Generic resource search/load/create plus typed creators",
-	"api":        "ClassDB metadata for Godot classes",
-	"tilemap":    "TileMapLayer cell editing and queries",
-	"tileset":    "TileSet atlas inspection",
-	"gridmap":    "GridMap item editing and queries",
-	"csg":        "CSG shape creation and operations",
-	"custom":     "Third-party custom tools registered in the editor",
-	"batch":      "Run multiple plugin commands atomically",
-	"logs":       "Plugin / game / editor log buffers",
+	"editor":        "Editor state, selection, screenshots, and lifecycle",
+	"scene":         "Scene tree inspection and scene file management",
+	"node":          "Create, find, mutate, and organize scene nodes",
+	"script":        "Create, patch, read, and attach GDScript files",
+	"project":       "Project settings and running the project",
+	"session":       "Connected editor sessions (daemon-side, no plugin command)",
+	"test":          "Run GDScript test suites in the editor",
+	"animation":     "AnimationPlayers, animations, tracks, and presets",
+	"material":      "Material resources and shader parameters",
+	"audio":         "Audio players, streams, and playback",
+	"particle":      "Particle nodes, process materials, and presets",
+	"camera":        "Camera nodes, 2D follow/limits, and presets",
+	"signal":        "List, connect, and disconnect node signals",
+	"input-map":     "Project input actions and event bindings",
+	"game":          "Introspect and drive the RUNNING game (input, scene reads)",
+	"autoload":      "Project autoload singletons",
+	"filesystem":    "Project filesystem reads, writes, reimport, and scan",
+	"navigation":    "Navigation mesh baking and path queries",
+	"shader":        "Compile-validated shader authoring",
+	"visual-shader": "VisualShader graph creation, editing, and node catalog",
+	"theme":         "Theme resources and styleboxes",
+	"ui":            "Control layout, text, anchors, and draw recipes",
+	"resource":      "Generic resource search/load/create plus typed creators",
+	"api":           "ClassDB metadata for Godot classes",
+	"tilemap":       "TileMapLayer cell editing and queries",
+	"tileset":       "TileSet atlas inspection",
+	"gridmap":       "GridMap item editing and queries",
+	"csg":           "CSG shape creation and operations",
+	"custom":        "Third-party custom tools registered in the editor",
+	"batch":         "Run multiple plugin commands atomically",
+	"logs":          "Plugin / game / editor log buffers",
 }
 
 // All aggregates every domain's op table in the fixed domain order.
@@ -234,6 +238,12 @@ func domainOps(domain string) []OpSpec {
 		return autoloadOps()
 	case "filesystem":
 		return filesystemOps()
+	case "navigation":
+		return navigationOps()
+	case "shader":
+		return shaderOps()
+	case "visual-shader":
+		return visualShaderOps()
 	case "theme":
 		return themeOps()
 	case "ui":

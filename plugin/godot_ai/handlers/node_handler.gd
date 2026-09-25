@@ -93,7 +93,8 @@ func delete_node(params: Dictionary) -> Dictionary:
 	var node_path: String = resolved.path
 	var scene_root: Node = resolved.scene_root
 
-	var root_err := _reject_if_scene_root(node, scene_root, "delete")
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var root_err: Variant = _reject_if_scene_root(node, scene_root, "delete")
 	if root_err != null:
 		return root_err
 
@@ -132,7 +133,8 @@ func reparent_node(params: Dictionary) -> Dictionary:
 	if new_parent == null:
 		return ErrorCodes.make(ErrorCodes.NODE_NOT_FOUND, McpScenePath.format_parent_error(new_parent_path, scene_root))
 
-	var root_err := _reject_if_scene_root(node, scene_root, "reparent")
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var root_err: Variant = _reject_if_scene_root(node, scene_root, "reparent")
 	if root_err != null:
 		return root_err
 
@@ -263,14 +265,16 @@ func set_property(params: Dictionary) -> Dictionary:
 		# properties. Mirrors resource_create's inline-assign path but
 		# avoids a separate tool call for the common case.
 		var type_str: String = value.get("__class__", "")
-		var made := ResourceHandler._instantiate_resource(type_str)
+		# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+		var made: Variant = ResourceHandler._instantiate_resource(type_str)
 		if made is Dictionary:
 			return made
 		var res: Resource = made
 		var remaining: Dictionary = (value as Dictionary).duplicate()
 		remaining.erase("__class__")
 		if not remaining.is_empty():
-			var apply_err := ResourceHandler._apply_resource_properties(res, remaining)
+			# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+			var apply_err: Variant = ResourceHandler._apply_resource_properties(res, remaining)
 			if apply_err != null:
 				return apply_err
 		value = res
@@ -304,7 +308,8 @@ func set_property(params: Dictionary) -> Dictionary:
 		## Refuse any value that didn't land as the target compound Variant
 		## — wrong-shape dict (#123) or non-dict input like list / JSON string
 		## that used to silently default-construct Vector3.ZERO (#191).
-		var coerce_err := _check_coerced(value, target_type)
+		# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+		var coerce_err: Variant = _check_coerced(value, target_type)
 		if coerce_err != null:
 			return coerce_err
 
@@ -517,7 +522,8 @@ func duplicate_node(params: Dictionary) -> Dictionary:
 	var node_path: String = resolved.path
 	var scene_root: Node = resolved.scene_root
 
-	var root_err := _reject_if_scene_root(node, scene_root, "duplicate")
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var root_err: Variant = _reject_if_scene_root(node, scene_root, "duplicate")
 	if root_err != null:
 		return root_err
 
@@ -565,7 +571,8 @@ func move_node(params: Dictionary) -> Dictionary:
 	var node_path: String = resolved.path
 	var scene_root: Node = resolved.scene_root
 
-	var root_err := _reject_if_scene_root(node, scene_root, "reorder")
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var root_err: Variant = _reject_if_scene_root(node, scene_root, "reorder")
 	if root_err != null:
 		return root_err
 
@@ -603,7 +610,8 @@ func add_to_group(params: Dictionary) -> Dictionary:
 	var node_path: String = resolved.path
 
 	var group_value: Variant = params.get("group", "")
-	var type_err := McpParamValidators.require_string("group", group_value)
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var type_err: Variant = McpParamValidators.require_string("group", group_value)
 	if type_err != null:
 		return type_err
 	var group := String(group_value)
@@ -635,7 +643,8 @@ func remove_from_group(params: Dictionary) -> Dictionary:
 	var node_path: String = resolved.path
 
 	var group_value: Variant = params.get("group", "")
-	var type_err := McpParamValidators.require_string("group", group_value)
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var type_err: Variant = McpParamValidators.require_string("group", group_value)
 	if type_err != null:
 		return type_err
 	var group := String(group_value)
@@ -776,7 +785,8 @@ static func _check_coerced(value: Variant, target_type: int, prefix: String = ""
 			return ErrorCodes.prefix_message(unsupported, prefix)
 	if ok:
 		return null
-	var dict_err := _check_dict_coerce_failed(value, target_type)
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var dict_err: Variant = _check_dict_coerce_failed(value, target_type)
 	if dict_err != null:
 		return ErrorCodes.prefix_message(dict_err, prefix)
 	## Wording stays neutral on shape — `_shape_hint` already produces a
@@ -1127,7 +1137,8 @@ static func _coerce_typed_array(value: Variant, slot_value: Array, prefix: Strin
 				return ErrorCodes.prefix_message(conform_err, elem_prefix)
 		else:
 			coerced = _coerce_value(in_list[i], elem_type)
-			var elem_err := _check_coerced(coerced, elem_type, elem_prefix)
+			# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+			var elem_err: Variant = _check_coerced(coerced, elem_type, elem_prefix)
 			if elem_err != null:
 				return elem_err
 			if coerced == null:
@@ -1203,7 +1214,8 @@ static func _coerce_object_element(elem: Variant, elem_prefix: String) -> Varian
 		return loaded
 	if elem is Dictionary and (elem as Dictionary).has("__class__"):
 		var type_str: String = (elem as Dictionary).get("__class__", "")
-		var made := ResourceHandler._instantiate_resource(type_str)
+		# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+		var made: Variant = ResourceHandler._instantiate_resource(type_str)
 		if made is Dictionary:
 			return ErrorCodes.prefix_message(made, elem_prefix)
 		var res: Resource = made
@@ -1311,7 +1323,8 @@ static func _coerce_typed_dictionary(
 				return ErrorCodes.prefix_message(conform_err, key_prefix)
 		else:
 			coerced = _coerce_value(raw_value, value_type)
-			var value_err := _check_coerced(coerced, value_type, key_prefix)
+			# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+			var value_err: Variant = _check_coerced(coerced, value_type, key_prefix)
 			if value_err != null:
 				return value_err
 			if coerced == null:

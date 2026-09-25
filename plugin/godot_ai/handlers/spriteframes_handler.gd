@@ -70,7 +70,8 @@ func add_frame(params: Dictionary) -> Dictionary:
 			% [anim, resource_path]
 		)
 
-	var frame_tex := _load_frame_texture(texture_path, str(params.get("region", "")))
+	# godot-ai-cli fork patch: Variant 显式标注（demo 工程把 INFERRED_DECLARATION 视为错误）。
+	var frame_tex: Variant = _load_frame_texture(texture_path, str(params.get("region", "")))
 	if frame_tex is Dictionary:
 		return frame_tex
 

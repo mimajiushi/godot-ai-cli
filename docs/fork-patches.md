@@ -850,3 +850,64 @@ session), and the CLI's record path plumbing (`daemonRecordPath`) goes through
 the same `userCacheDir` seam as enumeration (`daemon.PIDFilePath` reads the
 real `os.UserCacheDir` directly, so `--prune` testing and the stale-pid
 diagnostic were unstubbable).
+
+## 20. beta.26 replay-findings batch (3 requirement docs from the beta.25 replay)
+
+`plugin.cfg` 4.2.4 → **4.2.5**. Three requirement docs produced by the
+beta.25 full-registry replay landed, each with unit tests + a
+`tools/regression-scenarios.md` entry:
+
+- **Probe-rejection self-report** (`utils/server_lifecycle.gd`,
+  `internal/daemon/daemon.go`, `internal/bridge/server.go`, RS-042): a v4
+  plugin that judges the daemon major/minor-incompatible at the HTTP probe
+  stage self-blocks and NEVER dials the WebSocket, so the daemon's rejection
+  ring stayed empty on exactly the live path it was built for ("editor alive,
+  daemon alive, `sessions: []` forever"). The plugin now POSTs once per
+  (port, daemon instance+version fingerprint) to the new Bearer-authenticated
+  `POST /godot-ai/probe-rejection`; the daemon re-judges the version with the
+  handshake gate's semantics and records a `probe_version_mismatch` rejection
+  (consecutive identical reports deduped so BLOCKED rechecks cannot flush the
+  8-entry ring). `recent_rejections`, `status`, `plugin install` and the
+  `PLUGIN_DISCONNECTED` error consume it unchanged; the latter two's
+  `in_memory_plugin` distinguishes `source:"probe_rejection"` from
+  `rejected_handshake`. Only a NEW plugin self-reports — daemons cannot learn
+  a peer's version from the bare probe, which is why the report is
+  plugin-side and why the beta.24/25 plugin still has to be restarted blind.
+- **`--upgrade-daemon` pre/post-upgrade guard split**
+  (`internal/cli/launch.go`, `internal/cli/known_daemons.go`, RS-043):
+  `shutdownDaemonKeepEditors` now returns the kept sessions' identities, not
+  just a count. When THIS project's editor was connected before the swap but
+  cannot re-attach within the 75s grace (incompatible in-memory plugin),
+  launch no longer fails with EDITOR_OPEN_UNCONNECTED after the fact — the
+  daemon replacement already happened, so it reports `status:ok` with
+  `daemon_upgraded:true`, `editor_reconnected:false`, the new daemon's
+  identity, `kept_editors` and editor-restart `next_steps` (plus
+  `recent_rejections` when present). Only a never-connected third-party
+  editor still fails closed, and that error now carries `daemon_upgraded` /
+  `daemon` / `kept_editors` so "command errored but the side effect landed"
+  is self-explanatory.
+- **`PLUGIN_DISCONNECTED` carries `in_memory_plugin`**
+  (`internal/bridge/server.go`, same RS-042): the no_active_session error
+  derives the in-memory plugin versions from the rejection ring (sessions
+  are empty by definition in that state), closing the last path where the
+  scene was unexplainable from the CLI.
+
+Test-suite hermeticity fix in the same batch (demo/tests, no product code):
+the `get_logs` counting tests passed `debugger_errors_root=null`, so the
+surfaced-error tracker fell through to the LIVE editor's Debugger Errors tab
+— errors promoted during a live game session stayed there past
+`project stop` and polluted every absolute-count assertion (+2). The
+affected tests now inject an empty synthetic root; the two unguarded
+`entry.code` / `entry.run_id` accesses use `.get()` so future residue fails
+cleanly instead of aborting the case with a SCRIPT ERROR.
+
+One REAL product bug surfaced by that replay (`utils/surfaced_error_tracker.gd`,
+pinned by the strengthened
+`test_surfaced_error_tracker_deferred_scan_survives_freed_root`): the #641
+freed-root guard `root != null and not is_instance_valid(root)` could never
+fire — under Godot 4.7 a freed instance reads as `== null` even through an
+untyped Variant (and a typed member read yields null outright), so a tracker
+whose injected debugger root was freed silently fell through to the LIVE
+editor UI and promoted real errors into test-scoped state. The tracker now
+remembers whether a root was ever injected (`_debugger_errors_root_set`) and
+treats an injected-but-invalid root as "scan nothing".

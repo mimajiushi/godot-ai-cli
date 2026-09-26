@@ -431,6 +431,14 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	}); err != nil {
 		warnings = append(warnings, fmt.Sprintf("record daemon ports: %v", err))
 	}
+	// 「这个 daemon 是哪个 CLI 起的」只有记录能回答（需求 R-5 附带），但只能
+	// 给我们**自己起的** daemon 写：foreground 的 in-process daemon 属于本
+	// 进程；detached 路径 spawn 出去的 serve 由它自己补写（见 serve.go）。
+	// 收养别人起的 daemon 时绝不能回写——那会把「旧版 CLI 起的 daemon」谎报
+	// 成本版，恰恰破坏该字段的用途。
+	if inProcess != nil {
+		recordDaemonCLIVersion(inProcess.HTTPPort())
+	}
 
 	// Step 5: launch the editor unless a session for THIS project is already
 	// connected. Other projects' sessions may share this daemon — they must
@@ -624,12 +632,7 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 	// passing the CLI's own bundled version renders nonsense like
 	// "plugin v3.2.9 ≠ bundled v3.2.9" when the daemon is an older build.
 	if session["plugin_stale"] == true {
-		daemonVersion := pluginmeta.PluginVersion()
-		if running, ok := probeDaemonHealth(opts.httpPort); ok && running != "" {
-			daemonVersion = running
-		}
-		warnings = append(warnings,
-			pluginStaleNote(fmt.Sprint(session["plugin_version"]), daemonVersion))
+		warnings = append(warnings, pluginStaleLaunchWarning(session, opts.httpPort))
 	}
 
 	if warnings == nil {
@@ -677,6 +680,20 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		<-inProcess.Done()
 	}
 	return nil
+}
+
+// pluginStaleLaunchWarning 渲染 launch 复用陈旧会话时的警告：文案与方向
+// 全部来自 status 共用的 pluginStaleHint（禁止复制两份逻辑，需求 R-5）——
+// 插件比 daemon 新时指向 `launch --upgrade-daemon`，插件更旧时才是
+// `plugin install` + 重启编辑器。对齐目标版本取 daemon 实时上报值，探测
+// 失败时回落到本 CLI 的内置插件版本（否则 daemon 是旧构建时会渲染出
+// "plugin v3.2.9 ≠ bundled v3.2.9" 这种无意义文案）。
+func pluginStaleLaunchWarning(session map[string]any, httpPort int) string {
+	daemonVersion := pluginmeta.PluginVersion()
+	if running, ok := probeDaemonHealth(httpPort); ok && running != "" {
+		daemonVersion = running
+	}
+	return pluginStaleNote(fmt.Sprint(session["plugin_version"]), daemonVersion)
 }
 
 // keptSessionForProject 在 --upgrade-daemon 保留的会话清单里找本工程的

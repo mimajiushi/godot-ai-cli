@@ -34,15 +34,20 @@ import (
 // global launch lock; the second one then hits the double-open guard.
 
 // writeDaemonRecord drops a daemon-<port>.json identity file into the
-// stubbed cache dir, as a running daemon would.
-func writeDaemonRecord(t *testing.T, dir string, httpPort, wsPort int, version string) {
+// stubbed cache dir, as a running daemon would. cliVersion 可选：给了才写
+// cli_version 键（不给即旧记录形态，读取方必须按「省略」处理，需求 R-5）。
+func writeDaemonRecord(t *testing.T, dir string, httpPort, wsPort int, version string, cliVersion ...string) {
 	t.Helper()
 	base := filepath.Join(dir, "godot-ai-cli")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	payload := fmt.Sprintf(`{"pid":1234,"http_port":%d,"ws_port":%d,"version":%q,"started_at":"2026-09-07T00:00:00Z"}`,
-		httpPort, wsPort, version)
+	cli := ""
+	if len(cliVersion) > 0 && cliVersion[0] != "" {
+		cli = fmt.Sprintf(`,"cli_version":%q`, cliVersion[0])
+	}
+	payload := fmt.Sprintf(`{"pid":1234,"http_port":%d,"ws_port":%d,"version":%q,"started_at":"2026-09-07T00:00:00Z"%s}`,
+		httpPort, wsPort, version, cli)
 	if err := os.WriteFile(filepath.Join(base, fmt.Sprintf("daemon-%d.json", httpPort)), []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -498,5 +503,45 @@ func TestLiveDaemonWSPort(t *testing.T) {
 	}
 	if ws, ok := liveDaemonWSPort(1); ok {
 		t.Errorf("dead port advertised ws_port %d, want ok=false", ws)
+	}
+}
+
+// patchOffset 把当前内置插件版本平移 n 个 patch（需求 R-5 的方向测试必须
+// 动态取版本：插件版本会随集成任务升到 4.3.0，测试里绝不硬编码）。
+func patchOffset(t *testing.T, n int) string {
+	t.Helper()
+	v, err := pluginmeta.ParseSemver(pluginmeta.PluginVersion())
+	if err != nil {
+		t.Fatalf("bundled plugin version %q is not semver: %v", pluginmeta.PluginVersion(), err)
+	}
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch+n)
+}
+
+// TestPluginStaleLaunchWarningDirections：launch 复用陈旧会话的警告与 status
+// 共用同一 helper，因此同样方向化（需求 R-5）——插件比 daemon 新时只能给
+// 「只换 daemon」的修法（`plugin install` 装无可装），插件更旧时才是
+// plugin install + 重启编辑器。daemon 探测失败时对齐目标回落到本 CLI 的
+// 内置插件版本（端口 1 不可达，与生产回落路径一致）。
+func TestPluginStaleLaunchWarningDirections(t *testing.T) {
+	newer := map[string]any{"plugin_stale": true, "plugin_version": patchOffset(t, 1)}
+	warn := pluginStaleLaunchWarning(newer, 1)
+	if !strings.Contains(warn, "--upgrade-daemon") {
+		t.Errorf("newer-plugin warning = %q, want the --upgrade-daemon remedy", warn)
+	}
+	if strings.Contains(warn, "plugin install --project") {
+		t.Errorf("newer-plugin warning must NOT suggest plugin install (nothing to install): %q", warn)
+	}
+	if !strings.Contains(warn, "> bundled v"+pluginmeta.PluginVersion()) {
+		t.Errorf("newer-plugin warning = %q, want the direction sign against the CLI's bundled version", warn)
+	}
+
+	older := map[string]any{"plugin_stale": true, "plugin_version": patchOffset(t, -1)}
+	warn = pluginStaleLaunchWarning(older, 1)
+	if !strings.Contains(warn, "plugin install --project <dir>") ||
+		!strings.Contains(warn, "restart the editor") {
+		t.Errorf("older-plugin warning = %q, want the existing install+restart wording", warn)
+	}
+	if strings.Contains(warn, "--upgrade-daemon") {
+		t.Errorf("older-plugin warning must NOT suggest a daemon swap: %q", warn)
 	}
 }

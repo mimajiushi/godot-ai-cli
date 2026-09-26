@@ -186,14 +186,21 @@ Examples:
 				}
 			}
 			known := knownDaemonsReport(port)
+			daemonInfo := map[string]any{
+				"version":   statusBody["version"],
+				"http_port": port,
+				"ws_port":   statusBody["ws_port"],
+				"pid":       statusBody["pid"],
+			}
+			// cli_version 只有 daemon 记录知道（「这个 daemon 是哪个 CLI 版本
+			// 起的、要不要重启」——daemon 自己只报内置插件版本，需求 R-5
+			// 附带）；旧记录无该字段则省略，绝不报错。
+			if v := recordedCLIVersion(known, port); v != "" {
+				daemonInfo["cli_version"] = v
+			}
 			payload := map[string]any{
-				"status": "ok",
-				"daemon": map[string]any{
-					"version":   statusBody["version"],
-					"http_port": port,
-					"ws_port":   statusBody["ws_port"],
-					"pid":       statusBody["pid"],
-				},
+				"status":   "ok",
+				"daemon":   daemonInfo,
 				"sessions": sessions,
 				// Port pinning is per project since 3.2.9: true when any
 				// connected session's project (or the recorded launch
@@ -727,9 +734,10 @@ func editorAliveWarnings(httpPort int, alive []int) []string {
 // version). It also normalizes the daemon-reported origin, tags user-opened
 // editors with a note explaining that a full stop keeps them, and tags
 // plugin_stale sessions (patch-level version drift, accepted by the
-// major.minor handshake gate) with a note pointing at plugin install.
-// bundledVersion is the daemon-reported version used to name the align
-// target. The compat warnings roll up for the top-level warnings field.
+// major.minor handshake gate) with a DIRECTION-AWARE note plus stale_side /
+// suggested_commands (需求 R-5：陈旧侧可能是插件，也可能是 daemon，修法
+// 完全不同). bundledVersion is the daemon-reported version used to name the
+// align target. The compat warnings roll up for the top-level warnings field.
 func enrichSessions(raw any, bundledVersion string) (any, []string) {
 	list, ok := raw.([]any)
 	if !ok {
@@ -756,7 +764,19 @@ func enrichSessions(raw any, bundledVersion string) (any, []string) {
 			notes = append(notes, "user-opened editor — stop keeps it (use `stop --session <id>` or `stop --all` to quit it)")
 		}
 		if sess["plugin_stale"] == true {
-			notes = append(notes, pluginStaleNote(fmt.Sprint(sess["plugin_version"]), bundledVersion))
+			note, side, cmds := pluginStaleHint(fmt.Sprint(sess["plugin_version"]), bundledVersion)
+			notes = append(notes, note)
+			// 方向、建议命令与 daemon 内置版本只在两侧版本都能比较时输出：
+			// 无法比较时省略这些字段，而不是给一个可能误导的方向（需求 R-5）。
+			// daemon_bundled_version 是需求建议 JSONC 里与 plugin_version 并列
+			// 的结构化字段——stale_side=="daemon" 时消费方不必再去 note 文本
+			// 或 status.daemon.version（那是「本端口解析到的 daemon」语义）里
+			// 反推陈旧侧到底是哪个版本。
+			if side != "" {
+				sess["stale_side"] = side
+				sess["suggested_commands"] = cmds
+				sess["daemon_bundled_version"] = bundledVersion
+			}
 		}
 		if len(notes) > 0 {
 			sess["note"] = strings.Join(notes, "; ")
@@ -766,26 +786,63 @@ func enrichSessions(raw any, bundledVersion string) (any, []string) {
 	return out, warnings
 }
 
-// pluginStaleNote renders the per-session note / launch warning for a
-// session whose plugin version drifted from the daemon's bundled plugin at
-// patch level (the handshake accepted it as major.minor compatible). The
-// comparison sign is computed so a NEWER plugin (3.2.7 vs bundled 3.2.6)
+// pluginStaleHint is the SINGLE rendering entry point for a plugin_stale
+// session (status's per-session note and launch's reused-session warning both
+// go through it — the logic must never be duplicated). It returns the note,
+// the stale side ("plugin" / "daemon"), and the suggested commands.
+//
+// The direction follows the patch-level comparison, not the handshake gate:
+//   - plugin NEWER than the daemon's bundled build → the daemon is the stale
+//     side. `plugin install` has nothing to install (project and disk already
+//     match), so the remedy is to swap ONLY the daemon, keeping the already
+//     open editors (`launch --upgrade-daemon`); naming plugin install here
+//     sent users through a no-op editor restart (需求 R-5 现场).
+//   - plugin OLDER → the plugin is the stale side: install + restart editor.
+//   - either side unparseable → staleSide is "" and the caller omits
+//     stale_side/suggested_commands entirely: an unknown direction must not be
+//     guessed.
+//
+// The comparison sign is computed so a NEWER plugin (3.2.7 vs bundled 3.2.6)
 // never reads as "v3.2.7 < v3.2.6".
-func pluginStaleNote(pluginVersion, bundledVersion string) string {
+func pluginStaleHint(pluginVersion, bundledVersion string) (note, staleSide string, suggested []string) {
 	sign := "≠"
 	if pv, perr := pluginmeta.ParseSemver(pluginVersion); perr == nil {
 		if bv, berr := pluginmeta.ParseSemver(bundledVersion); berr == nil {
 			switch pluginmeta.Compare(pv, bv) {
 			case -1:
 				sign = "<"
+				staleSide = "plugin"
 			case 1:
 				sign = ">"
+				staleSide = "daemon"
 			}
 		}
 	}
-	return fmt.Sprintf(
-		"plugin v%s %s bundled v%s — run `godot-ai-cli plugin install --project <dir>` and restart the editor to pick up new ops",
-		pluginVersion, sign, bundledVersion)
+	prefix := fmt.Sprintf("plugin v%s %s bundled v%s", pluginVersion, sign, bundledVersion)
+	// 插件比 daemon 新 → daemon 才是陈旧侧：只换 daemon（保留已打开的编辑器，
+	// major.minor 兼容的插件会自己重连到同端口的新 daemon，需求 R-5 正解）。
+	const daemonSideNote = " — the running daemon still serves the OLDER build; run `godot-ai-cli launch --project <dir> --upgrade-daemon` to swap only the daemon (open editors are kept and reconnect)"
+	// 插件比 daemon 旧（或无法比较）→ 现有的 `plugin install` + 重启编辑器文案。
+	const pluginSideNote = " — run `godot-ai-cli plugin install --project <dir>` and restart the editor to pick up new ops"
+	switch staleSide {
+	case "daemon":
+		return prefix + daemonSideNote, staleSide,
+			[]string{"godot-ai-cli launch --project <dir> --upgrade-daemon"}
+	case "plugin":
+		return prefix + pluginSideNote, staleSide,
+			[]string{"godot-ai-cli plugin install --project <dir>", "完全退出并重新打开编辑器"}
+	default:
+		// 无法比较（旧记录 / 异常版本号）：保持原有中性文案，不输出方向。
+		return prefix + pluginSideNote, "", nil
+	}
+}
+
+// pluginStaleNote renders just the note text (launch's warning path and the
+// wording tests call this; the direction-aware facts come from
+// pluginStaleHint).
+func pluginStaleNote(pluginVersion, bundledVersion string) string {
+	note, _, _ := pluginStaleHint(pluginVersion, bundledVersion)
+	return note
 }
 
 // godotVersionCompatibility classifies the godot_version one session

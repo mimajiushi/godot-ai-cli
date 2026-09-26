@@ -45,6 +45,8 @@ func newServeCommand() *cobra.Command {
 			// one-shot commands find this daemon without --http-port.
 			// Best-effort: the record is a hint, never a failure.
 			_ = writeLastDaemon(lastDaemonRecord{HTTPPort: d.HTTPPort(), WSPort: d.WSPort()})
+			// 「这个 daemon 是哪个 CLI 起的」只有记录能回答（需求 R-5 附带）。
+			recordDaemonCLIVersion(d.HTTPPort())
 
 			// One JSON startup line on stdout: agents parse this to learn
 			// the bound ports and the advertised server version.

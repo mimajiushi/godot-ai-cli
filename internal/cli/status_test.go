@@ -17,6 +17,7 @@ import (
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 	"github.com/mimajiushi/godot-ai-cli/internal/godot"
 	"github.com/mimajiushi/godot-ai-cli/internal/testutil/mockplugin"
+	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
 
 // TestStatusReportsGodotCompatibility drives the status command against a
@@ -185,6 +186,20 @@ func TestStatusReportsPluginStale(t *testing.T) {
 		!strings.Contains(note, "plugin install --project <dir>") {
 		t.Errorf("stale session note = %q, want version drift + align hint", note)
 	}
+	// 插件比 daemon 旧 → 陈旧侧是插件，建议命令为「装插件 + 完全重启编辑器」
+	// （需求 R-5 的 stale_side / suggested_commands）；daemon 内置版本与
+	// plugin_version 并列结构化输出（F-5），消费方不必从 note 文本反推。
+	if stale["stale_side"] != "plugin" {
+		t.Errorf("stale_side = %v, want plugin", stale["stale_side"])
+	}
+	if stale["daemon_bundled_version"] != "3.2.8" {
+		t.Errorf("daemon_bundled_version = %v, want the daemon-reported 3.2.8", stale["daemon_bundled_version"])
+	}
+	cmds, _ := stale["suggested_commands"].([]any)
+	if len(cmds) != 2 || !strings.Contains(cmds[0].(string), "plugin install --project <dir>") ||
+		!strings.Contains(cmds[1].(string), "完全退出") {
+		t.Errorf("stale session suggested_commands = %v, want install + editor restart", stale["suggested_commands"])
+	}
 
 	aligned := byID["aligned@0001"]
 	if _, noted := aligned["note"]; noted {
@@ -205,6 +220,334 @@ func TestPluginStaleNote(t *testing.T) {
 	// An unparseable side degrades to a plain inequality sign, never "<".
 	if got := pluginStaleNote("garbage", "3.2.8"); !strings.Contains(got, "vgarbage ≠ bundled v3.2.8") {
 		t.Errorf("unparseable plugin note = %q", got)
+	}
+}
+
+// TestStatusReportsStaleSideDaemon：需求 R-5 现场方向——插件比 daemon 的
+// 内置版本新（用户刚升级 CLI/插件，daemon 还是升级前那个进程）时，陈旧侧
+// 是 daemon：note 与 suggested_commands 必须指向 `launch --upgrade-daemon`
+// （`plugin install` 此刻装无可装，按它执行是空转 + 白重开一次编辑器）。
+func TestStatusReportsStaleSideDaemon(t *testing.T) {
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "3.2.6"})
+	if err != nil {
+		t.Fatalf("daemon start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = d.Shutdown(ctx)
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
+	mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{
+		"session_id": "daemonstale@0001", "plugin_version": "3.2.8", "launched_by": "cli",
+	})
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v\n%s", err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	sessions, _ := out["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %v", out["sessions"])
+	}
+	sess := sessions[0].(map[string]any)
+	if sess["plugin_stale"] != true {
+		t.Fatalf("plugin_stale = %v, want the patch drift to be accepted+flagged", sess["plugin_stale"])
+	}
+	if sess["stale_side"] != "daemon" {
+		t.Errorf("stale_side = %v, want daemon", sess["stale_side"])
+	}
+	note, _ := sess["note"].(string)
+	if !strings.Contains(note, "plugin v3.2.8 > bundled v3.2.6") ||
+		!strings.Contains(note, "launch --project <dir> --upgrade-daemon") {
+		t.Errorf("note = %q, want the newer-plugin sign + the --upgrade-daemon remedy", note)
+	}
+	cmds, _ := sess["suggested_commands"].([]any)
+	if len(cmds) != 1 || !strings.Contains(cmds[0].(string), "launch --project <dir> --upgrade-daemon") {
+		t.Errorf("suggested_commands = %v, want the daemon swap", sess["suggested_commands"])
+	}
+	// F-5：daemon 侧陈旧时，daemon 内置版本必须与 plugin_version 并列结构化
+	// 输出——否则消费方只能去 note 文本或 status.daemon.version（「本端口
+	// 解析到的 daemon」语义）里反推。
+	if sess["daemon_bundled_version"] != "3.2.6" {
+		t.Errorf("daemon_bundled_version = %v, want the daemon-reported 3.2.6", sess["daemon_bundled_version"])
+	}
+	if sess["plugin_version"] != "3.2.8" {
+		t.Errorf("plugin_version = %v, want the session-reported 3.2.8", sess["plugin_version"])
+	}
+}
+
+// TestPluginStaleHintDirections 钉住 pluginStaleHint 的方向判定与建议命令
+// （status 会话 note 与 launch 警告共用它，方向错了就会出现「装无可装」的
+// 空转修法，需求 R-5 现场）。
+func TestPluginStaleHintDirections(t *testing.T) {
+	note, side, cmds := pluginStaleHint("3.2.8", "3.2.6")
+	if side != "daemon" {
+		t.Errorf("newer plugin: side = %q, want daemon", side)
+	}
+	if !strings.Contains(note, "v3.2.8 > bundled v3.2.6") ||
+		!strings.Contains(note, "launch --project <dir> --upgrade-daemon") {
+		t.Errorf("newer plugin: note = %q", note)
+	}
+	if len(cmds) != 1 || cmds[0] != "godot-ai-cli launch --project <dir> --upgrade-daemon" {
+		t.Errorf("newer plugin: commands = %v", cmds)
+	}
+
+	note, side, cmds = pluginStaleHint("3.2.6", "3.2.8")
+	if side != "plugin" {
+		t.Errorf("older plugin: side = %q, want plugin", side)
+	}
+	if !strings.Contains(note, "v3.2.6 < bundled v3.2.8") ||
+		!strings.Contains(note, "plugin install --project <dir>") {
+		t.Errorf("older plugin: note = %q", note)
+	}
+	if len(cmds) != 2 || cmds[0] != "godot-ai-cli plugin install --project <dir>" ||
+		cmds[1] != "完全退出并重新打开编辑器" {
+		t.Errorf("older plugin: commands = %v", cmds)
+	}
+
+	// 任一侧无法解析 → 不给方向、不给建议（未知方向绝不猜），note 保持
+	// 中性文案。
+	for _, c := range [][2]string{{"garbage", "3.2.8"}, {"3.2.8", "garbage"}, {"4.2.5-dev", "3.2.8"}} {
+		note, side, cmds := pluginStaleHint(c[0], c[1])
+		if side != "" || cmds != nil {
+			t.Errorf("unparseable %v: side = %q, commands = %v, want none", c, side, cmds)
+		}
+		if !strings.Contains(note, "≠ bundled v") || !strings.Contains(note, "plugin install --project <dir>") {
+			t.Errorf("unparseable %v: note = %q, want the neutral wording", c, note)
+		}
+	}
+}
+
+// TestEnrichSessionsStaleSideOmittedWhenUncomparable：两侧版本无法比较时
+// enrichSessions 只出 note，stale_side / suggested_commands /
+// daemon_bundled_version 三个键必须缺席（而不是给出可能误导的方向或半截
+// 版本信息），且不能报错（需求 R-5 的降级要求 + F-5 的同策略省略）。
+func TestEnrichSessionsStaleSideOmittedWhenUncomparable(t *testing.T) {
+	raw := []any{
+		map[string]any{"session_id": "x@0001", "plugin_stale": true, "plugin_version": "garbage",
+			"godot_version": "4.7.stable.official"},
+		map[string]any{"session_id": "x@0002", "plugin_stale": true, "plugin_version": "3.2.6",
+			"godot_version": "4.7.stable.official"},
+	}
+	// 第二个会话的 bundled 版本缺失（旧 daemon 不上报）：同样无法比较。
+	out, warnings := enrichSessions(raw, "garbage")
+	sessions, _ := out.([]any)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %v", sessions)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none (degradation must not be an error)", warnings)
+	}
+	for _, entry := range sessions {
+		sess := entry.(map[string]any)
+		note, _ := sess["note"].(string)
+		if !strings.Contains(note, "bundled v") {
+			t.Errorf("session %v note = %q, want the neutral note", sess["session_id"], note)
+		}
+		if _, present := sess["stale_side"]; present {
+			t.Errorf("session %v carries stale_side %v despite uncomparable versions", sess["session_id"], sess["stale_side"])
+		}
+		if _, present := sess["suggested_commands"]; present {
+			t.Errorf("session %v carries suggested_commands %v despite uncomparable versions", sess["session_id"], sess["suggested_commands"])
+		}
+		// F-5：daemon_bundled_version 与 stale_side 同一策略——无法比较就
+		// 一并省略，不输出无法解释的版本号。
+		if _, present := sess["daemon_bundled_version"]; present {
+			t.Errorf("session %v carries daemon_bundled_version %v despite uncomparable versions", sess["session_id"], sess["daemon_bundled_version"])
+		}
+	}
+}
+
+// TestKnownDaemonsCLIVersion：daemon 记录里的 cli_version 在两种路径上都
+// 透出（活 daemon 与死记录都以记录为准——「这个 daemon 是哪个 CLI 起的、
+// 要不要重启」只有记录知道，需求 R-5 附带）；旧记录无该字段时省略该键，
+// 而不是报错或缺字段即崩。
+func TestKnownDaemonsCLIVersion(t *testing.T) {
+	dir := stubCacheDir(t)
+
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "4.2.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+	writeDaemonRecord(t, dir, d.HTTPPort(), d.WSPort(), "4.2.4", "0.2.0-beta.1")
+
+	// 死记录：一个有 cli_version，一个是旧形态（无该字段）。
+	deadWithCLI := listenFree(t)
+	deadWithCLIPort := deadWithCLI.Addr().(*net.TCPAddr).Port
+	_ = deadWithCLI.Close()
+	writeDaemonRecord(t, dir, deadWithCLIPort, deadWithCLIPort+1, "4.2.3", "0.1.0")
+
+	deadOld := listenFree(t)
+	deadOldPort := deadOld.Addr().(*net.TCPAddr).Port
+	_ = deadOld.Close()
+	writeDaemonRecord(t, dir, deadOldPort, deadOldPort+1, "4.2.2")
+
+	byPort := map[int]map[string]any{}
+	for _, entry := range knownDaemonsReport(d.HTTPPort()) {
+		e := entry.(map[string]any)
+		// knownDaemonsReport 的 map 里 http_port 是 int（未经 JSON 往返）。
+		port, _ := e["http_port"].(int)
+		byPort[port] = e
+	}
+	if len(byPort) != 3 {
+		t.Fatalf("known daemons = %v", byPort)
+	}
+	if live := byPort[d.HTTPPort()]; live["running"] != true || live["cli_version"] != "0.2.0-beta.1" {
+		t.Errorf("live entry = %v, want running with the recorded cli_version", live)
+	}
+	if dead := byPort[deadWithCLIPort]; dead["running"] != false || dead["cli_version"] != "0.1.0" {
+		t.Errorf("dead entry = %v, want the recorded cli_version next to running:false", dead)
+	}
+	if old := byPort[deadOldPort]; old["running"] != false {
+		t.Errorf("dead old-form entry = %v", old)
+	} else if _, present := old["cli_version"]; present {
+		t.Errorf("a record without cli_version must omit the key, got %v", old["cli_version"])
+	}
+}
+
+// TestStatusDaemonBlockCLIVersion：status.daemon 区块在记录可查时补
+// cli_version；旧记录（无该字段）或没有记录时省略该键（需求 R-5 附带）。
+func TestStatusDaemonBlockCLIVersion(t *testing.T) {
+	dir := stubCacheDir(t)
+	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "4.2.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	runStatus := func() map[string]any {
+		cmd := NewRootCommand()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"status", "--http-port", strconv.Itoa(d.HTTPPort())})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("status: %v\n%s", err, buf.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+		}
+		return out
+	}
+
+	// 旧形态记录：daemon 区块不得凭空补一个 cli_version。
+	writeDaemonRecord(t, dir, d.HTTPPort(), d.WSPort(), "4.2.5")
+	daemonInfo, _ := runStatus()["daemon"].(map[string]any)
+	if _, present := daemonInfo["cli_version"]; present {
+		t.Errorf("old-form record: daemon.cli_version = %v, want the key absent", daemonInfo["cli_version"])
+	}
+
+	// 记录里有：区块照实透出（值以记录为准）。
+	writeDaemonRecord(t, dir, d.HTTPPort(), d.WSPort(), "4.2.5", "0.2.0-beta.1")
+	daemonInfo, _ = runStatus()["daemon"].(map[string]any)
+	if daemonInfo["cli_version"] != "0.2.0-beta.1" {
+		t.Errorf("daemon.cli_version = %v, want the recorded CLI version", daemonInfo["cli_version"])
+	}
+	if daemonInfo["version"] != "4.2.5" {
+		t.Errorf("daemon.version = %v, want the daemon-reported plugin version", daemonInfo["version"])
+	}
+}
+
+// TestRecordDaemonCLIVersion：daemon 记录里的 cli_version 由**启动它的 CLI**
+// 补写（daemon 自己只知道内置插件版本，说不出「是哪个 CLI 起的」，需求 R-5
+// 附带）。补写必须保留记录里 daemon 自己写的全部字段；记录缺失/畸形时静默
+// 跳过——记录是提示而不是错误源，旧记录因此保持「无该字段」形态。
+func TestRecordDaemonCLIVersion(t *testing.T) {
+	dir := stubCacheDir(t)
+	httpPort, wsPort := 18301, 19301
+	writeDaemonRecord(t, dir, httpPort, wsPort, "4.2.4") // 旧形态：无 cli_version
+
+	recordDaemonCLIVersion(httpPort)
+
+	path := filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", httpPort))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("record file missing after the stamp: %v", err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, raw)
+	}
+	if rec["cli_version"] != version.Version {
+		t.Errorf("cli_version = %v, want this binary's %q", rec["cli_version"], version.Version)
+	}
+	if rec["version"] != "4.2.4" || rec["pid"] != float64(1234) ||
+		int(rec["http_port"].(float64)) != httpPort || int(rec["ws_port"].(float64)) != wsPort ||
+		rec["started_at"] != "2026-09-07T00:00:00Z" {
+		t.Errorf("the stamp must preserve every field the daemon wrote, got %v", rec)
+	}
+
+	// 幂等：同样的值不再回写。
+	recordDaemonCLIVersion(httpPort)
+	if again, _ := os.ReadFile(path); string(again) != string(raw) {
+		t.Errorf("second stamp changed the record:\n%s\n%s", raw, again)
+	}
+
+	// 没有记录：绝不凭空造文件。
+	recordDaemonCLIVersion(httpPort + 1)
+	if _, err := os.Stat(filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", httpPort+1))); !os.IsNotExist(err) {
+		t.Errorf("a missing record must not be created (stat err = %v)", err)
+	}
+
+	// 畸形记录：原样保留，不报错。
+	bad := filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", httpPort+2))
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recordDaemonCLIVersion(httpPort + 2)
+	if got, _ := os.ReadFile(bad); string(got) != "{not json" {
+		t.Errorf("corrupt record must be left alone, got %s", got)
+	}
+}
+
+// TestLaunchForegroundStampsCLIVersion：foreground launch 的 daemon 就在本进程
+// 内，记录里的 cli_version 由它补写（需求 R-5 附带：记录里的 version 只是内置
+// 插件版本）。只给**自己起的** daemon 写——收养别人起的 daemon 回写会把「旧版
+// CLI 起的」谎报成本版，恰恰破坏该字段的用途。detached 路径由 spawn 出去的
+// serve 自己补写，见 TestServeWritesLastDaemon。
+func TestLaunchForegroundStampsCLIVersion(t *testing.T) {
+	dir := stubCacheDir(t)
+	projectDir := newLaunchTestProject(t)
+	stubLaunchSideEffects(t)
+	httpPort, wsPort := freeTCPPort(t), freeTCPPort(t)
+	// in-process daemon 的记录写在真实 user cache dir；测试用 stub 目录放一份
+	// 等价记录（旧形态，无 cli_version），launch 的 CLI 侧补写才有迹可循。
+	writeDaemonRecord(t, dir, httpPort, wsPort, "4.2.5")
+
+	// attach 无编辑器会以 EDITOR_NOT_CONNECTED 结束——补写发生在会话等待之前，
+	// 与随后是否超时无关。
+	_, _ = runLaunchAttachFlow(t, projectDir, func(o *launchOptions) {
+		o.foreground = true
+		o.httpPort = httpPort
+		o.wsPort = wsPort
+	})
+
+	path := filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", httpPort))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("daemon record disappeared: %v", err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, raw)
+	}
+	if rec["cli_version"] != version.Version {
+		t.Errorf("cli_version = %v, want this binary's %q", rec["cli_version"], version.Version)
+	}
+	if rec["version"] != "4.2.5" {
+		t.Errorf("the daemon's own fields must survive the stamp: %v", rec)
 	}
 }
 

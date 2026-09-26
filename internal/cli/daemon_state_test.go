@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
+	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
 
 // syncBuffer is a goroutine-safe output buffer for tests that run a
@@ -327,8 +329,10 @@ func TestStopKeepsRecordOfOtherDaemon(t *testing.T) {
 // TestServeWritesLastDaemon: a directly-run serve records its bound ports
 // (free ports reserved here — the CLI command rejects 0, ephemeral binding
 // is a daemon.Start-only test facility) so one-shot commands can find it.
+// It also stamps the daemon's identity record with this CLI's version
+// (需求 R-5 附带：daemon 记录里的 version 只是内置插件版本）。
 func TestServeWritesLastDaemon(t *testing.T) {
-	stubCacheDir(t)
+	dir := stubCacheDir(t)
 
 	httpLn := listenFree(t)
 	httpPort := httpLn.Addr().(*net.TCPAddr).Port
@@ -336,6 +340,10 @@ func TestServeWritesLastDaemon(t *testing.T) {
 	wsLn := listenFree(t)
 	wsPort := wsLn.Addr().(*net.TCPAddr).Port
 	_ = wsLn.Close()
+
+	// daemon 自己的记录写在真实 user cache dir，测试用 stub 目录：先放一份
+	// 等价记录（旧形态，无 cli_version），serve 的 CLI 侧补写走同一目录。
+	writeDaemonRecord(t, dir, httpPort, wsPort, "4.2.4")
 
 	cmd := NewRootCommand()
 	var buf syncBuffer
@@ -363,6 +371,28 @@ func TestServeWritesLastDaemon(t *testing.T) {
 	// The startup line and the record agree on the bound ports.
 	if !strings.Contains(buf.String(), `"http_port":`+itoa(rec.HTTPPort)) {
 		t.Errorf("startup line disagrees with the record (%+v):\n%s", rec, buf.String())
+	}
+
+	// serve 就地补写 cli_version（需求 R-5 附带）：记录里出现本进程的 CLI
+	// 版本，daemon 自己写的字段仍在。补写紧跟在 last-daemon 记录之后，所以
+	// 这里短暂轮询而不是假定已完成。
+	recPath := filepath.Join(dir, "godot-ai-cli", fmt.Sprintf("daemon-%d.json", rec.HTTPPort))
+	stamped := false
+	deadline = time.Now().Add(5 * time.Second)
+	for !stamped && time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(recPath); err == nil {
+			var entry map[string]any
+			if json.Unmarshal(raw, &entry) == nil && entry["cli_version"] == version.Version &&
+				entry["version"] == "4.2.4" {
+				stamped = true
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !stamped {
+		raw, _ := os.ReadFile(recPath)
+		t.Errorf("serve did not stamp cli_version=%q into %s; record:\n%s", version.Version, recPath, raw)
 	}
 
 	// Shut the daemon down through the recorded port; serve must return.

@@ -20,6 +20,7 @@ import (
 
 	"github.com/mimajiushi/godot-ai-cli/internal/capability"
 	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
+	"github.com/mimajiushi/godot-ai-cli/internal/version"
 )
 
 // knownDaemonProbeTimeout bounds one probe of a recorded daemon; a local
@@ -32,15 +33,17 @@ const knownDaemonProbeTimeout = 300 * time.Millisecond
 var knownDaemonProbeClient = &http.Client{Timeout: knownDaemonProbeTimeout}
 
 // knownDaemonRecord is one recorded daemon identity. The per-port pid files
-// carry pid/http_port/ws_port/version/started_at; last-daemon.json adds the
-// last launched project.
+// carry pid/http_port/ws_port/version/started_at (plus cli_version from
+// v0.2.0-beta.1 on — the CLI build that started the daemon, which the daemon
+// itself cannot know); last-daemon.json adds the last launched project.
 type knownDaemonRecord struct {
-	PID       int    `json:"pid"`
-	HTTPPort  int    `json:"http_port"`
-	WSPort    int    `json:"ws_port"`
-	Version   string `json:"version"`
-	StartedAt string `json:"started_at"`
-	Project   string `json:"project,omitempty"`
+	PID        int    `json:"pid"`
+	HTTPPort   int    `json:"http_port"`
+	WSPort     int    `json:"ws_port"`
+	Version    string `json:"version"`
+	CLIVersion string `json:"cli_version,omitempty"`
+	StartedAt  string `json:"started_at"`
+	Project    string `json:"project,omitempty"`
 }
 
 // daemonRecordsDir 是 daemon-*.json 记录目录：与 enumerateKnownDaemons
@@ -296,6 +299,12 @@ func knownDaemonsReport(currentPort int) []any {
 			if rec.Version != "" {
 				entry["version"] = rec.Version
 			}
+			// cli_version 以记录为准，活/死两条路径一视同仁（需求 R-5 附带：
+			// version_relation 只说新旧，说不出「这个 daemon 是哪个 CLI 起
+			// 的、要不要重启」）；旧记录无该字段时省略。
+			if rec.CLIVersion != "" {
+				entry["cli_version"] = rec.CLIVersion
+			}
 			if rec.PID > 0 {
 				entry["pid"] = rec.PID
 			}
@@ -312,6 +321,11 @@ func knownDaemonsReport(currentPort int) []any {
 		entry["version"] = status["version"]
 		// 活 daemon 以实时版本为准标注新旧（记录文件可能先于重启。
 		entry["version_relation"] = versionRelation(fmt.Sprint(status["version"]))
+		// cli_version 反过来只认记录：活 daemon 的实时响应里没有「哪个 CLI
+		// 起的」这个信息（需求 R-5 附带）。
+		if rec.CLIVersion != "" {
+			entry["cli_version"] = rec.CLIVersion
+		}
 		entry["ws_port"] = status["ws_port"]
 		entry["pid"] = status["pid"]
 		var projects []string
@@ -335,6 +349,71 @@ func knownDaemonsReport(currentPort int) []any {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// recordedCLIVersion 从 knownDaemonsReport 的结果里取出某端口的 cli_version
+// （status.daemon 区块的补充字段，需求 R-5 附带：daemon 自己只报内置插件
+// 版本，说不出「这个 daemon 是哪个 CLI 版本起的」）。复用已算好的 report，
+// 不再枚举一遍记录目录；端口不在列表里（或旧记录无该字段）返回空串——
+// 调用方据此省略字段，绝不报错。
+func recordedCLIVersion(known []any, httpPort int) string {
+	for _, e := range known {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		// knownDaemonsReport 构造的 map 里 http_port 是 int（未经 JSON
+		// 往返）；经 printJSON 输出的则是 float64——两种都认。
+		switch p := m["http_port"].(type) {
+		case int:
+			if p != httpPort {
+				continue
+			}
+		case float64:
+			if int(p) != httpPort {
+				continue
+			}
+		default:
+			continue
+		}
+		v, _ := m["cli_version"].(string)
+		return v
+	}
+	return ""
+}
+
+// recordDaemonCLIVersion 给刚起来的 daemon 身份记录补一个 cli_version
+// （需求 R-5 附带：记录里的 version 只是内置插件版本，「这个 daemon 是哪个
+// CLI 二进制起的、要不要重启」只有启动它的 CLI 自己知道）。
+//
+// 记录文件（daemon-<port>.json）由 daemon 在启动时写下、退出时删除，所以
+// 启动它的 CLI 在 daemon 就绪之后就地补这一个键：不新增写者生命周期，也不
+// 与 daemon 竞争（此刻 daemon 早已写完）。读回-合并-回写保留记录里 daemon
+// 自己写的全部字段。任何失败（记录还没落盘、畸形、权限）都静默跳过——
+// 记录是提示，绝不是错误源；旧记录因此保持「无 cli_version」形态，读取侧
+// 按省略处理。
+func recordDaemonCLIVersion(httpPort int) {
+	if version.Version == "" {
+		return
+	}
+	path := daemonRecordPath(httpPort)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return // 畸形记录不碰：读取侧本就当「没有记录」处理
+	}
+	if v, _ := raw["cli_version"].(string); v == version.Version {
+		return
+	}
+	raw["cli_version"] = version.Version
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, payload, 0o600)
 }
 
 // liveDaemonEntries 从 knownDaemonsReport 的结果里挑出活着的 daemon，

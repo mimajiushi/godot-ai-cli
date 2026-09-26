@@ -119,7 +119,7 @@ func TestCommandsJSONCLIFlagsAndResponse(t *testing.T) {
 	}
 
 	flags, ok := screenshot["cli_flags"].([]any)
-	if !ok || len(flags) != 5 {
+	if !ok || len(flags) != 9 {
 		t.Fatalf("editor screenshot cli_flags = %v", screenshot["cli_flags"])
 	}
 	got := map[string]string{}
@@ -130,6 +130,9 @@ func TestCommandsJSONCLIFlagsAndResponse(t *testing.T) {
 	want := map[string]string{
 		"out": "string", "assert": "stringArray", "tolerance": "int",
 		"full-res": "bool", "region": "string",
+		// R-3 坐标系 + R-2 基线对比新增的 CLI 侧 flag（v0.2.0-beta.1）
+		"coords": "string", "baseline": "string",
+		"diff-threshold": "float", "diff-out": "string",
 	}
 	for flag, kind := range want {
 		if got[flag] != kind {

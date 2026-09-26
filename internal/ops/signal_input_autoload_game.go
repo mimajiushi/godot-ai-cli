@@ -217,6 +217,20 @@ func gameOps() []OpSpec {
 			ResponseNote: `Returns mouse_window / mouse_canvas / mouse_world — use after input-warp (or during play) to verify the aim is where the script intends.`,
 		},
 		{
+			// fork 补丁（game_helper.gd node_screen_rect）：节点在画布/截图两套
+			// 像素坐标系里的只读查询，与 editor screenshot --coords canvas 对齐。
+			// rect_kind 记录 canvas_rect 的来源：能力分派后「包围盒」与「退化原点」
+			// 两种结果形状相同，调用方必须靠该字段区分，不能把零尺寸当成 0×0 节点。
+			Domain: "game", Name: "node-screen-rect", PluginCommand: "game_command", WrapOp: "node_screen_rect",
+			Summary:      "Resolve a node's on-screen rectangle in both canvas and captured-image pixel spaces",
+			Timeout:      GameTimeout,
+			ResponseNote: `{"found","path","rect_kind","canvas_rect":[x,y,w,h],"image_rect":[x,y,w,h],"scale":[sx,sy]}; rect_kind says how canvas_rect was derived — "bounds" (the CanvasItem implements get_rect, e.g. Control/Sprite2D, so canvas_rect is its real on-canvas bounding box) or "origin_only" (the CanvasItem has no get_rect and no intrinsic size, e.g. Node2D/CharacterBody2D/Line2D, so canvas_rect is Rect2(transform origin, ZERO) — the exact position with an explicitly zeroed size, never a fabricated rectangle). canvas_rect is in game-canvas coordinates (the space get_global_transform_with_canvas() reports), image_rect is the same rectangle multiplied by scale into the pixels of an editor screenshot --source game capture — feed image_rect to --region/--assert in image space, or canvas_rect with --coords canvas.`,
+			DocNote:      "Read-only counterpart of `editor screenshot --coords canvas`: ask the game where a node actually is instead of converting a coordinate by hand. Non-CanvasItem nodes answer found:false with an error note.",
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "Node path in the running game (a CanvasItem, e.g. /root/Game/Player)"),
+			},
+		},
+		{
 			Domain: "game", Name: "input-gamepad", PluginCommand: "game_command", WrapOp: "input_gamepad",
 			Summary: "Send a gamepad event to the running game",
 			Timeout: GameTimeout,

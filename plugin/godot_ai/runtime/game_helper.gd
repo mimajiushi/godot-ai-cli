@@ -54,6 +54,11 @@ const MAIN_LOOP_STALL_MSEC := 1000
 ## an honestly stale-flagged image immediately instead of a 6s wait.
 const RENDER_STALL_MSEC := 1500
 
+## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：截图回包里的坐标系
+## 提示语。--region/--assert 吃的是图像像素（截图像素），游戏里算出来的画布
+## 坐标要乘 canvas_scale 才是截图上的像素——两个独立 agent 都在这上面取过错点。
+const SCREENSHOT_COORD_NOTE_GAME := "region/assert use image pixels; multiply canvas coordinates by canvas_scale (canvas_size * canvas_scale = captured image pixels)."
+
 const GameLogger := preload("res://addons/godot_ai/runtime/game_logger.gd")
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 ## Shared with the editor-side copy in editor_handler.gd (#716). Preload by
@@ -353,6 +358,11 @@ func _capture_and_reply(
 	var frames_drawn := Engine.get_frames_drawn()
 	var stale := frames_drawn <= frames_at_request
 
+	## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：在游戏进程内按
+	## viewport 的画布尺寸与窗口实际像素尺寸算 stretch 比例，随截图一起回给
+	## 编辑器（第 9 个字段），CLI 的 --coords canvas 就靠它换算。
+	var coord_meta := canvas_space_meta(viewport)
+
 	_last_screenshot_reply = {
 		"kind": "response",
 		"request_id": request_id,
@@ -360,10 +370,13 @@ func _capture_and_reply(
 		"stale": stale,
 		"width": encoded.width,
 		"height": encoded.height,
+		"canvas_size": coord_meta.canvas_size,
+		"canvas_scale": coord_meta.canvas_scale,
 	}
 	if EngineDebugger.is_active():
 		## Fields 7+8 are new in #777; older editors read the first six and
-		## ignore the rest.
+		## ignore the rest. Field 9 (fork) carries the canvas coordinate
+		## metadata — an older editor ignores it the same way.
 		EngineDebugger.send_message("mcp:screenshot_response", [
 			request_id,
 			encoded.base64,
@@ -373,6 +386,12 @@ func _capture_and_reply(
 			encoded.original_height,
 			frames_drawn,
 			stale,
+			{
+				"canvas_size": coord_meta.canvas_size,
+				"image_size": coord_meta.image_size,
+				"canvas_scale": coord_meta.canvas_scale,
+				"note": SCREENSHOT_COORD_NOTE_GAME,
+			},
 		])
 
 
@@ -426,6 +445,10 @@ func _handle_game_command(data: Array) -> void:
 		"get_mouse":
 			## godot-ai-cli fork patch: 读回 window/canvas/world 三套坐标
 			result = _game_get_mouse()
+		"node_screen_rect":
+			## godot-ai-cli fork patch: 节点在画布/截图两套像素坐标系里的
+			## 包围盒（需求 screenshot-canvas-vs-image-coords 3.3）
+			result = _game_node_screen_rect(json.data)
 		"input_gamepad":
 			result = _game_input_gamepad(json.data)
 		"input_action":
@@ -811,6 +834,99 @@ func _game_get_mouse() -> Dictionary:
 		"mouse_window": vp.get_screen_transform() * canvas,
 		"mouse_canvas": canvas,
 		"mouse_world": vp.canvas_transform.affine_inverse() * canvas,
+	}
+
+
+## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：纯函数——由画布逻辑
+## 尺寸与图像(窗口)像素尺寸算 stretch 比例；画布尺寸退化（<=0）时返回 (1,1)，
+## 绝不凭空造比例。一手实测：canvas 1152x648 / window 1920x1080 → 1.666667。
+static func canvas_scale_of(canvas_size: Vector2, image_size: Vector2) -> Vector2:
+	if canvas_size.x <= 0.0 or canvas_size.y <= 0.0:
+		return Vector2.ONE
+	return Vector2(image_size.x / canvas_size.x, image_size.y / canvas_size.y)
+
+
+## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：截图坐标系元数据。
+## canvas_size = 画布逻辑尺寸（viewport.get_visible_rect().size）；image_size =
+## 窗口实际像素尺寸（screen_transform 的缩放作用于画布尺寸）；canvas_scale =
+## image_size / canvas_size（图像像素 = 画布坐标 × canvas_scale）。字段都是普通
+## float 数组，直接可 JSON 化（debugger 通道与 game_command 回包共用）。
+static func canvas_space_meta(viewport: Viewport) -> Dictionary:
+	if viewport == null:
+		return {"canvas_size": [0.0, 0.0], "image_size": [0.0, 0.0], "canvas_scale": [1.0, 1.0]}
+	var canvas_size: Vector2 = viewport.get_visible_rect().size
+	var st_scale: Vector2 = viewport.get_screen_transform().get_scale()
+	var image_size := Vector2(canvas_size.x * st_scale.x, canvas_size.y * st_scale.y)
+	var scale := canvas_scale_of(canvas_size, image_size)
+	return {
+		"canvas_size": [canvas_size.x, canvas_size.y],
+		"image_size": [image_size.x, image_size.y],
+		"canvas_scale": [scale.x, scale.y],
+	}
+
+
+## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.3）：纯函数——画布矩形按
+## scale 换算成图像像素矩形（与 CLI --coords canvas 的换算同一条规则，CLI 侧再
+## 向下取整）。
+static func canvas_rect_to_image_rect(canvas_rect: Rect2, scale: Vector2) -> Rect2:
+	return Rect2(canvas_rect.position * scale, canvas_rect.size * scale)
+
+
+## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.3）：game node-screen-rect
+## ——把节点的画布包围盒同时给成"画布坐标"与"截图像素"两套，调用方不必自己乘
+## canvas_scale（也不必先算角色在哪、再去截图上取色时对不上坐标）。
+func _game_node_screen_rect(params: Dictionary) -> Dictionary:
+	var path := str(params.get("path", ""))
+	var node := _resolve_runtime_node(path)
+	if node == null:
+		return {"found": false, "path": path}
+	if not node is CanvasItem:
+		return {
+			"found": false,
+			"path": _runtime_path(node),
+			"error": "node is not a CanvasItem — it has no on-screen rectangle",
+		}
+	var item := node as CanvasItem
+	var meta := canvas_space_meta(item.get_viewport())
+	var scale := Vector2(meta.canvas_scale[0], meta.canvas_scale[1])
+	var xform := item.get_global_transform_with_canvas()
+
+	## 能力分派：CanvasItem 基类在 ClassDB 里**没有** get_rect()，只有 Control /
+	## Sprite2D 这类自带尺寸的子类才有（4.7.2 实测 AnimatedSprite2D 也没有）。对 Node2D /
+	## CharacterBody2D / Line2D 直调会抛 SCRIPT ERROR，把整个 op 打成空回包
+	## （真机 4.7.2 复现：回包 keys=[]）。所以先问能力：
+	##   有 get_rect → 走包围盒（rect_kind="bounds"）；
+	##   没有      → 这类节点本来就没有固有尺寸，退化为"画布原点 + 零尺寸"
+	##               （rect_kind="origin_only"），至少让调用方拿到精确坐标。
+	## 退化路径绝不抛错，也绝不伪造一个尺寸。
+	var rect_kind := "bounds"
+	var canvas_rect: Rect2
+	if item.has_method("get_rect"):
+		var local_rect: Rect2 = item.get_rect()
+		## 画布坐标下的包围盒：xform 已含 viewport 的 canvas_transform；用两个
+		## 角点 expand 而不是 Rect2 变换，负缩放/镜像也不会翻成负尺寸。
+		var corner_a := xform * local_rect.position
+		var corner_b := xform * (local_rect.position + local_rect.size)
+		canvas_rect = Rect2(corner_a, Vector2.ZERO).expand(corner_b)
+	else:
+		rect_kind = "origin_only"
+		canvas_rect = Rect2(xform.origin, Vector2.ZERO)
+	var image_rect := canvas_rect_to_image_rect(canvas_rect, scale)
+
+	return {
+		"found": true,
+		"path": _runtime_path(item),
+		"rect_kind": rect_kind,
+		"canvas_rect": [
+			canvas_rect.position.x, canvas_rect.position.y,
+			canvas_rect.size.x, canvas_rect.size.y,
+		],
+		"image_rect": [
+			image_rect.position.x, image_rect.position.y,
+			image_rect.size.x, image_rect.size.y,
+		],
+		"scale": [scale.x, scale.y],
+		"canvas_size": meta.canvas_size,
 	}
 
 

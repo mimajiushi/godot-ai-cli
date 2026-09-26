@@ -1075,6 +1075,19 @@ func _on_screenshot_response(data: Array) -> void:
 			payload["note"] = ("The game window appears backgrounded or its main loop is "
 				+ "stalled; returning the last rendered frame. Focus the game window and "
 				+ "retry for a current frame.")
+	## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：游戏侧从第 9 个
+	## 字段起附带坐标系元数据（canvas_size/image_size/canvas_scale/note）。旧
+	## helper 不发这一段，六/八字段的旧形态原样保留。注意 note 与 #777 的
+	## stale 说明共用同一字段名——两个来源都在时并列拼接，不覆盖。
+	if data.size() >= 9 and data[8] is Dictionary:
+		var coord_meta: Dictionary = data[8]
+		if coord_meta.get("canvas_size") is Array:
+			payload["canvas_size"] = coord_meta["canvas_size"]
+		if coord_meta.get("canvas_scale") is Array:
+			payload["canvas_scale"] = coord_meta["canvas_scale"]
+		var coord_note := str(coord_meta.get("note", ""))
+		if not coord_note.is_empty():
+			payload["note"] = (str(payload["note"]) + " " + coord_note) if payload.has("note") else coord_note
 	## Vision Routing: when enabled, describe the frame through the configured
 	## vision provider on a
 	## worker thread and reply with the text description instead of the raw

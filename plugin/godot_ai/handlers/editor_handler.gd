@@ -6,6 +6,12 @@ const Telemetry := preload("res://addons/godot_ai/telemetry.gd")
 const PluginReload := preload("res://addons/godot_ai/utils/plugin_reload.gd")
 const VisionRoutingScript := preload("res://addons/godot_ai/vision_routing.gd")
 
+## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：截图回包里的坐标系
+## 提示语。--region/--assert 吃的是图像像素；游戏侧画布坐标要乘 canvas_scale
+## 才是截图上的像素。编辑器视口的捕获没有窗口 stretch，canvas_scale 恒为
+## [1,1]，如实回包让调用方不必自己猜（两个独立 agent 都在这里取过错点）。
+const SCREENSHOT_COORD_NOTE_EDITOR := "region/assert use image pixels; multiply canvas coordinates by canvas_scale. Editor viewport captures have no window stretch (canvas_scale = [1,1])."
+
 ## Handles editor state, selection, log, screenshot, and performance commands.
 
 var _log_buffer: McpLogBuffer
@@ -970,6 +976,13 @@ func _finalize_image(image: Image, source: String, max_resolution: int, use_hdr_
 			"original_height": encoded.original_height,
 			"format": "png",
 			"image_base64": encoded.base64,
+			## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：编辑器源的
+			## 图像像素就是画布像素（编辑器视口没有窗口 stretch），如实回
+			## canvas_size/canvas_scale/note；游戏源的比例由 game_helper 从窗口
+			## 实际尺寸算好后经 debugger 通道回填。
+			"canvas_size": [encoded.original_width, encoded.original_height],
+			"canvas_scale": [1.0, 1.0],
+			"note": SCREENSHOT_COORD_NOTE_EDITOR,
 		}
 	}
 

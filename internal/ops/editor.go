@@ -26,10 +26,15 @@ func editorOps() []OpSpec {
 			Domain: "editor", Name: "screenshot", PluginCommand: "take_screenshot",
 			Summary: "Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer",
 			Timeout: ScreenshotTimeout,
-			ResponseNote: `{"format","width","height","frames_drawn","image_base64"}; image_base64 is a data URI
-  ("data:image/png;base64,..."). The CLI-side flags --out (save to file, adds
-  "saved"/"bytes") and --assert '#RRGGBB@x,y' (pixel check, --tolerance, adds
-  "passed"/"samples") consume the image locally and omit image_base64 from the
+			ResponseNote: `{"format","width","height","frames_drawn","canvas_size","canvas_scale","note","image_base64"};
+  image_base64 is a data URI ("data:image/png;base64,..."). canvas_scale is the
+  canvas → captured-image factor (image pixel = canvas coordinate × canvas_scale;
+  [1,1] for editor viewport sources, the window stretch for --source game), so
+  --region/--assert stay in image pixels unless --coords canvas converts them.
+  The CLI-side flags --out (save to file, adds "saved"/"bytes"), --assert
+  '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") and
+  --baseline (local diff against a known frame, adds "diff_ratio"; fails with
+  BASELINE_DIFF_FAILED) consume the image locally and omit image_base64 from the
   output. --full-res captures at the source resolution (no downscale cap).`,
 			DocNote: "`--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first. Pixel-art games need `--full-res` to eyeball frames: the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera.",
 			Params: []ParamSpec{
@@ -49,6 +54,10 @@ func editorOps() []OpSpec {
 				cli("tolerance", "0", "per-channel tolerance for --assert"),
 				clb("full-res", "false", "capture at full source resolution (sends max_resolution=0, no downscale cap; the default cap is 640)"),
 				cls("region", "", `crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image)`),
+				cls("coords", "image", "coordinate space of --region/--assert: image (source-image pixels, default; --assert then refers to the cropped image) | canvas (absolute game canvas coordinates - multiplied by the response's canvas_scale). --coords canvas forces the whole frame (sends max_resolution=0, so --max-resolution is ignored) and keeps the crop at source resolution so image_region/scale map exactly onto the returned pixels; it echoes coord_space/canvas_region/image_region/scale"),
+				cls("baseline", "", "compare the final image (after --region/--max-resolution) with this baseline PNG; a size mismatch or diff_ratio > --diff-threshold fails with BASELINE_DIFF_FAILED carrying diff_ratio and sample points"),
+				clf("diff-threshold", "0", "maximum tolerated diff_ratio (0..1) for --baseline; 0 = any differing pixel fails"),
+				cls("diff-out", "", "with --baseline: write a diff-annotated PNG (differing pixels marked #FF00FF) to this file, even when the comparison fails"),
 			},
 		},
 		{

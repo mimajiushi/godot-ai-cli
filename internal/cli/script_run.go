@@ -41,7 +41,8 @@ default > PATH > conventional install dirs. On Windows the sibling
 <name>_console.exe is preferred when present (the GUI-subsystem binary's
 stdout cannot be captured).
 
-注意：首次运行会在 --project 目录生成 .godot/ 导入缓存。
+注意：裸 --script 启动不会导入资源，不会在 --project 目录生成 .godot/
+导入缓存（Godot 4.7.2 实测；早期版本的该说法已作废）。
 
 Examples:
   godot-ai-cli script run --project /tmp/probe_proj --script res://probe.gd

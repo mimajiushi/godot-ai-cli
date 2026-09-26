@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 	"github.com/mimajiushi/godot-ai-cli/internal/testutil/mockplugin"
 	"github.com/mimajiushi/godot-ai-cli/plugin"
 )
@@ -70,6 +71,17 @@ func TestPluginStatusFreshProject(t *testing.T) {
 	}
 }
 
+// driftVersion 返回与内嵌插件同 major.minor、patch+1 的版本号——不硬编码：
+// 插件版本随发布升级，写死会让「同 minor patch 漂移」的布景失真。
+func driftVersion(t *testing.T) string {
+	t.Helper()
+	v, err := pluginmeta.ParseSemver(plugin.PluginVersion())
+	if err != nil {
+		t.Fatalf("bundled plugin version %q is not semver: %v", plugin.PluginVersion(), err)
+	}
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch+1)
+}
+
 // TestPluginStatusReportsDrift: an installed-but-patch-drifted plugin is
 // reported as installed, incompatible-free (patch drift is accepted by the
 // handshake) but version_match=false with exactly the files that would change.
@@ -83,9 +95,11 @@ func TestPluginStatusReportsDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 与 bundled（4.2.x）同 major.minor 的 patch 漂移——握手仍判兼容。
+	// 与 bundled 同 major.minor 的 patch 漂移（+1）——握手仍判兼容。
+	// 版本号动态算出：插件版本随发布升级，写死会让「同 minor patch 漂移」的布景失真。
+	drift := driftVersion(t)
 	if err := os.WriteFile(cfgPath,
-		[]byte(strings.Replace(string(cfg), `version="`+plugin.PluginVersion()+`"`, `version="4.2.9"`, 1)), 0o644); err != nil {
+		[]byte(strings.Replace(string(cfg), `version="`+plugin.PluginVersion()+`"`, `version="`+drift+`"`, 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -97,14 +111,14 @@ func TestPluginStatusReportsDrift(t *testing.T) {
 		t.Errorf("installed/enabled = %v / %v", out["installed"], out["enabled"])
 	}
 	if out["compatible"] != true {
-		t.Errorf("4.2.9 vs %s is major.minor compatible: %v", plugin.PluginVersion(), out["compatible"])
+		t.Errorf("%s vs %s is major.minor compatible: %v", drift, plugin.PluginVersion(), out["compatible"])
 	}
 	plan, _ := out["plugin"].(map[string]any)
 	if plan["version_match"] != false {
 		t.Errorf("version_match = %v, want false", plan["version_match"])
 	}
-	if plan["installed_version"] != "4.2.9" {
-		t.Errorf("installed_version = %v", plan["installed_version"])
+	if plan["installed_version"] != drift {
+		t.Errorf("installed_version = %v, want %s", plan["installed_version"], drift)
 	}
 	update, _ := plan["would_update"].([]any)
 	if len(update) != 1 || update[0] != "addons/godot_ai/plugin.cfg" {
@@ -203,7 +217,7 @@ func TestPluginInstallWarnsOnInMemoryMismatch(t *testing.T) {
 	d := startRecordedDaemon(t, dir, "4.2.5")
 	projectDir := writeProjectFile(t)
 
-	// 该工程有一个被拒的握手：peer 插件 4.1.0（旧 minor），磁盘将装 4.2.5。
+	// 该工程有一个被拒的握手：peer 插件 4.1.0（旧 minor），磁盘将装内嵌插件版本。
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
 	mockplugin.DialRejected(t, addr, d.Bridge().WSCapability, map[string]any{
 		"session_id": "pi@0001", "plugin_version": "4.1.0", "editor_pid": 5020,

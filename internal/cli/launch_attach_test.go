@@ -14,6 +14,7 @@ import (
 
 	"github.com/mimajiushi/godot-ai-cli/internal/daemon"
 	"github.com/mimajiushi/godot-ai-cli/internal/godot"
+	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 	"github.com/mimajiushi/godot-ai-cli/internal/testutil/mockplugin"
 )
 
@@ -181,14 +182,14 @@ func TestLaunchAttachReusesExistingSession(t *testing.T) {
 	spawned := stubLaunchSideEffects(t)
 
 	d, err := daemon.Start(context.Background(), daemon.Config{
-		HTTPPort: freeTCPPort(t), WSPort: freeTCPPort(t), Version: "4.2.5",
+		HTTPPort: freeTCPPort(t), WSPort: freeTCPPort(t), Version: pluginmeta.PluginVersion(),
 	})
 	if err != nil {
 		t.Fatalf("daemon start: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
-		"session_id": "attach@0001", "project_path": dir, "plugin_version": "4.2.5", "editor_pid": 4321,
+		"session_id": "attach@0001", "project_path": dir, "plugin_version": pluginmeta.PluginVersion(), "editor_pid": 4321,
 	})
 
 	out, err := runLaunchAttachFlow(t, dir, func(o *launchOptions) {

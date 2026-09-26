@@ -1,19 +1,40 @@
 package pluginmeta_test
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/pluginmeta"
 )
 
-// The bridge advertises PluginVersion() in every handshake_ack and the
-// handshake gate checks it for major.minor compatibility against the
-// connecting plugin — pin the value so a vendored-plugin bump without a
-// server-side follow-up fails loudly.
+// 桥接层每次握手都要广播 PluginVersion()，握手门禁用它做 major.minor 兼容判定，
+// 因此内嵌描述符必须与仓库里的 plugin.cfg 严格一致。这里从磁盘上的 plugin.cfg
+// 动态读出期望值（不写死版本号——插件版本随发布升级，写死会让升版必须改测试）。
 func TestPluginVersion(t *testing.T) {
-	if got := pluginmeta.PluginVersion(); got != "4.2.5" {
-		t.Fatalf("PluginVersion() = %q, want %q", got, "4.2.5")
+	want := readVendoredPluginVersion(t, filepath.Join("..", "..", "plugin", "godot_ai", "plugin.cfg"))
+	if got := pluginmeta.PluginVersion(); got != want {
+		t.Fatalf("PluginVersion() = %q, want %q (plugin/godot_ai/plugin.cfg)", got, want)
 	}
+}
+
+// readVendoredPluginVersion 解析 plugin.cfg 里的 version="X" 行（不硬编码版本号）。
+func readVendoredPluginVersion(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "version=")
+		if !ok {
+			continue
+		}
+		return strings.Trim(rest, `"`)
+	}
+	t.Fatalf("%s declares no version= line", path)
+	return ""
 }
 
 // TestParseSemver pins the strict three-segment shape: the version gate

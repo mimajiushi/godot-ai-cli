@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --format md` (182 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --format md` (184 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --format md
@@ -24,7 +24,7 @@ Conventions applying to every op:
 - `[write]` ops are gated on editor writability: while the editor is importing or playing they fail with `EDITOR_NOT_READY` (see references/troubleshooting.md).
 - Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem move` 30s, `filesystem remove` 30s, `filesystem rename` 30s, `filesystem scan` 30s, `navigation bake` 30s, `resource physics-shape-generate` 30s, `batch execute` 30s.
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
-- CLI-side extras not in the wire params: `editor eval` also accepts `--code-file`, `--code-stdin`, `--code-b64`; `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`; `node set-property` also accepts `--node-ref`; `resource create` also accepts `--properties-file`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
+- CLI-side extras not in the wire params: `editor eval` also accepts `--code-file`, `--code-stdin`, `--code-b64`; `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`, `--coords`, `--baseline`, `--diff-threshold`, `--diff-out`; `node set-property` also accepts `--node-ref`, `--value-file`; `script patch` also accepts `--old-file`, `--new-file`; `resource create` also accepts `--properties-file`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
 
 Non-op leaves (not in this catalog): `session list` / `session activate` (daemon-side), `custom list` / `custom invoke` (third-party editor tools), `call <plugin_command>` (escape hatch), `image palette` / `image probe` / `image grid-detect` / `image cells` / `image view` (local texture palette analysis / pixel sampling / sprite-sheet grid detection with forced-grid verification (`--cell WxH` / `--cols N --rows M`) and empty-candidate reason+hints+factor_candidates / per-cell alpha occupancy + bbox / nearest-neighbor upscale for inspection — no editor needed), `script run` (standalone engine `--script` probe — no editor session or daemon; resolves the Godot binary like launch, prefers the `<name>_console.exe` variant on Windows so stdout is capturable, returns exit_code + stdout/stderr + duration_ms; writes no `.godot/` import cache — a bare `--script` boot does not import resources (verified Godot 4.7.2; earlier releases claimed otherwise)), `tilemap dump` / `tilemap render` (local .tscn TileMapLayer decode / PNG composite — no editor needed), plus `launch` (pins the daemon ports per project in `.godot/godot_ai_ports.json`, never the global EditorSettings; `--dry-run` prints the plugin write plan — files that would be written, git tracked/untracked impact, whether project.godot would be enabled — and exits WITHOUT probing Godot, starting the daemon or opening an editor; `--no-plugin-upgrade` refuses to rewrite `addons/godot_ai` when the project plugin version differs from the bundled one (`PLUGIN_VERSION_MISMATCH` + the same plan payload) instead of dirtying a version-controlled addon tree; the ready payload reports the step as a structured `plugin` object with `files_changed` / `files_created` / `git_dirty`; `--upgrade-daemon` replaces a mismatched old daemon WITHOUT quitting its editors (the replacement inherits the old daemon's actual WS port unless `--ws-port` is given), then waits (up to 75s) for the kept editors to reconnect and reuses their sessions instead of spawning duplicates; `EDITOR_ALREADY_OPEN` blocks double-opening a project another daemon already hosts — `--force-spawn` overrides at file-lock/save risk) / `stop` (quits CLI-launched editor sessions, shuts the daemon down, and removes the per-project port pins; user-opened editors are kept and reported as `kept_sessions` — `--all` quits every session, `--session <id>` quits exactly one regardless of origin) / `status` (daemon + sessions with per-session `origin`, plus `known_daemons`: every recorded daemon on this machine probed live, and `ports_override_active` covering both per-project port files and legacy global pins) / `serve` / `godot detect` / `godot use` / `plugin install` (`--dry-run` prints the plan; `--version` is a guard — this CLI embeds exactly one plugin version) / `plugin status` (read-only: installed/enabled, bundled vs project version, `compatible` by major.minor, and the pending `would_update` / `would_create` lists with git tracked/untracked counts) / `update` / `version` / `commands`.
@@ -56,8 +56,8 @@ Captures one readback per game frame — use it to verify per-frame animation co
 
 ### `editor screenshot` — Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer
 `take_screenshot` · 30s · --source string (default "viewport"), --max-resolution int (default "640"), --include-image bool (default "true"), --view-target string, --coverage bool (default "false"), --elevation float, --azimuth float, --fov float, --user-prompt string
-CLI-side flags (not wire params): `--out` string — save the captured image to this file and omit image_base64 from the output; `--assert` string[] — expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch; `--tolerance` int (default "0") — per-channel tolerance for --assert; `--full-res` bool (default "false") — capture at full source resolution (sends max_resolution=0, no downscale cap; the default cap is 640); `--region` string — crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image)
-Response: {"format","width","height","frames_drawn","image_base64"}; image_base64 is a data URI ("data:image/png;base64,..."). The CLI-side flags --out (save to file, adds "saved"/"bytes") and --assert '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") consume the image locally and omit image_base64 from the output. --full-res captures at the source resolution (no downscale cap).
+CLI-side flags (not wire params): `--out` string — save the captured image to this file and omit image_base64 from the output; `--assert` string[] — expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch; `--tolerance` int (default "0") — per-channel tolerance for --assert; `--full-res` bool (default "false") — capture at full source resolution (sends max_resolution=0, no downscale cap; the default cap is 640); `--region` string — crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image); `--coords` string (default "image") — coordinate space of --region/--assert: image (source-image pixels, default; --assert then refers to the cropped image) | canvas (absolute game canvas coordinates - multiplied by the response's canvas_scale). --coords canvas forces the whole frame (sends max_resolution=0, so --max-resolution is ignored) and keeps the crop at source resolution so image_region/scale map exactly onto the returned pixels; it echoes coord_space/canvas_region/image_region/scale; `--baseline` string — compare the final image (after --region/--max-resolution) with this baseline PNG; a size mismatch or diff_ratio > --diff-threshold fails with BASELINE_DIFF_FAILED carrying diff_ratio and sample points; `--diff-threshold` float (default "0") — maximum tolerated diff_ratio (0..1) for --baseline; 0 = any differing pixel fails; `--diff-out` string — with --baseline: write a diff-annotated PNG (differing pixels marked #FF00FF) to this file, even when the comparison fails
+Response: {"format","width","height","frames_drawn","canvas_size","canvas_scale","note","image_base64"}; image_base64 is a data URI ("data:image/png;base64,..."). canvas_scale is the canvas → captured-image factor (image pixel = canvas coordinate × canvas_scale; [1,1] for editor viewport sources, the window stretch for --source game), so --region/--assert stay in image pixels unless --coords canvas converts them. The CLI-side flags --out (save to file, adds "saved"/"bytes"), --assert '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") and --baseline (local diff against a known frame, adds "diff_ratio"; fails with BASELINE_DIFF_FAILED) consume the image locally and omit image_base64 from the output. --full-res captures at the source resolution (no downscale cap).
 `--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first. Pixel-art games need `--full-res` to eyeball frames: the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera.
 
 ### `editor selection-get` — List the currently selected editor nodes
@@ -130,7 +130,7 @@ The response data may carry a `warning` string: the scene file on disk is NEWER 
 
 ### `node set-property` — Set one property on a node
 `set_property` · 8s · **[write]** · --path string (required), --property string (required), --value json (required), --scene-file string
-CLI-side flags (not wire params): `--node-ref` string — Shorthand for a Node reference value: `--node-ref ../Sprite2D` sends value as {"$node":"../Sprite2D"} (an explicit --value wins when both are given)
+CLI-side flags (not wire params): `--node-ref` string — Shorthand for a Node reference value: `--node-ref ../Sprite2D` sends value as {"$node":"../Sprite2D"} (an explicit --value wins when both are given); `--value-file` string — Read --value from this UTF-8 file as raw JSON (any JSON type; a leading BOM is tolerated) instead of the command line; an explicit --value wins. The PowerShell 5.1-safe channel for JSON values carrying ASCII double quotes
 Node-typed properties (e.g. `RemoteTransform2D.remote_path`-style NodePath exports, or `@export var target: Node2D` object slots) take a node REFERENCE, not plain JSON: `--value '{"$node":"../Sprite2D"}'` (or the `--node-ref ../Sprite2D` shorthand). The path resolves RELATIVE TO THE TARGET NODE (`--path`), so `../Sprite2D` on `/Root/Player` points at `/Root/Sprite2D`; scene-root-absolute forms like `/Root/Sprite2D` work too. After `scene save` the reference serializes exactly like a hand-dragged inspector assignment: NodePath-typed properties become a `NodePath("../Sprite2D")` plus a `node_paths` entry in the .tscn, object-typed ones a NodePath the loader resolves. A reference that does not resolve fails with `NODE_NOT_FOUND`; a non-string or malformed `$node` payload fails with `INVALID_PARAMS`. Example: `node set-property --path /Root/Player --property target --node-ref ../Sprite2D`.
 
 ## script (6 ops)
@@ -149,6 +149,8 @@ Node-typed properties (e.g. `RemoteTransform2D.remote_path`-style NodePath expor
 
 ### `script patch` — Anchor-edit a GDScript file (old_text → new_text)
 `patch_script` · 8s · **[write]** · --path string (required), --old-text string (required), --new-text string (required), --replace-all bool (default "false")
+CLI-side flags (not wire params): `--old-file` string — Read old_text VERBATIM from this UTF-8 file (a leading BOM is stripped, nothing is JSON-parsed); an explicit --old-text wins. The PowerShell 5.1-safe channel for anchors containing ASCII double quotes; `--new-file` string — Read new_text VERBATIM from this UTF-8 file (a leading BOM is stripped, nothing is JSON-parsed); an explicit --new-text wins. Quotes and newlines survive untouched
+Windows PowerShell 5.1 strips the ASCII double quotes out of an argument before the native process sees it, so an anchor or replacement containing `"` cannot travel through `--old-text`/`--new-text` (nor through an inline `--params` JSON payload). Use the file channels: `--old-file <path>` / `--new-file <path>` read both sides verbatim (no JSON parsing, quotes and newlines preserved), and `--params-file <json>` carries a whole written-by-a-tool payload. An explicit `--old-text`/`--new-text` still wins when a flag and a file are both given. The response's `diagnostics` describe the file as it now sits on disk; `reload_reason:"reload_pending"` together with `reload_pending:true` means the reported reload noise is unconfirmed and the editor's in-memory copy was not refreshed yet, while a genuine parse failure keeps `reload_reason:"parse_error"` at error level.
 
 ### `script read` — Read a GDScript source file
 `read_script` · 8s · --path string (required)
@@ -245,16 +247,18 @@ Response: Fields: passed / failed / skipped / total / assertions (Σ per-test as
 `material_apply_preset` · 8s · **[write]** · --preset string (required), --path string, --node-path string, --overrides json
 
 ### `material apply-to-node` — Create and apply a material to a node in one step
-`material_apply_to_node` · 8s · **[write]** · --node-path string (required), --type string (default "standard"), --props json, --slot string (default "override"), --save-to string, --overwrite bool (default "false")
+`material_apply_to_node` · 8s · **[write]** · --node-path string (required), --type string (default "standard"), --shader-path string, --props json, --slot string (default "override"), --save-to string, --overwrite bool (default "false")
 
 ### `material assign` — Assign a material resource to a node's material slot
-`material_assign` · 8s · **[write]** · --node-path string (required), --resource-path string, --slot string (default "override"), --create-if-missing bool (default "false"), --type string (default "standard")
+`material_assign` · 8s · **[write]** · --node-path string (required), --resource-path string, --from-node-path string, --slot string (default "override"), --create-if-missing bool (default "false"), --type string (default "standard")
+Response: {"node_path","property","slot","resource_path","from_node_path","shared","material_class","material_created","undoable"}
 
 ### `material create` — Create a material resource file
 `material_create` · 8s · **[write]** · --path string (required), --type string (default "standard"), --shader-path string, --overwrite bool (default "false")
 
-### `material get` — Read a material's properties
-`material_get` · 8s · --path string (required)
+### `material get` — Read a material's properties (disk file or a node's inline material)
+`material_get` · 8s · --path string, --node-path string, --slot string (default "override")
+Response: {"class","type","properties","shader_parameters","shader_parameter_values","resource_local_to_scene","shader_path"}
 
 ### `material list` — List material resources under res://
 `material_list` · 8s · --root string (default "res://"), --type string
@@ -262,8 +266,9 @@ Response: Fields: passed / failed / skipped / total / assertions (Σ per-test as
 ### `material set-param` — Set a standard material property
 `material_set_param` · 8s · **[write]** · --path string (required), --param string (required), --value json (required)
 
-### `material set-shader-param` — Set a shader uniform on a ShaderMaterial
-`material_set_shader_param` · 8s · **[write]** · --path string (required), --param string (required), --value json (required)
+### `material set-shader-param` — Set a shader uniform on a ShaderMaterial (disk file or a node's inline material)
+`material_set_shader_param` · 8s · **[write]** · --path string, --node-path string, --slot string (default "override"), --param string (required), --value json (required)
+Response: {"path","node_path","property","slot","param","value","previous_value","undoable"}
 
 ## audio (6 ops)
 
@@ -365,7 +370,7 @@ Response: Fields: passed / failed / skipped / total / assertions (Σ per-test as
 ### `input-map remove-action` — Remove an input action and its bindings
 `remove_action` · 8s · **[write]** · --action string (required)
 
-## game (13 ops)
+## game (14 ops)
 
 ### `game debug-control` — Suspend/resume/step the running game via the editor debugger bridge
 `game_debug_control` · 15s · --action string (required)
@@ -411,6 +416,11 @@ Response: Synthetic events do NOT enter the viewport mouse state — the payload
 ### `game input-warp` — Warp the OS mouse cursor so the game's aim actually follows (Input.warp_mouse + coordinate echo)
 `game_command` · 15s · --position json (required), --space string (default "window")
 Response: Echoes all three coordinate spaces: mouse_window (window client pixels — what Input.warp_mouse takes), mouse_canvas (viewport/stretch space), mouse_world (what get_global_mouse_position() returns). clamped:true + actual position when the OS clamped the warp (target outside window/screen).
+
+### `game node-screen-rect` — Resolve a node's on-screen rectangle in both canvas and captured-image pixel spaces
+`game_command` · 15s · --path string (required)
+Response: {"found","path","rect_kind","canvas_rect":[x,y,w,h],"image_rect":[x,y,w,h],"scale":[sx,sy]}; rect_kind says how canvas_rect was derived — "bounds" (the CanvasItem implements get_rect, e.g. Control/Sprite2D, so canvas_rect is its real on-canvas bounding box) or "origin_only" (the CanvasItem has no get_rect and no intrinsic size, e.g. Node2D/CharacterBody2D/Line2D, so canvas_rect is Rect2(transform origin, ZERO) — the exact position with an explicitly zeroed size, never a fabricated rectangle). canvas_rect is in game-canvas coordinates (the space get_global_transform_with_canvas() reports), image_rect is the same rectangle multiplied by scale into the pixels of an editor screenshot --source game capture — feed image_rect to --region/--assert in image space, or canvas_rect with --coords canvas.
+Read-only counterpart of `editor screenshot --coords canvas`: ask the game where a node actually is instead of converting a coordinate by hand. Non-CanvasItem nodes answer found:false with an error note.
 
 ## autoload (3 ops)
 
@@ -539,7 +549,7 @@ Response: operations[]: {"op":"add_node"|"replace_node"|"remove_node"|"connect_n
 ### `ui set-text` — Set the text of a Label/Button/RichTextLabel
 `set_text` · 8s · **[write]** · --path string (required), --text string (required)
 
-## resource (17 ops)
+## resource (18 ops)
 
 ### `resource assign` — Assign a resource to a node's property
 `assign_resource` · 8s · **[write]** · --path string (required), --property string (required), --resource-path string (required)
@@ -577,6 +587,10 @@ CLI-side flags (not wire params): `--properties-file` string — read the "prope
 
 ### `resource search` — Search resources by type and path prefix
 `search_resources` · 8s · --type string, --path string, --offset int (default "0"), --limit int (default "100")
+
+### `resource set-property` — Set one property on the Resource held by a node's property slot
+`resource_set_property` · 8s · **[write]** · --node-path string (required), --property string (required), --resource-property string (required), --value json (required), --slot string (default "override")
+Response: {"node_path","property","slot","resource_property","resource_class","old_value","new_value","undoable"}
 
 ### `resource spriteframes-add-animation` — Add a named animation to a SpriteFrames .tres
 `spriteframes_add_animation` · 8s · **[write]** · --resource-path string (required), --name string (required), --speed float (default "5.0"), --loop bool (default "true")

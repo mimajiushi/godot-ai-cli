@@ -20,10 +20,31 @@ func newProject(t *testing.T, projectGodot string) string {
 	return dir
 }
 
+// TestPluginVersion：内嵌的插件描述符必须与仓库源（godot_ai/plugin.cfg）一致。
+// 期望值从磁盘文件动态读出——插件版本随发布升级，写死版本号会让每次升版都要改测试。
 func TestPluginVersion(t *testing.T) {
-	if got := plugin.PluginVersion(); got != "4.2.5" {
-		t.Fatalf("PluginVersion() = %q, want 4.2.5", got)
+	want := readVendoredPluginVersion(t, filepath.Join("godot_ai", "plugin.cfg"))
+	if got := plugin.PluginVersion(); got != want {
+		t.Fatalf("PluginVersion() = %q, want %q (godot_ai/plugin.cfg)", got, want)
 	}
+}
+
+// readVendoredPluginVersion 解析 plugin.cfg 里的 version="X" 行（不硬编码版本号）。
+func readVendoredPluginVersion(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "version=")
+		if !ok {
+			continue
+		}
+		return strings.Trim(rest, `"`)
+	}
+	t.Fatalf("%s declares no version= line", path)
+	return ""
 }
 
 // TestInstallClearsStaleUpstreamUpdateMarkers：上游 v4 自更新器的

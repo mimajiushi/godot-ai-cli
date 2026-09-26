@@ -41,6 +41,9 @@ extras of `editor screenshot`.
 | `PIXEL_ASSERT_FAILED` | One or more `editor screenshot --assert '#RRGGBB@x,y'` checks mismatched (`data.samples` carries expected vs actual) | Inspect `data.samples`; widen `--tolerance` only if the delta is rendering noise, not a real regression. |
 | `IMAGE_LOAD_FAILED` | `image palette`/`image probe` could not decode the file | PNG/JPEG only (no WebP); check the path — `res://` needs `--project` or a remembered launch project. |
 | `SCREENSHOT_DECODE_FAILED` / `SCREENSHOT_SAVE_FAILED` | The capture's base64 payload was undecodable, or `--out` could not be written | Check disk writability; report undecodable payloads as a bug. |
+| `BASELINE_READ_FAILED` | `--baseline <png>` was missing or undecodable (checked BEFORE the screenshot, so no capture is wasted) | Fix the baseline path/format (PNG/JPEG); re-shoot the baseline with `--out` if in doubt. |
+| `BASELINE_DIFF_FAILED` | The final image differs from `--baseline`: either the sizes disagree (`data.baseline_size` / `data.image_size`) or `data.diff_ratio` exceeds `--diff-threshold` (`data.diff_pixels` / `data.total_pixels` / `data.samples` name the first differing pixels; `data.diff_out` is the annotated PNG when `--diff-out` was given) | Inspect `data.samples` and the `--diff-out` image to tell a real visual regression from rendering noise; raise `--diff-threshold` only for noise, and re-shoot the baseline after an intentional change. |
+| `COORD_SPACE_UNAVAILABLE` | `--coords canvas` was requested but the reply carries no `canvas_scale` — the connected editor plugin predates canvas/image coordinate metadata | Use `--coords image` (source pixels), or install the current plugin (`plugin install --project <dir>` + reopen the editor); the scale is never guessed, so coordinates can never silently pick the wrong pixels. |
 
 ## Update-phase codes
 
@@ -49,11 +52,29 @@ Emitted by `update`. None of them modify the install — checksum/download failu
 | Code | Meaning | Recovery |
 |---|---|---|
 | `UPDATE_CHECK_FAILED` | Releases query failed: no release yet, rate limit (60 req/h/IP unauthenticated), or network down (`data.url`) | Retry later; the updater tracks both stable and prerelease tags. |
+| `UPDATE_CHECK_RATE_LIMITED` | The GitHub API answered 403 with `X-RateLimit-Remaining: 0` (`data.http_status`, `data.rate_limit_reset` as RFC3339 UTC, `data.next_steps`); the API being blocked does NOT mean the upgrade is impossible | Bypass the list endpoint with `--tag <vX.Y.Z>` or `--from-atom` (reads `releases.atom` from the site root), wait for `rate_limit_reset`, or go fully offline with `--zip <zip> --checksums <checksums.txt>`. A 403 without the rate-limit header stays `UPDATE_CHECK_FAILED`. |
+| `UPDATE_TAG_NOT_FOUND` | `--tag <tag>` asked for a release that does not exist (single-release endpoint answered 404) | Check the tag spelling (with or without the leading `v` as published); `update --check` lists the latest tag. |
+| `UPDATE_ATOM_FAILED` | `--from-atom` could not fetch or parse `releases.atom` from the site root (`data.url`) | Retry, or fall back to `--tag <tag>` (same download path, just an explicit tag). |
 | `UPDATE_ASSET_NOT_FOUND` | No asset for this OS/arch in the latest release (`data.goos`/`data.goarch`) | Download manually from the release page or build from source. |
 | `UPDATE_DOWNLOAD_FAILED` | Asset or checksums download failed | Retry on a stable network. |
 | `UPDATE_CHECKSUM_INVALID` / `UPDATE_CHECKSUM_MISMATCH` | Checksums file unusable, or the asset hash differs — install provably untouched | Treat as a supply-chain warning; re-download; report if persistent. |
 | `UPDATE_ARCHIVE_INVALID` | The zip holds no matching binary | Report the broken release asset. |
 | `UPDATE_REPLACE_FAILED` | Could not swap the executable (message names the `.old` fallback path when rollback also failed) | Check file permissions; recover the binary from `<exe>.old` if present. |
+
+**Known limits of the fallback channels (registered, not blocking).** Three
+deliberate gaps remain, and the CLI does not paper over them:
+
+- A GitHub **secondary** rate limit answers `403` with `Retry-After` and no
+  `X-RateLimit-Remaining: 0` header — that stays `UPDATE_CHECK_FAILED` (with
+  `data.http_status`) instead of being reported as a rate limit, so a real
+  block is never mislabelled as throttling.
+- `--tag <vX.Y.Z>` selects a release to install **on**; it is NOT a rollback
+  channel — a tag equal to or older than the running version is reported as
+  "already up to date" and nothing is downloaded.
+- `--zip` verifies two sources (the file name appears in `--checksums` and its
+  SHA256 matches) but does **not** inspect the archive's architecture: a zip
+  built for another OS/arch passes verification and only fails later, at run
+  time.
 
 ## Runtime op codes
 

@@ -8,6 +8,9 @@ const ClassIntrospection := preload("res://addons/godot_ai/utils/class_introspec
 ## Handles resource search, inspection, and assignment to nodes.
 
 const NodeHandler := preload("res://addons/godot_ai/handlers/node_handler.gd")
+## 需求 R-1：resource_set_property 的 --slot 兜底要复用材质家族同一套槽位
+## 语义（override/canvas/process/surface_N → 节点属性名）。
+const MaterialHandler := preload("res://addons/godot_ai/handlers/material_handler.gd")
 
 var _undo_redo: EditorUndoRedoManager
 var _connection: McpConnection
@@ -159,6 +162,98 @@ func assign_resource(params: Dictionary) -> Dictionary:
 			"undoable": true,
 		}
 	}
+
+
+## resource_set_property（需求 R-1）：往节点槽位上*已有*的资源写一个字段，
+## 例如场景内联 ShaderMaterial 的 resource_local_to_scene / shader_parameter。
+## 这是 inspect_resource（读）的写侧对应命令；undo/redo 包裹，回包带 old/new。
+func set_property(params: Dictionary) -> Dictionary:
+	var node_path: String = params.get("node_path", "")
+	if node_path.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: node_path")
+
+	var resource_property: String = params.get("resource_property", "")
+	if resource_property.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: resource_property")
+
+	if not ("value" in params):
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: value")
+
+	var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path")
+	if _resolved.has("error"):
+		return _resolved
+	var node: Node = _resolved.node
+	var _scene_root: Node = _resolved.scene_root
+
+	# 目标节点属性：--property 直给（如 material）；缺省时用 --slot 反解
+	# （与 material_* 家族同一套槽位语义）。
+	var slot: String = params.get("slot", "override")
+	var property: String = params.get("property", "")
+	if property.is_empty():
+		var slot_result := MaterialHandler._resolve_slot_property(node, slot)
+		if slot_result.has("error"):
+			return slot_result
+		property = slot_result.property
+	else:
+		var found := false
+		for prop in node.get_property_list():
+			if prop.name == property:
+				found = true
+				break
+		if not found:
+			return ErrorCodes.make(ErrorCodes.PROPERTY_NOT_ON_CLASS, McpPropertyErrors.build_message(node, property))
+
+	var held: Variant = node.get(property)
+	if held == null:
+		return ErrorCodes.make(
+			ErrorCodes.WRONG_TYPE,
+			"Property '%s' on '%s' holds no Resource — assign one first" % [property, node_path]
+		)
+	if not (held is Resource):
+		return ErrorCodes.make(
+			ErrorCodes.WRONG_TYPE,
+			"Property '%s' on '%s' holds %s, not a Resource" % [property, node_path, type_string(typeof(held))]
+		)
+	var res: Resource = held
+
+	var old_value: Variant = res.get(resource_property)
+
+	# 前置应用：复用 resource_create 的强制转换 / 缺失键报错路径。单键调用
+	# 要么整键生效要么原样报错，所以这里不会留下半改状态；属性不存在时
+	# _apply_resource_properties 会带上 valid_properties 报 PROPERTY_NOT_ON_CLASS。
+	var apply_err := _apply_resource_properties(res, {resource_property: params.get("value")})
+	if apply_err != null:
+		return apply_err
+	var new_value: Variant = res.get(resource_property)
+
+	_undo_redo.create_action("MCP: Set %s.%s on %s" % [property, resource_property, node.name])
+	_undo_redo.add_do_method(self, "_apply_resource_property", res, resource_property, new_value)
+	_undo_redo.add_undo_method(self, "_apply_resource_property", res, resource_property, old_value)
+	# do 方法已在前置应用里跑过：只注册不再执行一次（theme_handler 同模式），
+	# 免得第二次套用的错误被丢弃。
+	_undo_redo.commit_action(false)
+
+	return {
+		"data": {
+			"node_path": node_path,
+			"property": property,
+			"slot": slot,
+			"resource_property": resource_property,
+			"resource_class": res.get_class(),
+			"old_value": NodeHandler._serialize_value(old_value),
+			"new_value": NodeHandler._serialize_value(new_value),
+			"undoable": true,
+		}
+	}
+
+
+## resource_set_property 的 undo/redo 回调：值已在前置应用里强制转换过，
+## 这里直接落值。
+func _apply_resource_property(res: Resource, resource_property: String, value: Variant) -> void:
+	if res == null:
+		push_warning("MCP: Failed to set resource property for undo/redo: the resource is gone")
+		return
+	res.set(resource_property, value)
 
 
 ## Instantiate a built-in Resource subclass, optionally apply `properties`,
@@ -323,6 +418,14 @@ static func _apply_resource_properties(res: Resource, properties: Dictionary, de
 	for prop in res.get_property_list():
 		prop_types[prop.name] = prop.get("type", TYPE_NIL)
 	for key in properties.keys():
+		if not prop_types.has(key):
+			# 需求 R-2 项 2 / F1：上面的 prop_types 是调用入口的一次性快照，只反映
+			# 「开始应用之前」的属性列表。同一调用里先写 shader、再写
+			# shader_parameter/<uniform> 时，uniform 属性要等 shader 落地后才出现
+			# （ShaderMaterial._get_property_list 实时读 shader）——快照里没有它，
+			# 于是被误判成未知属性。缺键时实时重查一次快照；仍缺才走原报错路径。
+			for live_prop in res.get_property_list():
+				prop_types[live_prop.name] = live_prop.get("type", TYPE_NIL)
 		if not prop_types.has(key):
 			var valid: Array[String] = []
 			for prop in res.get_property_list():

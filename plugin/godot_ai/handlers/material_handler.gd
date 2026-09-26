@@ -22,6 +22,10 @@ const _TYPE_TO_CLASS := {
 
 const _SUPPORTED_SUFFIXES := [".tres", ".material", ".res"]
 
+## 缺 shader_path 的统一文案（需求 R-1：create 与 apply-to-node 两处必须一致，
+## 历史上 apply_to_node 会静默产出 shader=null 的 ShaderMaterial）。
+const _SHADER_PATH_REQUIRED := "ShaderMaterial requires shader_path (res:// / uid:// / user:// path to a .gdshader)"
+
 
 var _undo_redo: EditorUndoRedoManager
 var _connection: McpConnection
@@ -65,19 +69,10 @@ func create_material(params: Dictionary) -> Dictionary:
 
 	if type_str == "shader":
 		if shader_path.is_empty():
-			return ErrorCodes.make(
-				ErrorCodes.INVALID_PARAMS,
-				"ShaderMaterial requires shader_path (res:// / uid:// / user:// path to a .gdshader)"
-			)
-		var shader_path_err = McpPathValidator.loadable_error(shader_path, "shader_path")
-		if shader_path_err != null:
-			return shader_path_err
-		if not ResourceLoader.exists(shader_path):
-			return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND, "Shader not found: %s" % shader_path)
-		var shader_res := ResourceLoader.load(shader_path)
-		if not (shader_res is Shader):
-			return ErrorCodes.make(ErrorCodes.WRONG_TYPE, "Resource at %s is not a Shader" % shader_path)
-		(mat as ShaderMaterial).shader = shader_res
+			return ErrorCodes.make(ErrorCodes.INVALID_PARAMS, _SHADER_PATH_REQUIRED)
+		var shader_err := _apply_shader_to_material(mat, shader_path)
+		if shader_err != null:
+			return shader_err
 
 	var dir_path := path.get_base_dir()
 	var mkdir_err := DirAccess.make_dir_recursive_absolute(dir_path)
@@ -174,22 +169,22 @@ func set_param(params: Dictionary) -> Dictionary:
 # ============================================================================
 
 func set_shader_param(params: Dictionary) -> Dictionary:
-	var load_result := _load_material_from_path(params.get("path", ""), true)
-	if load_result.has("error"):
-		return load_result
-	var mat: Material = load_result.material
-	var mat_path: String = load_result.path
+	var target := _resolve_material_target(params, true)
+	if target.has("error"):
+		return target
+	var mat: Material = target.material
+	var label: String = target.label
 
 	if not (mat is ShaderMaterial):
 		return ErrorCodes.make(
 			ErrorCodes.WRONG_TYPE,
-			"Material at %s is %s, not ShaderMaterial" % [mat_path, mat.get_class()]
+			"Material at %s is %s, not ShaderMaterial" % [label, mat.get_class()]
 		)
 	var shader_mat := mat as ShaderMaterial
 	if shader_mat.shader == null:
 		return ErrorCodes.make(
 			ErrorCodes.WRONG_TYPE,
-			"ShaderMaterial at %s has no shader assigned" % mat_path
+			"ShaderMaterial at %s has no shader assigned" % label
 		)
 
 	var param_name: String = params.get("param", "")
@@ -215,14 +210,27 @@ func set_shader_param(params: Dictionary) -> Dictionary:
 
 	var old_value = shader_mat.get_shader_parameter(param_name)
 
-	_undo_redo.create_action("MCP: Set shader param %s.%s" % [mat_path.get_file(), param_name])
-	_undo_redo.add_do_method(self, "_apply_shader_param", mat_path, param_name, new_value)
-	_undo_redo.add_undo_method(self, "_apply_shader_param", mat_path, param_name, old_value)
+	if target.path.is_empty():
+		# 需求 R-2：内联材质（节点槽位上的场景子资源）没有文件可落盘——直接
+		# 改那一份活实例，undo/redo 也作用于同一实例；真正写回 .tscn 的
+		# [sub_resource] 由场景保存负责。
+		_undo_redo.create_action("MCP: Set inline shader param %s.%s" % [label, param_name])
+		_undo_redo.add_do_method(self, "_apply_shader_param_on_instance", shader_mat, param_name, new_value)
+		_undo_redo.add_undo_method(self, "_apply_shader_param_on_instance", shader_mat, param_name, old_value)
+	else:
+		# 目标材质有磁盘路径（--path 模式，或节点槽位引用的是 .tres）：
+		# 沿用既有「改内存 + 落盘」语义，撤销同样落盘。
+		_undo_redo.create_action("MCP: Set shader param %s.%s" % [label.get_file(), param_name])
+		_undo_redo.add_do_method(self, "_apply_shader_param", target.path, param_name, new_value)
+		_undo_redo.add_undo_method(self, "_apply_shader_param", target.path, param_name, old_value)
 	_undo_redo.commit_action()
 
 	return {
 		"data": {
-			"path": mat_path,
+			"path": target.path,
+			"node_path": target.node_path,
+			"property": target.property,
+			"slot": target.slot,
 			"param": param_name,
 			"value": MaterialValues.serialize_value(new_value),
 			"previous_value": MaterialValues.serialize_value(old_value),
@@ -236,11 +244,11 @@ func set_shader_param(params: Dictionary) -> Dictionary:
 # ============================================================================
 
 func get_material(params: Dictionary) -> Dictionary:
-	var load_result := _load_material_from_path(params.get("path", ""))
-	if load_result.has("error"):
-		return load_result
-	var mat: Material = load_result.material
-	var mat_path: String = load_result.path
+	var target := _resolve_material_target(params, false)
+	if target.has("error"):
+		return target
+	var mat: Material = target.material
+	var mat_path: String = target.path
 
 	var properties: Array[Dictionary] = []
 	for prop in mat.get_property_list():
@@ -260,6 +268,10 @@ func get_material(params: Dictionary) -> Dictionary:
 		})
 
 	var shader_params: Array[Dictionary] = []
+	## 需求 R-2：同一组 uniform 再给一份 name→value 的扁平字典
+	## （shader_parameter_values），便于一次取全量取值；shader_parameters
+	## 数组保持原样（name/type/value），不破坏既有调用方。
+	var shader_param_values := {}
 	if mat is ShaderMaterial:
 		var shader_mat := mat as ShaderMaterial
 		if shader_mat.shader != null:
@@ -267,11 +279,13 @@ func get_material(params: Dictionary) -> Dictionary:
 				var u_name: String = u.get("name", "")
 				if u_name.is_empty():
 					continue
+				var u_value = MaterialValues.serialize_value(shader_mat.get_shader_parameter(u_name))
 				shader_params.append({
 					"name": u_name,
 					"type": type_string(u.get("type", TYPE_NIL)),
-					"value": MaterialValues.serialize_value(shader_mat.get_shader_parameter(u_name)),
+					"value": u_value,
 				})
+				shader_param_values[u_name] = u_value
 
 	var reverse_type_map := _reverse_type_map()
 
@@ -284,11 +298,16 @@ func get_material(params: Dictionary) -> Dictionary:
 	return {
 		"data": {
 			"path": mat_path,
+			"node_path": target.node_path,
+			"property": target.property,
+			"slot": target.slot,
 			"class": mat.get_class(),
 			"type": reverse_type_map.get(mat.get_class(), ""),
 			"properties": properties,
 			"property_count": properties.size(),
 			"shader_parameters": shader_params,
+			"shader_parameter_values": shader_param_values,
+			"resource_local_to_scene": mat.is_local_to_scene(),
 			"shader_path": shader_path_str,
 		}
 	}
@@ -362,18 +381,51 @@ func assign_material(params: Dictionary) -> Dictionary:
 
 	var slot: String = params.get("slot", "override")
 	var resource_path: String = params.get("resource_path", "")
+	var from_node_path: String = params.get("from_node_path", "")
 	var create_if_missing: bool = params.get("create_if_missing", false)
 	var type_str: String = params.get("type", "standard")
+
+	# 需求 R-1：两个来源互斥——同时给只能有一个意思。
+	if not resource_path.is_empty() and not from_node_path.is_empty():
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Provide either resource_path or from_node_path, not both"
+		)
 
 	var slot_result := _resolve_slot_property(node, slot)
 	if slot_result.has("error"):
 		return slot_result
 	var property: String = slot_result.property
 
-	# Load or create the material.
+	# Load, share, or create the material.
 	var mat: Material = null
 	var material_created := false
-	if not resource_path.is_empty():
+	var shared := false
+	if not from_node_path.is_empty():
+		# 需求 R-1：取源节点同一 slot 上的材质*实例*直接挂到目标槽位——
+		# 不 duplicate，两个节点因此引用同一份资源（场景保存后 .tscn 里
+		# 只有一份 [sub_resource]）。
+		var _source := McpNodeValidator.resolve_or_error(from_node_path, "from_node_path")
+		if _source.has("error"):
+			return _source
+		var source_node: Node = _source.node
+		var _source_scene_root: Node = _source.scene_root
+		var source_slot_result := _resolve_slot_property(source_node, slot)
+		if source_slot_result.has("error"):
+			return source_slot_result
+		var source_property: String = source_slot_result.property
+		var source_value = source_node.get(source_property)
+		if not (source_value is Material):
+			var held := "nothing"
+			if source_value != null:
+				held = source_value.get_class()
+			return ErrorCodes.make(
+				ErrorCodes.INVALID_PARAMS,
+				"Source node %s.%s holds %s, not a Material — nothing to share" % [from_node_path, source_property, held]
+			)
+		mat = source_value
+		shared = true
+	elif not resource_path.is_empty():
 		var rpath_err = McpPathValidator.loadable_error(resource_path, "resource_path")
 		if rpath_err != null:
 			return rpath_err
@@ -401,7 +453,7 @@ func assign_material(params: Dictionary) -> Dictionary:
 		if not create_if_missing:
 			return ErrorCodes.make(
 				ErrorCodes.INVALID_PARAMS,
-				"Missing resource_path (pass create_if_missing=true to create a new inline material)"
+				"Missing resource_path or from_node_path (pass create_if_missing=true to create a new inline material)"
 			)
 		if not _TYPE_TO_CLASS.has(type_str):
 			return ErrorCodes.make(
@@ -426,6 +478,8 @@ func assign_material(params: Dictionary) -> Dictionary:
 			"property": property,
 			"slot": slot,
 			"resource_path": resource_path,
+			"from_node_path": from_node_path,
+			"shared": shared,
 			"material_class": mat.get_class(),
 			"material_created": material_created,
 			"undoable": true,
@@ -449,6 +503,16 @@ func apply_to_node(params: Dictionary) -> Dictionary:
 			"Invalid material type '%s'. Valid: %s" % [type_str, ", ".join(_TYPE_TO_CLASS.keys())]
 		)
 
+	# 需求 R-1：type=shader 必须显式给 shader_path——缺参在这里就明确报错，
+	# 不再静默产出 shader=null 的 ShaderMaterial（与 material_create 同文案）。
+	# 校验先于节点解析，保证错误与场景是否打开无关。
+	var shader_path: String = params.get("shader_path", "")
+	if type_str == "shader":
+		if shader_path.is_empty():
+			return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, _SHADER_PATH_REQUIRED)
+		if not ResourceLoader.exists(shader_path):
+			return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND, "Shader not found: %s" % shader_path)
+
 	var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path")
 	if _resolved.has("error"):
 		return _resolved
@@ -463,6 +527,15 @@ func apply_to_node(params: Dictionary) -> Dictionary:
 
 	var mat := _instantiate_material(type_str)
 
+	# shader 必须先绑定：shader_parameter/* 只有在 shader 有效时才出现在
+	# get_property_list()，_apply_one_param_on_instance 靠它取类型。
+	if type_str == "shader":
+		var shader_err := _apply_shader_to_material(mat, shader_path)
+		if shader_err != null:
+			return shader_err
+
+	# props 支持 shader_parameter/<uniform> 与 resource_local_to_scene 等任意
+	# 资源属性（默认内联，不落盘；save_to 时才写 .tres）。
 	var props_to_set: Dictionary = params.get("params", {})
 	var applied: Array[String] = []
 	for prop_name in props_to_set:
@@ -669,6 +742,15 @@ func _apply_shader_param(mat_path: String, param_name: String, value: Variant) -
 	McpResourceIO.guarded_save(mat, mat_path, _connection)
 
 
+## --node-path 模式的 undo/redo 回调：直接改节点槽位上那一份活实例（内联
+## 材质没有文件路径，落盘由场景保存负责）。
+func _apply_shader_param_on_instance(shader_mat: ShaderMaterial, param_name: String, value: Variant) -> void:
+	if shader_mat == null:
+		push_warning("MCP: Failed to apply shader param for undo/redo: material is gone")
+		return
+	shader_mat.set_shader_parameter(param_name, value)
+
+
 # ============================================================================
 # Helpers
 # ============================================================================
@@ -691,6 +773,96 @@ static func _reverse_type_map() -> Dictionary:
 	for k in _TYPE_TO_CLASS:
 		out[_TYPE_TO_CLASS[k]] = k
 	return out
+
+
+## 把一个 .gdshader 绑到 ShaderMaterial 上；返回 null 表示成功，否则错误字典。
+## create_material 与 apply_to_node 共用（缺 shader_path 的判定留在调用方，
+## 两处的错误码不同、文案共用 _SHADER_PATH_REQUIRED）。
+static func _apply_shader_to_material(mat: Material, shader_path: String) -> Variant:
+	if not (mat is ShaderMaterial):
+		return ErrorCodes.make(
+			ErrorCodes.INTERNAL_ERROR,
+			"Cannot assign a shader to %s" % mat.get_class()
+		)
+	var shader_path_err = McpPathValidator.loadable_error(shader_path, "shader_path")
+	if shader_path_err != null:
+		return shader_path_err
+	if not ResourceLoader.exists(shader_path):
+		return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND, "Shader not found: %s" % shader_path)
+	var shader_res := ResourceLoader.load(shader_path)
+	if not (shader_res is Shader):
+		return ErrorCodes.make(ErrorCodes.WRONG_TYPE, "Resource at %s is not a Shader" % shader_path)
+	(mat as ShaderMaterial).shader = shader_res
+	return null
+
+
+## 解析「材质目标」：--path（磁盘 .tres/.material/.res）与
+## --node-path(+--slot)（节点槽位上的材质，含场景内联子资源）二选一，
+## 需求 R-2 要求两者互斥、缺一报错（插件侧校验，因为 CLI 层看不到语义）。
+## 成功返回 {material, path, label, node_path, property, slot}，
+## 失败返回错误字典（带 "error" 键）。
+func _resolve_material_target(params: Dictionary, for_write: bool) -> Dictionary:
+	var path: String = params.get("path", "")
+	var node_path: String = params.get("node_path", "")
+	if not path.is_empty() and not node_path.is_empty():
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Provide either path or node_path, not both"
+		)
+	if path.is_empty() and node_path.is_empty():
+		return ErrorCodes.make(
+			ErrorCodes.MISSING_REQUIRED_PARAM,
+			"Missing required param: pass either path (res:// material file) or node_path (node whose slot material to use)"
+		)
+	if path.is_empty():
+		var slot: String = params.get("slot", "override")
+		var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path")
+		if _resolved.has("error"):
+			return _resolved
+		var node: Node = _resolved.node
+		var _scene_root: Node = _resolved.scene_root
+		var slot_result := _resolve_slot_property(node, slot)
+		if slot_result.has("error"):
+			return slot_result
+		var property: String = slot_result.property
+		var value = node.get(property)
+		if value == null:
+			return ErrorCodes.make(
+				ErrorCodes.WRONG_TYPE,
+				"Node %s.%s has no material assigned (slot '%s')" % [node_path, property, slot]
+			)
+		if not (value is Material):
+			return ErrorCodes.make(
+				ErrorCodes.WRONG_TYPE,
+				"Node %s.%s holds %s, not a Material" % [node_path, property, value.get_class()]
+			)
+		var mat: Material = value
+		var label := "%s.%s" % [node_path, property]
+		# 内联材质的 resource_path 为空——不给空路径，改标注 (inline)，
+		# 让错误信息仍然指名道姓。
+		if mat.resource_path.is_empty():
+			label += " (inline)"
+		else:
+			label += " (%s)" % mat.resource_path
+		return {
+			"material": mat,
+			"path": mat.resource_path,
+			"label": label,
+			"node_path": node_path,
+			"property": property,
+			"slot": slot,
+		}
+	var load_result := _load_material_from_path(path, for_write)
+	if load_result.has("error"):
+		return load_result
+	return {
+		"material": load_result.material,
+		"path": load_result.path,
+		"label": load_result.path,
+		"node_path": "",
+		"property": "",
+		"slot": "",
+	}
 
 
 static func _validate_material_path(path: String, param_name: String, for_write: bool = false) -> Variant:
@@ -726,7 +898,9 @@ func _load_material_from_path(path: String, for_write: bool = false) -> Dictiona
 
 ## Map a slot name to a Godot property name on the given node.
 ## Returns {property: "..."} or an error dict.
-func _resolve_slot_property(node: Node, slot: String) -> Dictionary:
+## static：resource_handler 的 resource_set_property 也要用同一套槽位语义
+## （需求 R-1），避免两份实现漂移。
+static func _resolve_slot_property(node: Node, slot: String) -> Dictionary:
 	if slot == "override":
 		if node is MeshInstance3D or node is CSGShape3D:
 			return {"property": "material_override"}

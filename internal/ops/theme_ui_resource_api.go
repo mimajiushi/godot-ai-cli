@@ -229,6 +229,22 @@ func resourceOps() []OpSpec {
 			},
 		},
 		{
+			// 需求 R-1：往节点槽位上*已有*的资源写字段（例如内联
+			// ShaderMaterial 的 resource_local_to_scene）。此前只有
+			// resource inspect（读）而没有对应的写入口。
+			Domain: "resource", Name: "set-property", PluginCommand: "resource_set_property",
+			Summary: "Set one property on the Resource held by a node's property slot",
+			Timeout: DefaultTimeout, Write: true,
+			ResponseNote: `{"node_path","property","slot","resource_property","resource_class","old_value","new_value","undoable"}`,
+			Params: []ParamSpec{
+				ps("node-path", "node_path", true, "", "Scene path of the node"),
+				ps("property", "property", true, "", "Node property holding the Resource, e.g. material"),
+				ps("resource-property", "resource_property", true, "", "Property on that Resource, e.g. resource_local_to_scene"),
+				pj("value", "value", true, "JSON value"),
+				ps("slot", "slot", false, "override", "Slot fallback when --property is omitted (override | surface_0 | ...)"),
+			},
+		},
+		{
 			Domain: "resource", Name: "create", PluginCommand: "create_resource",
 			Summary: "Create a resource, optionally saved and/or assigned",
 			Timeout: DefaultTimeout, Write: true,

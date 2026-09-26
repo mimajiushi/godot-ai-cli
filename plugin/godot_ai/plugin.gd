@@ -456,6 +456,10 @@ func _continue_enter_tree_after_update_barrier() -> void:
 	_dispatcher.register_lazy("search_resources", "resource", &"search_resources")
 	_dispatcher.register_lazy("load_resource", "resource", &"load_resource")
 	_dispatcher.register_lazy("inspect_resource", "resource", &"inspect_resource")
+	# godot-ai-cli fork patch（需求 R-1）：resource inspect 的写侧对应命令——
+	# 往节点槽位上已有的资源写字段（内联 ShaderMaterial 的
+	# resource_local_to_scene 等）。
+	_dispatcher.register_lazy("resource_set_property", "resource", &"set_property")
 	_dispatcher.register_lazy("assign_resource", "resource", &"assign_resource")
 	_dispatcher.register_lazy("create_resource", "resource", &"create_resource")
 	_dispatcher.register_lazy("get_resource_info", "resource", &"get_resource_info")

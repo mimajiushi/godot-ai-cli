@@ -206,21 +206,29 @@ func materialOps() []OpSpec {
 			},
 		},
 		{
+			// 需求 R-2：材质可以是场景内联子资源（没有 res:// 路径），
+			// 因此除 --path 外再接受 --node-path + --slot，二选一由插件校验。
 			Domain: "material", Name: "set-shader-param", PluginCommand: "material_set_shader_param",
-			Summary: "Set a shader uniform on a ShaderMaterial",
+			Summary: "Set a shader uniform on a ShaderMaterial (disk file or a node's inline material)",
 			Timeout: DefaultTimeout, Write: true,
+			ResponseNote: `{"path","node_path","property","slot","param","value","previous_value","undoable"}`,
 			Params: []ParamSpec{
-				ps("path", "path", true, "", "res:// path of the material"),
+				ps("path", "path", false, "", "res:// path of the material (mutually exclusive with --node-path)"),
+				ps("node-path", "node_path", false, "", "Scene path of the node whose slot material to mutate (inline materials)"),
+				ps("slot", "slot", false, "override", "Slot of that node: override | surface_0 | ..."),
 				ps("param", "param", true, "", "Uniform name"),
 				pj("value", "value", true, "JSON value"),
 			},
 		},
 		{
 			Domain: "material", Name: "get", PluginCommand: "material_get",
-			Summary: "Read a material's properties",
-			Timeout: DefaultTimeout,
+			Summary:      "Read a material's properties (disk file or a node's inline material)",
+			Timeout:      DefaultTimeout,
+			ResponseNote: `{"class","type","properties","shader_parameters","shader_parameter_values","resource_local_to_scene","shader_path"}`,
 			Params: []ParamSpec{
-				ps("path", "path", true, "", "res:// path of the material"),
+				ps("path", "path", false, "", "res:// path of the material (mutually exclusive with --node-path)"),
+				ps("node-path", "node_path", false, "", "Scene path of the node whose slot material to read (inline materials)"),
+				ps("slot", "slot", false, "override", "Slot of that node: override | surface_0 | ..."),
 			},
 		},
 		{
@@ -236,9 +244,11 @@ func materialOps() []OpSpec {
 			Domain: "material", Name: "assign", PluginCommand: "material_assign",
 			Summary: "Assign a material resource to a node's material slot",
 			Timeout: DefaultTimeout, Write: true,
+			ResponseNote: `{"node_path","property","slot","resource_path","from_node_path","shared","material_class","material_created","undoable"}`,
 			Params: []ParamSpec{
 				ps("node-path", "node_path", true, "", "Scene path of the node"),
 				ps("resource-path", "resource_path", false, "", "res:// material (empty detaches)"),
+				ps("from-node-path", "from_node_path", false, "", "Share the source node's same-slot material instance (no duplicate; mutually exclusive with --resource-path)"),
 				ps("slot", "slot", false, "override", "override | surface:0 | ..."),
 				pb("create-if-missing", "create_if_missing", false, "false", "Create a new material when no path given"),
 				ps("type", "type", false, "standard", "Material type for create-if-missing"),
@@ -251,6 +261,7 @@ func materialOps() []OpSpec {
 			Params: []ParamSpec{
 				ps("node-path", "node_path", true, "", "Scene path of the node"),
 				ps("type", "type", false, "standard", "Material type"),
+				ps("shader-path", "shader_path", false, "", "Shader res:// path; required for type=shader"),
 				pj("props", "params", false, "JSON object of material properties"),
 				ps("slot", "slot", false, "override", "override | surface:0 | ..."),
 				ps("save-to", "save_to", false, "", "Optional res:// path to save the material"),

@@ -149,6 +149,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          # 正文取自仓库根的 RELEASE_NOTES.md（每个版本发布前必须重写为
+          # 人话 changelog——只丢自动生成链接的 release 不合格）；
+          # generate_release_notes 会把自动 compare 链接追加在正文之后。
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           # vX.Y.Z-<anything> publishes as a prerelease.
           prerelease: ${{ contains(github.ref_name, '-') }}

@@ -26,6 +26,11 @@ const MAX_ACCOUNTED_ROW_TIMES_PER_KEY := 512
 var _editor_log_buffer
 var _game_log_buffer
 var _debugger_errors_root: Node
+## godot-ai-cli fork patch（beta.26 实测抓获）：Godot 4.7 里已 free 的实例
+## 连 == null 比较都成立（typed/untyped 变量一样），所以「注入的根已失效」
+## 与「从未注入」无法用 null 比较区分——用独立标记位记住是否注入过，
+## freed-root 守卫才不是形同虚设。
+var _debugger_errors_root_set := false
 var _debugger_search_root_cache: Node
 var _promoted_debugger_keys: Dictionary = {}
 ## #635: per-key set of Errors-tab row time texts already promoted, so a row
@@ -47,6 +52,7 @@ func _init(editor_log_buffer = null, game_log_buffer = null, debugger_errors_roo
 	_editor_log_buffer = editor_log_buffer
 	_game_log_buffer = game_log_buffer
 	_debugger_errors_root = debugger_errors_root
+	_debugger_errors_root_set = debugger_errors_root != null
 
 
 func note_game_run_started(sticky_scan: bool = true) -> void:
@@ -323,7 +329,12 @@ func locate_debugger_error_trees() -> Array[Tree]:
 	## teardown). A freed root must not fall through to the live editor UI —
 	## that would promote unrelated real errors into a tracker scoped to the
 	## dead root — so treat it as "nothing to scan".
-	if root != null and not is_instance_valid(root):
+	## godot-ai-cli fork patch（beta.26）：已 free 的实例在 Godot 4.7 下
+	## == null 同样成立（typed 成员读出即 null），旧的
+	## `root != null and not is_instance_valid(root)` 守卫永远走不到——
+	## 必须靠注入标记位 + is_instance_valid 判定（beta.26 污染会话回放
+	## 实测：旧守卫穿透到 live Errors 面板，把真实错误提升进测试tracker）。
+	if _debugger_errors_root_set and not is_instance_valid(_debugger_errors_root):
 		return trees
 	if root == null:
 		root = _debugger_search_root()

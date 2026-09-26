@@ -380,23 +380,35 @@ func pruneDaemonRecords() (pruned []int, kept []int) {
 // shuts the daemon on httpPort down WITHOUT the quit_editor round a full
 // `stop` performs — every connected editor process is kept (a compatible
 // plugin reconnects to the next daemon on the same ports by itself). It
-// returns how many editor sessions were connected when the shutdown was
-// requested, and waits until the port stops answering.
-func shutdownDaemonKeepEditors(httpPort int) (editors int, err error) {
+// returns the identity of every session connected when the shutdown was
+// requested ({editor_pid, project_path, plugin_version}——「升级前本工程
+// 编辑器已连接」的判定证据，需求 upgrade-daemon-unconnected-editor §3.2
+// 的升级前/后守卫区分靠它），并等待端口停止应答。
+func shutdownDaemonKeepEditors(httpPort int) (kept []map[string]any, err error) {
 	if body, ok := probeKnownDaemonGET(httpPort, "/godot-ai/cli/sessions"); ok {
 		if list, ok := body["sessions"].([]any); ok {
-			editors = len(list)
+			for _, item := range list {
+				sess, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				kept = append(kept, map[string]any{
+					"editor_pid":     sess["editor_pid"],
+					"project_path":   sess["project_path"],
+					"plugin_version": sess["plugin_version"],
+				})
+			}
 		}
 	}
 	if _, err := postDaemonJSON(httpPort, "/godot-ai/cli/shutdown", map[string]any{}, 5*time.Second); err != nil {
-		return editors, fmt.Errorf("shutdown request: %w", err)
+		return kept, fmt.Errorf("shutdown request: %w", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for daemonReachable(httpPort) && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if daemonReachable(httpPort) {
-		return editors, fmt.Errorf("daemon on http port %d still answers 5s after shutdown", httpPort)
+		return kept, fmt.Errorf("daemon on http port %d still answers 5s after shutdown", httpPort)
 	}
-	return editors, nil
+	return kept, nil
 }

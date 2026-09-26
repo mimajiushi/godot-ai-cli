@@ -207,8 +207,9 @@ func TestFindCompatibleDaemonPrefersExactMatch(t *testing.T) {
 }
 
 // TestShutdownDaemonKeepEditors: the --upgrade-daemon teardown shuts the
-// old daemon down, reports the connected editor count, and never touches
-// the (mock) editor process — the plugin socket simply drops.
+// old daemon down, reports the connected editor sessions' identities (the
+// pre/post-upgrade guard distinction keys on them), and never touches the
+// (mock) editor process — the plugin socket simply drops.
 func TestShutdownDaemonKeepEditors(t *testing.T) {
 	stubCacheDir(t)
 	d, err := daemon.Start(context.Background(), daemon.Config{HTTPPort: 0, WSPort: 0, Version: "3.2.8"})
@@ -217,15 +218,25 @@ func TestShutdownDaemonKeepEditors(t *testing.T) {
 	}
 	// No t.Cleanup shutdown: the helper itself is the shutdown path.
 	plug := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
-		"session_id": "kept@0001", "project_path": "/my/project/", "plugin_version": "3.2.8",
+		"session_id": "kept@0001", "project_path": "/my/project/", "plugin_version": "3.2.8", "editor_pid": 4321,
 	})
 
-	editors, err := shutdownDaemonKeepEditors(d.HTTPPort())
+	kept, err := shutdownDaemonKeepEditors(d.HTTPPort())
 	if err != nil {
 		t.Fatalf("shutdownDaemonKeepEditors: %v", err)
 	}
-	if editors != 1 {
-		t.Errorf("editors = %d, want 1", editors)
+	if len(kept) != 1 {
+		t.Fatalf("kept = %v, want 1 session", kept)
+	}
+	// 升级后守卫的证据字段：工程路径、编辑器 pid、内存插件版本。
+	if pp, _ := kept[0]["project_path"].(string); !sameProjectPath(pp, "/my/project") {
+		t.Errorf("kept[0].project_path = %v", kept[0]["project_path"])
+	}
+	if kept[0]["editor_pid"] != float64(4321) {
+		t.Errorf("kept[0].editor_pid = %v", kept[0]["editor_pid"])
+	}
+	if kept[0]["plugin_version"] != "3.2.8" {
+		t.Errorf("kept[0].plugin_version = %v", kept[0]["plugin_version"])
 	}
 	if daemonReachable(d.HTTPPort()) {
 		t.Error("daemon still reachable after the upgrade shutdown")

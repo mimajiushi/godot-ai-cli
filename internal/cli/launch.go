@@ -133,7 +133,14 @@ When the port is held by an OLD daemon (DAEMON_MISMATCH):
     quitting any editor (compatible plugins reconnect to the new daemon
     automatically); after the swap launch waits (up to 75s) for the kept
     editors to reconnect and reuses their sessions instead of spawning a
-    duplicate editor, or
+    duplicate editor. A kept editor that WAS connected before the swap but
+    cannot re-attach (e.g. its in-memory plugin is major.minor-incompatible
+    with the new daemon) does NOT fail the command: launch reports
+    status:ok with daemon_upgraded:true, editor_reconnected:false, the new
+    daemon's identity and editor-restart next_steps — the upgrade itself
+    already happened. An editor that was never connected still fails
+    closed with EDITOR_OPEN_UNCONNECTED (data.daemon_upgraded tells the
+    two situations apart), or
   - point launch at a compatible already-running daemon with --http-port
     (the error's data.same_version_daemon names one when found).
 When another daemon already hosts an editor for THIS project, launch fails
@@ -321,7 +328,12 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 
 	// keptEditors counts the editors an --upgrade-daemon swap preserved;
 	// step 5 waits for their sessions to reconnect before deciding to spawn.
+	// keptSessions 保留这些会话的身份（editor_pid/project_path/plugin_version）：
+	// 「本工程编辑器升级前已连接」是升级后守卫改判「升级成功+warning」的
+	// 证据（需求 upgrade-daemon-unconnected-editor §3.2）。
 	keptEditors := 0
+	var keptSessions []map[string]any
+	daemonUpgraded := false
 	var inProcess *daemon.Daemon
 	if opts.foreground {
 		inProcess, err = daemon.Start(ctx, cfg)
@@ -351,19 +363,21 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 			// daemon on the default port.
 			opts.wsPort = upgradeWSPort(opts.wsPortSet, opts.wsPort, mismatchErr.RunningWSPort)
 			cfg.WSPort = opts.wsPort
-			editors, uerr := shutdownDaemonKeepEditors(opts.httpPort)
+			kept, uerr := shutdownDaemonKeepEditors(opts.httpPort)
 			if uerr != nil {
 				return jsonError(cmd, "DAEMON_UPGRADE_FAILED", uerr.Error(),
 					map[string]any{"http_port": opts.httpPort, "retryable": true})
 			}
 			warnings = append(warnings, fmt.Sprintf(
 				"old daemon (version %s) on http port %d shut down; %d editor(s) kept running — major.minor-compatible plugins reconnect to the new daemon automatically, incompatible ones need `godot-ai-cli plugin install --project <dir>` plus an editor restart",
-				mismatchErr.RunningVersion, opts.httpPort, editors))
+				mismatchErr.RunningVersion, opts.httpPort, len(kept)))
 			if _, err := daemonctl.EnsureRunning(ctx, cfg); err != nil {
 				return jsonError(cmd, "DAEMON_START_FAILED",
 					fmt.Sprintf("old daemon stopped, but the new daemon did not come up: %v", err), nil)
 			}
-			keptEditors = editors
+			keptSessions = kept
+			keptEditors = len(kept)
+			daemonUpgraded = true
 		default:
 			return jsonError(cmd, "DAEMON_START_FAILED", err.Error(), nil)
 		}
@@ -384,19 +398,21 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 				liveWS, _ := liveDaemonWSPort(opts.httpPort)
 				opts.wsPort = upgradeWSPort(opts.wsPortSet, opts.wsPort, liveWS)
 				cfg.WSPort = opts.wsPort
-				editors, uerr := shutdownDaemonKeepEditors(opts.httpPort)
+				kept, uerr := shutdownDaemonKeepEditors(opts.httpPort)
 				if uerr != nil {
 					return jsonError(cmd, "DAEMON_UPGRADE_FAILED", uerr.Error(),
 						map[string]any{"http_port": opts.httpPort, "retryable": true})
 				}
 				warnings = append(warnings, fmt.Sprintf(
 					"old daemon (version %s) on http port %d shut down; %d editor(s) kept running — major.minor-compatible plugins reconnect to the new daemon automatically, incompatible ones need `godot-ai-cli plugin install --project <dir>` plus an editor restart",
-					running, opts.httpPort, editors))
+					running, opts.httpPort, len(kept)))
 				if _, err := daemonctl.EnsureRunning(ctx, cfg); err != nil {
 					return jsonError(cmd, "DAEMON_START_FAILED",
 						fmt.Sprintf("old daemon stopped, but the new daemon did not come up: %v", err), nil)
 				}
-				keptEditors = editors
+				keptSessions = kept
+				keptEditors = len(kept)
+				daemonUpgraded = true
 			} else {
 				warnings = append(warnings, fmt.Sprintf(
 					"adopted daemon runs version %s (this CLI bundles %s) — major.minor compatible, but the daemon keeps its OLD code; relaunch with --upgrade-daemon to switch it to the bundled build",
@@ -456,19 +472,46 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		// --force-spawn 保持既有「自担风险」语义。
 		if !opts.attach && !opts.forceSpawn {
 			if editors, scanErr := unconnectedEditorsReport(projectDir); len(editors) > 0 {
+				// 升级后守卫（需求 upgrade-daemon-unconnected-editor §3.2）：
+				// 本工程编辑器在升级前连着旧 daemon（keptSessions 里有它的
+				// 会话），daemon 替换是本命令已完成的既定事实——整体 error
+				// 会让调用方误判升级失败。改判「升级成功 + warning」。
+				if kept := keptSessionForProject(keptSessions, projectDir); kept != nil {
+					return printJSON(out, upgradeKeptEditorPayload(
+						opts, projectDir, editors, kept, warnings, scanErr, install, plan), false)
+				}
 				live := liveDaemonEntries(knownDaemonsReport(opts.httpPort))
-				return jsonError(cmd, "EDITOR_OPEN_UNCONNECTED",
-					fmt.Sprintf("检测到工程 %s 的编辑器进程已打开，但它没有连接任何 daemon；launch 会再开一个编辑器实例（场景锁/保存互相覆盖风险）", projectDir),
-					map[string]any{
-						"editors":      editors,
-						"live_daemons": live,
-						"suggest": []string{
-							"godot-ai-cli launch --project " + projectDir + " --attach",
-							fmt.Sprintf("godot-ai-cli status --http-port %v", opts.httpPort),
-						},
-						"retryable": false,
-						"scan_note": scanErr,
-					})
+				data := map[string]any{
+					"editors":      editors,
+					"live_daemons": live,
+					"suggest": []string{
+						"godot-ai-cli launch --project " + projectDir + " --attach",
+						fmt.Sprintf("godot-ai-cli status --http-port %v", opts.httpPort),
+					},
+					"retryable": false,
+					"scan_note": scanErr,
+					// 命令报错但副作用可能已生效（需求
+					// upgrade-daemon-unconnected-editor §3.1）：升级过的
+					// 运行必须把新 daemon 的身份放进错误数据。
+					"daemon_upgraded": daemonUpgraded,
+				}
+				message := fmt.Sprintf(
+					"检测到工程 %s 的编辑器进程已打开，但它没有连接任何 daemon；launch 会再开一个编辑器实例（场景锁/保存互相覆盖风险）", projectDir)
+				if daemonUpgraded {
+					data["daemon"] = map[string]any{
+						"http_port": opts.httpPort, "ws_port": opts.wsPort,
+						"version": pluginmeta.PluginVersion(),
+					}
+					data["kept_editors"] = editors
+					message = fmt.Sprintf(
+						"daemon 已换成本版 %s，但保留编辑器未能重连；", pluginmeta.PluginVersion()) + message
+				}
+				// 与被拒握手同源的现场（需求 §3.3）：「为什么保留编辑器
+				// 连不上」在一条命令里自解释。
+				if rj := recentRejectionsFrom(opts.httpPort); len(rj) > 0 {
+					data["recent_rejections"] = rj
+				}
+				return jsonError(cmd, "EDITOR_OPEN_UNCONNECTED", message, data)
 			} else if scanErr != "" {
 				warnings = append(warnings, scanErr)
 			}
@@ -634,6 +677,71 @@ func runLaunch(cmd *cobra.Command, opts launchOptions) error {
 		<-inProcess.Done()
 	}
 	return nil
+}
+
+// keptSessionForProject 在 --upgrade-daemon 保留的会话清单里找本工程的
+// 那条——它是「升级前本工程编辑器已连接」的证据（需求
+// upgrade-daemon-unconnected-editor §3.2 的升级前/后守卫区分）。
+func keptSessionForProject(kept []map[string]any, projectDir string) map[string]any {
+	for _, sess := range kept {
+		if pp, _ := sess["project_path"].(string); pp != "" && sameProjectPath(pp, projectDir) {
+			return sess
+		}
+	}
+	return nil
+}
+
+// upgradeKeptEditorPayload 渲染升级后守卫的 ok 载荷：daemon 已换成本版、
+// 保留编辑器未在重连宽限内重连（多数是内存插件与新 daemon major.minor
+// 错配）。主副作用（换 daemon）已完成，所以这是 status:ok + 结构化数据，
+// 不是错误——调用方据此知道要重启的是编辑器，而不是重跑升级（需求
+// upgrade-daemon-unconnected-editor §3.1/§3.2）。
+func upgradeKeptEditorPayload(
+	opts launchOptions, projectDir string, editors []map[string]any,
+	kept map[string]any, warnings []string, scanErr string,
+	install plugin.InstallResult, plan plugin.Plan,
+) map[string]any {
+	newVersion := pluginmeta.PluginVersion()
+	inMemory := fmt.Sprint(kept["plugin_version"])
+	reconnectWarning := fmt.Sprintf(
+		"kept editor (pid %v) did not reconnect within %s — its in-memory plugin (%s) could not re-attach to the new daemon %s; the daemon upgrade itself succeeded",
+		kept["editor_pid"], keptEditorReconnectGrace, inMemory, newVersion)
+	warnings = append(warnings, reconnectWarning)
+	payload := map[string]any{
+		"status":             "ok",
+		"daemon_upgraded":    true,
+		"editor_reconnected": false,
+		"project":            projectDir,
+		"daemon": map[string]any{
+			"http_port": opts.httpPort, "ws_port": opts.wsPort, "version": newVersion,
+		},
+		"kept_editors": editors,
+		"next_steps": []string{
+			"完全退出 Godot 编辑器（内存插件 " + inMemory + " 与新 daemon " + newVersion + " 不兼容时 reload-plugin 不会替换已加载的插件代码）",
+			"重新打开（建议用 godot-ai-cli launch --project <dir> 以便复用同一 daemon）",
+		},
+		"warnings": warnings,
+		// 插件步骤保持结构化可见（与 ready 载荷同一形状）：升级-daemon 往往
+		// 伴随 addons 树重写，调用方不该因为走了守卫就丢失它。
+		"plugin": map[string]any{
+			"installed":     install.Installed,
+			"upgraded":      install.Upgraded,
+			"from":          install.PreviousVersion,
+			"to":            install.Version,
+			"files_changed": len(plan.WouldUpdate),
+			"files_created": len(plan.WouldCreate),
+			"git_dirty":     plan.Git.DirtyAfter,
+			"git_available": plan.Git.Available,
+		},
+	}
+	if scanErr != "" {
+		payload["scan_note"] = scanErr
+	}
+	// 与被拒握手同源的现场（需求 §3.3）：探针自阻自报 / 握手拒绝都在这里。
+	if rj := recentRejectionsFrom(opts.httpPort); len(rj) > 0 {
+		payload["recent_rejections"] = rj
+	}
+	return payload
 }
 
 // upgradeWSPort decides the WS port of the daemon that REPLACES the old one

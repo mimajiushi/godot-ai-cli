@@ -181,14 +181,14 @@ func TestLaunchAttachReusesExistingSession(t *testing.T) {
 	spawned := stubLaunchSideEffects(t)
 
 	d, err := daemon.Start(context.Background(), daemon.Config{
-		HTTPPort: freeTCPPort(t), WSPort: freeTCPPort(t), Version: "4.2.4",
+		HTTPPort: freeTCPPort(t), WSPort: freeTCPPort(t), Version: "4.2.5",
 	})
 	if err != nil {
 		t.Fatalf("daemon start: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
-		"session_id": "attach@0001", "project_path": dir, "plugin_version": "4.2.4", "editor_pid": 4321,
+		"session_id": "attach@0001", "project_path": dir, "plugin_version": "4.2.5", "editor_pid": 4321,
 	})
 
 	out, err := runLaunchAttachFlow(t, dir, func(o *launchOptions) {
@@ -247,6 +247,11 @@ func TestLaunchOpenUnconnectedGuard(t *testing.T) {
 	editors, _ := data["editors"].([]any)
 	if len(editors) != 1 {
 		t.Fatalf("editors = %v", data["editors"])
+	}
+	// 未发生升级时守卫必须明示 daemon_upgraded:false——调用方据此区分
+	// 「报错但 daemon 已换好」（需求 upgrade-daemon-unconnected-editor §3.1）。
+	if data["daemon_upgraded"] != false {
+		t.Errorf("daemon_upgraded = %v, want false on the plain guard path", data["daemon_upgraded"])
 	}
 	suggest, _ := data["suggest"].([]any)
 	if len(suggest) == 0 || !strings.Contains(suggest[0].(string), "--attach") {

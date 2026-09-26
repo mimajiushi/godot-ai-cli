@@ -650,3 +650,84 @@ func TestStatusMergesRecentRejections(t *testing.T) {
 		t.Errorf("hint = %q", hint)
 	}
 }
+
+// TestStatusPruneSkipsLastDaemonOnlyPhantom：死端口仅由 last-daemon.json
+// 指认（daemon-<port>.json 已不存在）时，--prune 不得把它报成 pruned——
+// last-daemon.json 按设计绝不触碰，旧行为会让 pruned 永远非空
+// （需求 status-prune-phantom-lastdaemon）。
+func TestStatusPruneSkipsLastDaemonOnlyPhantom(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.5")
+
+	// last-daemon.json 指向一个死端口，且该端口没有 daemon-<port>.json。
+	dead := listenFree(t)
+	deadPort := dead.Addr().(*net.TCPAddr).Port
+	_ = dead.Close()
+	if err := writeLastDaemon(lastDaemonRecord{HTTPPort: deadPort, WSPort: deadPort + 1}); err != nil {
+		t.Fatalf("writeLastDaemon: %v", err)
+	}
+
+	// 连续两次 --prune：两次都必须 pruned 为空（旧行为两次都报 [deadPort]）。
+	for round := 1; round <= 2; round++ {
+		cmd := NewRootCommand()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs([]string{"status", "--prune", "--http-port", strconv.Itoa(d.HTTPPort())})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("status --prune round %d: %v\n%s", round, err, buf.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+			t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+		}
+		pruned, ok := out["pruned"].([]any)
+		if !ok || len(pruned) != 0 {
+			t.Errorf("round %d: pruned = %v, want [] (phantom last-daemon port must not be reported)", round, out["pruned"])
+		}
+	}
+	// last-daemon.json 绝不触碰：文件必须原样还在。
+	if _, err := os.Stat(lastDaemonPath()); err != nil {
+		t.Errorf("last-daemon.json must survive --prune: %v", err)
+	}
+}
+
+// TestStatusProjectRelativePathDetectsUnconnectedEditor：status --project
+// 接受相对路径（与 launch 对齐做 filepath.Abs）——相对路径下未连接编辑器
+// 守卫不得静默漏报（需求 status-project-relative-path）。
+func TestStatusProjectRelativePathDetectsUnconnectedEditor(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.5")
+
+	// 在临时工程目录里跑，--project 传相对路径 "."；扫描器返回的是绝对路径。
+	projectDir := t.TempDir()
+	absProject, err := filepath.Abs(projectDir)
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	t.Chdir(projectDir)
+
+	restore := godot.SetEditorScannerForTest(func() ([]godot.EditorProcess, error) {
+		return []godot.EditorProcess{
+			{PID: 5020, Project: absProject},
+		}, nil
+	})
+	defer restore()
+
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"status", "--project", ".", "--http-port", strconv.Itoa(d.HTTPPort())})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("status --project <relative> with an unconnected editor must fail\n%s", buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, buf.String())
+	}
+	env, ok := out["error"].(map[string]any)
+	if !ok || env["code"] != "EDITOR_OPEN_UNCONNECTED" {
+		t.Fatalf("error = %v, want EDITOR_OPEN_UNCONNECTED", out["error"])
+	}
+}

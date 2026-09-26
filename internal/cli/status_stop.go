@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -72,6 +73,15 @@ Examples:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
+
+			// --project 与 launch 对齐：相对路径先规范成绝对路径，否则与
+			// 编辑器进程扫描出的绝对工程路径永远不相等，未连接编辑器守卫
+			// 会静默漏报（需求 status-project-relative-path）。
+			if projectDir != "" {
+				if abs, err := filepath.Abs(projectDir); err == nil {
+					projectDir = abs
+				}
+			}
 
 			// --prune：先收拾死记录再出常规状态——打扫结果作为附加字段
 			// 与正常 status 输出合并（prune 自身不改变 daemon 探活结果）。

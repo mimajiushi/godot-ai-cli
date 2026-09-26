@@ -51,6 +51,11 @@ func TestCommandTreeCoversAllOps(t *testing.T) {
 		if cmd.Flags().Lookup("session") == nil || cmd.Flags().Lookup("params") == nil {
 			t.Errorf("op %s %s: shared --session/--params flags missing", op.Domain, op.Name)
 		}
+		// 共享文件通道（需求 R-4 问题1）：PS 5.1 剥引号，每个 op 都必须能用
+		// --params-file 把 JSON 载荷从文件送进来。
+		if cmd.Flags().Lookup("params-file") == nil {
+			t.Errorf("op %s %s: shared --params-file flag missing", op.Domain, op.Name)
+		}
 	}
 	for _, leaf := range ops.HandWiredLeaves {
 		parts := strings.Split(leaf, " ")
@@ -364,6 +369,352 @@ func TestCollectParamsPropertiesFile(t *testing.T) {
 	}
 	if props, ok := params["properties"].(map[string]any); !ok || props["enemy_type"] != 3.0 {
 		t.Errorf("BOM-prefixed properties = %v", params["properties"])
+	}
+}
+
+// TestCollectParamsGlobalParamsFile: 全局 --params-file 把文件里的 JSON object
+// 作为最低优先级的基值（需求 R-4 问题1：PS 5.1 会剥掉命令行载荷里的 ASCII 双
+// 引号，含引号的 JSON 只能从文件读）；优先级固定为 文件 → --params → 显式 flag。
+// 缺失/非 object/坏 JSON/JSON null 四种输入都必须在 collectParams 阶段报错，且
+// 报文带 --params-file 前缀。
+func TestCollectParamsGlobalParamsFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// 基值：只给文件，三个键全部落到 wire params（含带 ASCII 双引号的字符串）。
+	base := write("base.json", `{"path":"FromFile","property":"modulate","value":"\"quoted\"","scene_file":"guard.tscn"}`)
+	op, cmd := leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("params-file", base); err != nil {
+		t.Fatal(err)
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatalf("--params-file payload rejected: %v", err)
+	}
+	if params["path"] != "FromFile" || params["property"] != "modulate" || params["scene_file"] != "guard.tscn" {
+		t.Errorf("file base params = %v", params)
+	}
+	if params["value"] != `"quoted"` {
+		t.Errorf("value = %v, want the quoted JSON string from the file", params["value"])
+	}
+
+	// 优先级：--params 逐键覆盖文件基值，显式 flag 再覆盖两者。
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("params-file", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("params", `{"path":"FromParams"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value", `"FromFlag"`); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["path"] != "FromParams" {
+		t.Errorf("path = %v, want --params to override the file base", params["path"])
+	}
+	if params["value"] != "FromFlag" {
+		t.Errorf("value = %v, want the explicit --value flag to win", params["value"])
+	}
+	if params["property"] != "modulate" {
+		t.Errorf("property = %v, want the file-only key to survive the merge", params["property"])
+	}
+
+	// BOM：PS 5.1 的 Set-Content -Encoding utf8 会写 UTF-8 BOM，必须容忍。
+	bom := write("bom.json", "\xef\xbb\xbf"+`{"path":"FromBomFile","property":"modulate","value":1}`)
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("params-file", bom); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "modulate"); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatalf("BOM-prefixed --params-file rejected: %v", err)
+	}
+	if params["path"] != "FromBomFile" {
+		t.Errorf("BOM-prefixed params = %v", params)
+	}
+
+	// 四种坏输入：文件里的顶层必须是 JSON object。
+	for name, content := range map[string]string{
+		"array.json":  `[1,2]`,
+		"scalar.json": `"just a string"`,
+		"null.json":   `null`,
+		"broken.json": `{not json`,
+	} {
+		op, cmd = leafFor(t, "node", "set-property")
+		if err := cmd.Flags().Set("params-file", write(name, content)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := collectParams(cmd, op); err == nil {
+			t.Errorf("--params-file accepted %s content: %s", name, content)
+		} else if !strings.Contains(err.Error(), "--params-file") {
+			t.Errorf("error for %s lacks the --params-file prefix: %v", name, err)
+		}
+	}
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("params-file", filepath.Join(dir, "missing.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("missing --params-file accepted")
+	} else if !strings.Contains(err.Error(), "--params-file") {
+		t.Errorf("missing-file error lacks the --params-file prefix: %v", err)
+	}
+}
+
+// TestCollectParamsNodeValueFile: node set-property --value-file（需求 R-2）把
+// 文件内容当作 value 的 JSON 基值（任意 JSON 类型），显式 --value 优先；
+// --node-ref 比文件更具体，同时给出时由它覆盖。缺文件/非 JSON 都要干净报错。
+func TestCollectParamsNodeValueFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// object 值：文件里的 {"x":1,"y":2} 成为 value（PS 5.1 下命令行传不了）。
+	valueFile := write("value.json", `{"x":1,"y":2}`)
+	op, cmd := leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("path", "Sprite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "modulate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value-file", valueFile); err != nil {
+		t.Fatal(err)
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj, ok := params["value"].(map[string]any)
+	if !ok || obj["x"] != 1.0 || obj["y"] != 2.0 {
+		t.Errorf("value from file = %v", params["value"])
+	}
+
+	// 带 ASCII 双引号的字符串值原样落地，不被 shell 剥引号影响。
+	quoted := write("quoted.json", `"a\"b"`)
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("path", "Sprite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "name"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value-file", quoted); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["value"] != `a"b` {
+		t.Errorf("quoted value from file = %v, want a\"b", params["value"])
+	}
+
+	// 显式 --value 优先于文件基值。
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("path", "Sprite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "modulate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value-file", valueFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value", `{"x":9}`); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj, ok := params["value"].(map[string]any); !ok || obj["x"] != 9.0 {
+		t.Errorf("explicit --value must win over --value-file, got %v", params["value"])
+	}
+
+	// --node-ref 是更具体的简写：同时给出时覆盖文件基值。
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("path", "Sprite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "target"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value-file", valueFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("node-ref", "../Sprite2D"); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref, ok := params["value"].(map[string]any); !ok || ref["$node"] != "../Sprite2D" {
+		t.Errorf("--node-ref must win over --value-file, got %v", params["value"])
+	}
+
+	// 缺文件 / 非 JSON 文件都必须报错且带 flag 前缀。
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("path", "Sprite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "modulate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value-file", filepath.Join(dir, "missing.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("missing --value-file accepted")
+	} else if !strings.Contains(err.Error(), "--value-file") {
+		t.Errorf("missing-file error lacks the --value-file prefix: %v", err)
+	}
+
+	op, cmd = leafFor(t, "node", "set-property")
+	if err := cmd.Flags().Set("path", "Sprite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("property", "modulate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("value-file", write("raw.txt", `{x:1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("non-JSON --value-file accepted")
+	}
+}
+
+// TestCollectParamsPatchTextFiles: script patch --old-file/--new-file（需求
+// R-4 问题1）文本直读——ASCII 双引号、反斜杠、换行原样保留（不做 JSON 解析），
+// 显式 --old-text/--new-text 优先，且只给文件时必需的 old_text/new_text 检查
+// 必须通过（这正是 PS 5.1 下的可用形态）。
+func TestCollectParamsPatchTextFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// 含 ASCII 双引号与制表符/换行的锚点：逐字符相等，不做 JSON 解析。
+	oldText := "\tif result.has(\"ok\"):\n\t\tprint(\"ok\")\n"
+	oldFile := write("old.txt", oldText)
+	newFile := write("new.txt", "\tif result.has(\"ok\") and result[\"ok\"]:\n\t\tprint(\"ok\")\n")
+
+	op, cmd := leafFor(t, "script", "patch")
+	if err := cmd.Flags().Set("path", "res://a.gd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("old-file", oldFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("new-file", newFile); err != nil {
+		t.Fatal(err)
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		t.Fatalf("--old-file/--new-file must satisfy the required text params: %v", err)
+	}
+	if params["old_text"] != oldText {
+		t.Errorf("old_text = %q, want %q", params["old_text"], oldText)
+	}
+	if params["new_text"] != "\tif result.has(\"ok\") and result[\"ok\"]:\n\t\tprint(\"ok\")\n" {
+		t.Errorf("new_text = %q", params["new_text"])
+	}
+
+	// BOM 剥除：PS 5.1 写文件会带 BOM，留在锚点里永远匹配不上。
+	op, cmd = leafFor(t, "script", "patch")
+	if err := cmd.Flags().Set("path", "res://a.gd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("old-file", write("bom.txt", "\xef\xbb\xbf"+`print("hi")`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("new-text", "pass"); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["old_text"] != `print("hi")` {
+		t.Errorf("BOM-prefixed old_text = %q", params["old_text"])
+	}
+
+	// 显式 flag 优先于文件通道（两侧各自独立）。
+	op, cmd = leafFor(t, "script", "patch")
+	if err := cmd.Flags().Set("path", "res://a.gd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("old-file", oldFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("new-file", newFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("old-text", "explicit old"); err != nil {
+		t.Fatal(err)
+	}
+	params, err = collectParams(cmd, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["old_text"] != "explicit old" {
+		t.Errorf("explicit --old-text must win over --old-file, got %q", params["old_text"])
+	}
+	if params["new_text"] != "\tif result.has(\"ok\") and result[\"ok\"]:\n\t\tprint(\"ok\")\n" {
+		t.Errorf("--new-file must still apply when only --old-text is explicit, got %q", params["new_text"])
+	}
+
+	// 两侧都缺 → 仍然是「缺必需 flag」的干净报错（不因新通道而放行）。
+	op, cmd = leafFor(t, "script", "patch")
+	if err := cmd.Flags().Set("path", "res://a.gd"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("patch without either text channel accepted")
+	}
+
+	// 缺文件 → 带 --old-file 前缀的报错。
+	op, cmd = leafFor(t, "script", "patch")
+	if err := cmd.Flags().Set("path", "res://a.gd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("old-file", filepath.Join(dir, "missing.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("new-text", "pass"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectParams(cmd, op); err == nil {
+		t.Error("missing --old-file accepted")
+	} else if !strings.Contains(err.Error(), "--old-file") {
+		t.Errorf("missing-file error lacks the --old-file prefix: %v", err)
 	}
 }
 

@@ -70,6 +70,10 @@ Plugin command: %s (timeout %s, %s)%s%s
 Every op also accepts:
   --session <id>      pin the call to one connected editor session
   --params '<json>'   base params as a JSON object; explicit flags override colliding keys
+  --params-file <p>   read that JSON object from a UTF-8 file instead (a leading BOM is
+                      tolerated); explicit --params and typed flags still win. Use it for
+                      payloads carrying ASCII double quotes: Windows PowerShell 5.1 strips
+                      those quotes out of an argument before the process sees it.
 Optional flags left at their zero value are omitted from the wire params
 (unless passed via --params).
 
@@ -101,6 +105,9 @@ Examples:
 	}
 	cmd.Flags().String("session", "", "pin the call to one connected editor session")
 	cmd.Flags().String("params", "", "base params as a JSON object; explicit flags override colliding keys")
+	// 共享文件通道（需求 R-4 问题1）：PS 5.1 调原生程序会剥掉参数里的 ASCII
+	// 双引号，含引号的 JSON 载荷只能从文件读。所有 op 命令都注册它。
+	cmd.Flags().String("params-file", "", "read the base params JSON object from this UTF-8 file (a leading BOM is tolerated); explicit --params and typed flags override colliding keys")
 	for _, f := range op.CLIFlags {
 		registerCLIFlag(cmd, f)
 	}
@@ -334,20 +341,41 @@ func boolFlagNames(op ops.OpSpec) []string {
 	return out
 }
 
-// collectParams merges --params (base object) with the typed flags
-// (explicit flags win). Optional flags left at their kind's zero value are
-// omitted from the wire params; required params must be present afterwards.
+// collectParams merges --params-file (lowest base), --params (next) and the
+// typed flags (explicit flags win) into the wire params. Optional flags left
+// at their kind's zero value are omitted from the wire params; required params
+// must be present afterwards.
 // WrapOp routes the collected params through the wrapper command shape.
 func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 	params := map[string]any{}
+	// 全局 --params-file（需求 R-4 问题1）：文件内容必须是 JSON object，作为
+	// 最低优先级的基值。PS 5.1 会剥掉命令行载荷里的 ASCII 双引号，含引号的
+	// 载荷（如 script patch 的 old/new text）只能这样传。
+	if file, _ := cmd.Flags().GetString("params-file"); file != "" {
+		value, err := readJSONFileValue(file, "--params-file")
+		if err != nil {
+			return nil, err
+		}
+		base, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("--params-file must contain a JSON object (the file's top level must be an object)")
+		}
+		params = base
+	}
 	if raw, _ := cmd.Flags().GetString("params"); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		var explicit map[string]any
+		if err := json.Unmarshal([]byte(raw), &explicit); err != nil {
 			return nil, fmt.Errorf("--params is not a valid JSON object: %v", err)
 		}
-		// Unmarshalling "null" zeroes the map to nil; re-initialize it so
-		// the writes below (batch --file, non-zero defaults) never panic.
-		if params == nil {
-			params = map[string]any{}
+		// Unmarshalling "null" yields a nil map; the writes below (batch --file,
+		// non-zero defaults) must never panic, so normalize it away.
+		if explicit == nil {
+			explicit = map[string]any{}
+		}
+		// --params is the caller's own JSON, so it overrides the file base key
+		// by key (file → --params → explicit flags, in that order).
+		for key, value := range explicit {
+			params[key] = value
 		}
 	}
 	if op.Domain == "batch" && op.Name == "execute" {
@@ -382,15 +410,47 @@ func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 		}
 	}
 	if op.Domain == "node" && op.Name == "set-property" {
+		// node set-property 的 --value-file（需求 R-2）：文件内容直接作为 value
+		// 的 JSON 基值（不限于 object——数字/字符串/数组都合法）。PS 5.1 会剥掉
+		// 载荷里的 ASCII 双引号（{"x":1} → {x:1}），含引号的 JSON 只能走文件。
+		if file, _ := cmd.Flags().GetString("value-file"); file != "" {
+			value, err := readJSONFileValue(file, "--value-file")
+			if err != nil {
+				return nil, err
+			}
+			params["value"] = value
+		}
 		// CLI-side shorthand: --node-ref <path> expands to the $node
 		// reference encoding. It is a BASE value — an explicit --value
 		// flag still wins, matching the documented override semantics.
+		// (--node-ref 比 --value-file 更具体，同时给出时由它覆盖。)
 		if flag := cmd.Flags().Lookup("node-ref"); flag != nil && flag.Changed {
 			ref := flag.Value.String()
 			if ref == "" {
 				return nil, fmt.Errorf("--node-ref must not be empty (want a node path like ../Sprite2D)")
 			}
 			params["value"] = map[string]any{"$node": ref}
+		}
+	}
+	if op.Domain == "script" && op.Name == "patch" {
+		// script patch 的 --old-file/--new-file（需求 R-4 问题1）：文本文件直读，
+		// 不做 JSON 解析——引号、反斜杠、换行全部原样保留。PS 5.1 调原生程序会
+		// 剥掉参数里的 ASCII 双引号，含引号的锚点/替换文本走不了命令行。
+		for _, ch := range []struct{ flag, param string }{
+			{"old-file", "old_text"},
+			{"new-file", "new_text"},
+		} {
+			file, _ := cmd.Flags().GetString(ch.flag)
+			if file == "" {
+				continue
+			}
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return nil, fmt.Errorf("--%s: %v", ch.flag, err)
+			}
+			// 文件前缀的 UTF-8 BOM 同 --params-file 处理：PS 5.1 的
+			// Set-Content -Encoding utf8 会写一个，留在锚点里就永远匹配不上。
+			params[ch.param] = stripUTF8BOM(string(data))
 		}
 	}
 	for _, p := range op.Params {
@@ -423,6 +483,24 @@ func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 		params = map[string]any{"op": op.WrapOp, "params": params}
 	}
 	return params, nil
+}
+
+// readJSONFileValue reads one CLI file channel carrying raw JSON (any JSON
+// type: object, array, string, number, boolean). Paths that cannot be read
+// and bytes that are not JSON both fail with the flag name as the prefix, so
+// the caller can tell which channel was wrong. A leading UTF-8 BOM is
+// stripped: PowerShell 5.1's `Set-Content -Encoding utf8` writes one, and the
+// BOM is itself a JSON parse error.
+func readJSONFileValue(path, flag string) (any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", flag, err)
+	}
+	var value any
+	if err := json.Unmarshal([]byte(stripUTF8BOM(string(data))), &value); err != nil {
+		return nil, fmt.Errorf("%s does not contain valid JSON: %v", flag, err)
+	}
+	return value, nil
 }
 
 // paramIncluded decides whether a flag's value goes onto the wire: always

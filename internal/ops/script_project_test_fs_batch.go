@@ -22,6 +22,12 @@ func scriptOps() []OpSpec {
 				ps("new-text", "new_text", true, "", "Replacement text"),
 				pb("replace-all", "replace_all", false, "false", "Replace every occurrence"),
 			},
+			CLIFlags: []CLIFlagSpec{
+				cls("old-file", "", "Read old_text VERBATIM from this UTF-8 file (a leading BOM is stripped, nothing is JSON-parsed); an explicit --old-text wins. The PowerShell 5.1-safe channel for anchors containing ASCII double quotes"),
+				cls("new-file", "", "Read new_text VERBATIM from this UTF-8 file (a leading BOM is stripped, nothing is JSON-parsed); an explicit --new-text wins. Quotes and newlines survive untouched"),
+			},
+			HelpNote: "Windows PowerShell 5.1 strips the ASCII double quotes out of an argument before this process sees it, so an anchor or replacement containing `\"` passed as `--old-text`/`--new-text` (or inside an inline `--params` payload) arrives mangled: the patch then fails with `old_text not found`, or worse, edits the wrong bytes. Use the file channels: `--old-file <path>` / `--new-file <path>` read both sides VERBATIM (no JSON parsing; quotes, backslashes and newlines survive), and `--params-file <json>` carries a whole JSON payload written by an external tool. Explicit text flags still win over their file channel.",
+			DocNote:  "Windows PowerShell 5.1 strips the ASCII double quotes out of an argument before the native process sees it, so an anchor or replacement containing `\"` cannot travel through `--old-text`/`--new-text` (nor through an inline `--params` JSON payload). Use the file channels: `--old-file <path>` / `--new-file <path>` read both sides verbatim (no JSON parsing, quotes and newlines preserved), and `--params-file <json>` carries a whole written-by-a-tool payload. An explicit `--old-text`/`--new-text` still wins when a flag and a file are both given. The response's `diagnostics` describe the file as it now sits on disk; `reload_reason:\"reload_pending\"` together with `reload_pending:true` means the reported reload noise is unconfirmed and the editor's in-memory copy was not refreshed yet, while a genuine parse failure keeps `reload_reason:\"parse_error\"` at error level.",
 		},
 		{
 			Domain: "script", Name: "read", PluginCommand: "read_script",

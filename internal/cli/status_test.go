@@ -475,7 +475,7 @@ func TestStopKeepsRepinnedPortFile(t *testing.T) {
 // editor-attach-and-daemon-discovery §3.1）。
 func TestStatusFailureShowsLiveDaemons(t *testing.T) {
 	dir := stubCacheDir(t)
-	d := startRecordedDaemon(t, dir, "4.2.4")
+	d := startRecordedDaemon(t, dir, "4.2.5")
 
 	dead := listenFree(t)
 	deadPort := dead.Addr().(*net.TCPAddr).Port
@@ -528,7 +528,7 @@ func TestStatusFailureShowsLiveDaemons(t *testing.T) {
 // 活记录与 last-daemon.json 保留。
 func TestStatusPruneDeletesDeadRecords(t *testing.T) {
 	dir := stubCacheDir(t)
-	d := startRecordedDaemon(t, dir, "4.2.4")
+	d := startRecordedDaemon(t, dir, "4.2.5")
 
 	dead := listenFree(t)
 	deadPort := dead.Addr().(*net.TCPAddr).Port
@@ -564,7 +564,7 @@ func TestStatusPruneDeletesDeadRecords(t *testing.T) {
 // launch --attach 建议（需求 §3.2 的验收形状）。
 func TestStatusProjectDetectsUnconnectedEditor(t *testing.T) {
 	dir := stubCacheDir(t)
-	d := startRecordedDaemon(t, dir, "4.2.4")
+	d := startRecordedDaemon(t, dir, "4.2.5")
 
 	restore := godot.SetEditorScannerForTest(func() ([]godot.EditorProcess, error) {
 		return []godot.EditorProcess{
@@ -616,7 +616,7 @@ func TestStatusProjectDetectsUnconnectedEditor(t *testing.T) {
 // 必须合并展示并给可执行 hint（需求 handshake-rejection-visibility §4.1）。
 func TestStatusMergesRecentRejections(t *testing.T) {
 	dir := stubCacheDir(t)
-	d := startRecordedDaemon(t, dir, "4.2.4")
+	d := startRecordedDaemon(t, dir, "4.2.5")
 
 	// 一个 minor 不匹配的插件被拒握手。
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
@@ -642,7 +642,7 @@ func TestStatusMergesRecentRejections(t *testing.T) {
 		t.Fatalf("recent_rejections = %v", out["recent_rejections"])
 	}
 	entry := rj[0].(map[string]any)
-	if entry["reason"] != "plugin_version_mismatch" || entry["peer_version"] != "4.9.0" || entry["expected"] != "4.2.4" {
+	if entry["reason"] != "plugin_version_mismatch" || entry["peer_version"] != "4.9.0" || entry["expected"] != "4.2.5" {
 		t.Errorf("rejection entry = %v", entry)
 	}
 	hint, _ := out["hint"].(string)

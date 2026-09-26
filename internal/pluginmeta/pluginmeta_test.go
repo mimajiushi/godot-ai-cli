@@ -11,8 +11,8 @@ import (
 // connecting plugin — pin the value so a vendored-plugin bump without a
 // server-side follow-up fails loudly.
 func TestPluginVersion(t *testing.T) {
-	if got := pluginmeta.PluginVersion(); got != "4.2.4" {
-		t.Fatalf("PluginVersion() = %q, want %q", got, "4.2.4")
+	if got := pluginmeta.PluginVersion(); got != "4.2.5" {
+		t.Fatalf("PluginVersion() = %q, want %q", got, "4.2.5")
 	}
 }
 

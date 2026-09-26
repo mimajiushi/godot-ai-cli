@@ -47,6 +47,12 @@ const REPLACE := "REPLACE"
 const STOP := "STOP"
 
 const STATUS_PATH := "/godot-ai/status"
+## godot-ai-cli fork patch: 探针自阻自报端点（daemon 侧 Bearer 认证，
+## 与 STATUS_PATH 同一 capability）。
+const PROBE_REJECTION_PATH := "/godot-ai/probe-rejection"
+## 自报是 fire-and-forget 的旁路通道，超时要远小于探针主链路，绝不拖累
+## BLOCKED 结果的返回。
+const PROBE_REJECTION_TIMEOUT_MS := 1500
 ## Normal starts and recovery need the same settling window as post-update
 ## adoption. A healthy authenticated status response can take over a second.
 const DEFAULT_PROBE_TIMEOUT_MS := 3000
@@ -852,6 +858,11 @@ func _effect_probe(payload: Dictionary) -> Dictionary:
 		# 同版本仅 WS 端口错配时不加——那与版本无关。
 		if version != expected_version:
 			incompatible["message"] += " To align versions: %s" % McpVersionCompat.incompatible_align_hint()
+			# godot-ai-cli fork patch（需求 handshake-rejection-live-reachability）：
+			# 探针自阻的插件永远不会发起 WS 握手，daemon 的握手拒绝环看不到
+			# 这个现场——主动向 daemon 自报一次，让 CLI 的 recent_rejections /
+			# in_memory_plugin 能回答「编辑器活着、daemon 活着、sessions 空」。
+			_report_probe_version_mismatch(port, capability, live, expected_version)
 		return incompatible
 	var occupied: bool
 	if OS.get_name() == "Windows":
@@ -1618,6 +1629,71 @@ static func _probe_with_capability(port: int, capability: Dictionary, timeout_ms
 		return result
 	result.merge(project_status_payload(parsed), true)
 	return result
+
+
+## godot-ai-cli fork patch（需求 handshake-rejection-live-reachability）：
+## 探针版本错配自报的去重记忆（port → 指纹）。BLOCKED 稳态重查每 60s
+## 就会重新走到自阻分支，同一 daemon 实例+版本只报一次，避免把 daemon
+## 侧 8 条环形缓冲冲刷成同一条的副本。
+static var _probe_rejection_reported: Dictionary = {}
+
+
+static func _probe_rejection_fingerprint(live: Dictionary) -> String:
+	return "%s|%s" % [str(live.get("instance_id", "")), str(live.get("version", ""))]
+
+
+## 认领一次自报额度：同端口同指纹已报过 → false（跳过）；认领即登记
+## （发送失败不重试——daemon 不可达时自报本无意义，可达的旧 daemon 没有
+## 该端点，重试也只是刷屏；下一次编辑器重启或 daemon 换实例会换新指纹）。
+static func _claim_probe_rejection_report(port: int, fingerprint: String) -> bool:
+	if fingerprint == "|":
+		return false # 对端身份不明（空 instance_id+空 version），没有可记录的现场
+	if str(_probe_rejection_reported.get(port, "")) == fingerprint:
+		return false
+	_probe_rejection_reported[port] = fingerprint
+	return true
+
+
+## godot-ai-cli fork patch: 探针判定版本不兼容后向 daemon 自报一次
+## （POST /godot-ai/probe-rejection，Bearer 复用 http capability）。
+## 没有这条自报，「探针自阻」这一类拒绝在 daemon 的 recent_rejections
+## 里永远为空。fire-and-forget：任何失败都静默忽略，不影响自阻结果。
+static func _report_probe_version_mismatch(
+	port: int, capability: Dictionary, live: Dictionary, plugin_version: String
+) -> void:
+	var http_capability := str(capability.get("http", ""))
+	if http_capability.is_empty():
+		return
+	if not _claim_probe_rejection_report(port, _probe_rejection_fingerprint(live)):
+		return
+	var body := JSON.stringify({
+		"plugin_version": plugin_version,
+		"editor_pid": OS.get_process_id(),
+		"project_path": ProjectSettings.globalize_path("res://"),
+		"godot_version": str(Engine.get_version_info().get("string", "")),
+	})
+	var client := HTTPClient.new()
+	if client.connect_to_host("127.0.0.1", port) != OK:
+		return
+	var deadline := Time.get_ticks_msec() + PROBE_REJECTION_TIMEOUT_MS
+	while client.get_status() in [HTTPClient.STATUS_RESOLVING, HTTPClient.STATUS_CONNECTING]:
+		client.poll()
+		if Time.get_ticks_msec() >= deadline:
+			return
+		OS.delay_msec(10)
+	if client.get_status() != HTTPClient.STATUS_CONNECTED:
+		return
+	if client.request(HTTPClient.METHOD_POST, PROBE_REJECTION_PATH, [
+		"Content-Type: application/json",
+		"Authorization: Bearer %s" % http_capability,
+	], body) != OK:
+		return
+	## 响应内容无所谓（daemon 侧已同步落环），但要把请求发完——写完即收。
+	while client.get_status() == HTTPClient.STATUS_REQUESTING:
+		client.poll()
+		if Time.get_ticks_msec() >= deadline:
+			return
+		OS.delay_msec(10)
 
 
 static func project_status_payload(parsed: Dictionary) -> Dictionary:

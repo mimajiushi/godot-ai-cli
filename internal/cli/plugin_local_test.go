@@ -200,10 +200,10 @@ func TestPluginStatusRejectsNonProject(t *testing.T) {
 // warning + next_steps（需求 handshake-rejection-visibility §4.2）。
 func TestPluginInstallWarnsOnInMemoryMismatch(t *testing.T) {
 	dir := stubCacheDir(t)
-	d := startRecordedDaemon(t, dir, "4.2.4")
+	d := startRecordedDaemon(t, dir, "4.2.5")
 	projectDir := writeProjectFile(t)
 
-	// 该工程有一个被拒的握手：peer 插件 4.1.0（旧 minor），磁盘将装 4.2.4。
+	// 该工程有一个被拒的握手：peer 插件 4.1.0（旧 minor），磁盘将装 4.2.5。
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
 	mockplugin.DialRejected(t, addr, d.Bridge().WSCapability, map[string]any{
 		"session_id": "pi@0001", "plugin_version": "4.1.0", "editor_pid": 5020,
@@ -235,7 +235,7 @@ func TestPluginInstallWarnsOnInMemoryMismatch(t *testing.T) {
 // 时，install 输出保持原形状（无 warning 键）。
 func TestPluginInstallCleanDaemonNoWarning(t *testing.T) {
 	dir := stubCacheDir(t)
-	d := startRecordedDaemon(t, dir, "4.2.4")
+	d := startRecordedDaemon(t, dir, "4.2.5")
 	projectDir := writeProjectFile(t)
 
 	out, err := runPluginCmd(t, "install", "--project", projectDir,

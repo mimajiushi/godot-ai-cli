@@ -415,6 +415,70 @@ func (s *Server) RecentRejections() []HandshakeRejection {
 	return append([]HandshakeRejection(nil), s.rejections...)
 }
 
+// probeRejectionReason 是「插件在 HTTP 探针阶段自阻后主动自报」的拒绝
+// 原因。v4 插件探针判定 major/minor 不兼容就不发起 WS 握手，握手路径的
+// recordRejection 永远看不到这种现场（需求
+// handshake-rejection-live-reachability）——自报是它唯一进环的通道。
+const probeRejectionReason = "probe_version_mismatch"
+
+// RecordProbeRejection 记录一条探针阶段自阻的版本错配（经 daemon 的
+// POST /godot-ai/probe-rejection 自报）。与最新一条完全同形
+// （reason+peer+pid+project）时跳过：BLOCKED 重查期间插件会反复走到
+// 自阻分支，不能把 8 条环形缓冲冲刷成同一条的副本。
+func (s *Server) RecordProbeRejection(peerVersion, projectPath, godotVersion string, editorPID int) {
+	s.rejectMu.Lock()
+	if len(s.rejections) > 0 {
+		newest := s.rejections[0]
+		if newest.Reason == probeRejectionReason &&
+			newest.PeerVersion == peerVersion &&
+			newest.EditorPID == editorPID &&
+			newest.ProjectPath == projectPath {
+			s.rejectMu.Unlock()
+			return
+		}
+	}
+	s.rejectMu.Unlock()
+	s.recordRejection(HandshakeRejection{
+		Reason:       probeRejectionReason,
+		PeerVersion:  peerVersion,
+		Expected:     s.version,
+		EditorPID:    editorPID,
+		ProjectPath:  projectPath,
+		GodotVersion: godotVersion,
+	})
+}
+
+// inMemoryPluginFromRejections 从拒绝记录里还原「编辑器内存里跑的是什么
+// 插件版本」清单（PLUGIN_DISCONNECTED 的 data.in_memory_plugin，需求
+// handshake-rejection-live-reachability §4 第 2 点）：sessions 为空时
+// 拒绝环是唯一能证明「有编辑器活着但版本不对」的证据。source 区分
+// rejected_handshake（WS 握手被拒）与 probe_rejection（探针自阻自报）。
+func inMemoryPluginFromRejections(recs []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, m := range recs {
+		pv, _ := m["peer_version"].(string)
+		if pv == "" {
+			continue
+		}
+		source := "rejected_handshake"
+		if m["reason"] == probeRejectionReason {
+			source = "probe_rejection"
+		}
+		entry := map[string]any{"source": source, "version": pv}
+		if pid, ok := m["editor_pid"]; ok {
+			entry["editor_pid"] = pid
+		}
+		if pp, _ := m["project_path"].(string); pp != "" {
+			entry["project_path"] = pp
+		}
+		if at, _ := m["at"].(string); at != "" {
+			entry["at"] = at
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // rejectionMaps 把记录转成 JSON-ready 的 map 切片（daemon 端点直接用），
 // At 序列化为 RFC3339。
 func (s *Server) RejectionMaps() []map[string]any {
@@ -918,6 +982,12 @@ func (s *Server) SendCommand(ctx context.Context, sessionID, command string, par
 			if rj := s.RejectionMaps(); len(rj) > 0 {
 				data["recent_rejections"] = rj
 				data["hint"] = "有编辑器尝试连接但被拒绝：见 recent_rejections；磁盘插件版本已对齐时，修法通常是【完全退出并重启编辑器】（reload-plugin 不会替换已加载的插件代码）"
+				// in_memory_plugin：拒绝环是唯一证据时也能直接回答「编辑器
+				// 内存里是什么版本」（需求 handshake-rejection-live-reachability
+				// §4——status/plugin install 已有此字段，ops 错误路径补齐）。
+				if imp := inMemoryPluginFromRejections(rj); len(imp) > 0 {
+					data["in_memory_plugin"] = imp
+				}
 			}
 			return nil, &CommandError{
 				Code:    "PLUGIN_DISCONNECTED",

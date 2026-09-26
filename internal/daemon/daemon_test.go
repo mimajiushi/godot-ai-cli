@@ -16,7 +16,7 @@ import (
 )
 
 // testVersion mirrors the vendored plugin version the daemon advertises.
-const testVersion = "4.2.4"
+const testVersion = "4.2.5"
 
 // startDaemon boots a daemon on ephemeral loopback ports.
 func startDaemon(t *testing.T) *daemon.Daemon {
@@ -66,6 +66,79 @@ func postJSON(t *testing.T, url string, body any) (int, map[string]any) {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode, decodeBody(t, resp)
+}
+
+// postJSONAuthed performs a POST with a JSON body and an optional Bearer
+// token, decoding the JSON response.
+func postJSONAuthed(t *testing.T, url, token string, body any) (int, map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, decodeBody(t, resp)
+}
+
+// TestProbeRejectionEndpoint：POST /godot-ai/probe-rejection 是插件在 HTTP
+// 探针阶段自阻后的自报通道（需求 handshake-rejection-live-reachability —
+// 探针自阻的插件永不发起 WS 握手，没有它拒绝环在 live 里拿不到现场）。
+// Bearer 认证与 /godot-ai/status 同级；daemon 复判版本，只记录真实的
+// major.minor 错配；记录经 /godot-ai/cli/rejections 可见。
+func TestProbeRejectionEndpoint(t *testing.T) {
+	d := startDaemon(t)
+	url := baseURL(d) + "/godot-ai/probe-rejection"
+	caps := d.Capabilities()
+
+	// 无/错 bearer → 401（与 status 探针同一信任边界）。
+	if code, _ := postJSONAuthed(t, url, "", map[string]any{"plugin_version": "4.2.4"}); code != http.StatusUnauthorized {
+		t.Errorf("no bearer: code = %d, want 401", code)
+	}
+	if code, _ := postJSONAuthed(t, url, "wrong-token", map[string]any{"plugin_version": "4.2.4"}); code != http.StatusUnauthorized {
+		t.Errorf("wrong bearer: code = %d, want 401", code)
+	}
+	// 畸形版本 → 400。
+	if code, _ := postJSONAuthed(t, url, caps.HTTP, map[string]any{"plugin_version": "garbage"}); code != http.StatusBadRequest {
+		t.Errorf("malformed version: code = %d, want 400", code)
+	}
+	// 主从一致（含 patch 漂移）→ 不记录。
+	code, body := postJSONAuthed(t, url, caps.HTTP, map[string]any{"plugin_version": "4.2.99"})
+	if code != http.StatusOK || body["recorded"] != false || body["compatible"] != true {
+		t.Errorf("compatible peer: code = %d body = %v", code, body)
+	}
+
+	// minor 错配 → 记录，且经 cli 端点可见（带全身份字段）。
+	code, body = postJSONAuthed(t, url, caps.HTTP, map[string]any{
+		"plugin_version": "4.1.0", "editor_pid": 5020,
+		"project_path": "D:/games/rpg", "godot_version": "4.7.2.stable.official",
+	})
+	if code != http.StatusOK || body["recorded"] != true {
+		t.Fatalf("mismatched peer: code = %d body = %v", code, body)
+	}
+	_, listed := getJSON(t, baseURL(d)+"/godot-ai/cli/rejections")
+	rejections := listed["rejections"].([]any)
+	if len(rejections) != 1 {
+		t.Fatalf("rejections = %v, want exactly the probe report (compatible posts must not record)", rejections)
+	}
+	entry := rejections[0].(map[string]any)
+	if entry["reason"] != "probe_version_mismatch" || entry["peer_version"] != "4.1.0" || entry["expected"] != testVersion {
+		t.Errorf("rejection entry = %v", entry)
+	}
+	if entry["editor_pid"] != float64(5020) || entry["project_path"] != "D:/games/rpg" {
+		t.Errorf("rejection identity = %v", entry)
+	}
 }
 
 // decodeBody reads and JSON-decodes a response body.
@@ -263,7 +336,7 @@ func TestSessionsExposePluginStale(t *testing.T) {
 	d := startDaemon(t) // daemon version testVersion
 	addr := fmt.Sprintf("127.0.0.1:%d", d.WSPort())
 	aligned := mockplugin.Dial(t, addr, d.Bridge().WSCapability, nil) // default plugin_version == testVersion
-	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.2.5"})
+	stale := mockplugin.Dial(t, addr, d.Bridge().WSCapability, map[string]any{"plugin_version": "4.2.4"})
 
 	code, body := getJSON(t, baseURL(d)+"/godot-ai/cli/sessions")
 	if code != http.StatusOK {
@@ -284,8 +357,8 @@ func TestSessionsExposePluginStale(t *testing.T) {
 	}
 
 	st := byID[stale.SessionID]
-	if st["plugin_version"] != "4.2.5" {
-		t.Errorf("stale session plugin_version = %v, want 4.2.5", st["plugin_version"])
+	if st["plugin_version"] != "4.2.4" {
+		t.Errorf("stale session plugin_version = %v, want 4.2.4", st["plugin_version"])
 	}
 	if st["plugin_stale"] != true {
 		t.Errorf("stale session plugin_stale = %v, want true", st["plugin_stale"])

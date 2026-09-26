@@ -91,8 +91,15 @@ func inMemoryPluginVersions(httpPort int, projectDir string) []map[string]any {
 		pp, _ := m["project_path"].(string)
 		pv, _ := m["peer_version"].(string)
 		if pv != "" && sameProjectPath(pp, projectDir) {
+			// probe_version_mismatch 是插件在 HTTP 探针阶段自阻后的主动
+			// 自报（从未发起 WS 握手），source 与握手被拒区分开（需求
+			// handshake-rejection-live-reachability）。
+			source := "rejected_handshake"
+			if m["reason"] == "probe_version_mismatch" {
+				source = "probe_rejection"
+			}
 			out = append(out, map[string]any{
-				"source": "rejected_handshake", "version": pv,
+				"source": source, "version": pv,
 				"editor_pid": m["editor_pid"], "at": m["at"],
 			})
 		}

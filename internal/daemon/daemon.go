@@ -113,6 +113,7 @@ func Start(ctx context.Context, cfg Config) (*Daemon, error) {
 	d := &Daemon{cfg: cfg, bridge: b, caps: caps, cancel: cancel, done: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /godot-ai/status", d.handleStatus)
+	mux.HandleFunc("POST /godot-ai/probe-rejection", d.handleProbeRejection)
 	mux.HandleFunc("GET /godot-ai/cli/health", d.handleHealth)
 	mux.HandleFunc("GET /godot-ai/cli/sessions", d.handleSessions)
 	mux.HandleFunc("GET /godot-ai/cli/rejections", d.handleRejections)
@@ -306,6 +307,59 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 // hmacEqualString 常量时间比较两个 token（capability 比对不能用 ==）。
 func hmacEqualString(a, b string) bool {
 	return hmac.Equal([]byte(a), []byte(b))
+}
+
+// probeRejectionRequest 是 POST /godot-ai/probe-rejection 的请求体：插件在
+// HTTP 探针阶段判定 major/minor 不兼容后主动自报（需求
+// handshake-rejection-live-reachability——探针自阻的插件永远不会发起 WS
+// 握手，daemon 只能靠这条通道见到「编辑器活着但版本不对」的现场）。
+type probeRejectionRequest struct {
+	PluginVersion string `json:"plugin_version"`
+	EditorPID     int    `json:"editor_pid"`
+	ProjectPath   string `json:"project_path"`
+	GodotVersion  string `json:"godot_version"`
+}
+
+// handleProbeRejection 接收插件的探针自阻自报并写进 bridge 的拒绝环
+// （reason=probe_version_mismatch）。Bearer 认证与 /godot-ai/status 同级
+// （插件本就持有 http capability）；daemon 侧按握手门禁的同一套语义复判
+// 版本——主从一致（含 patch 漂移）或 daemon 自报不出版本时不记录，避免
+// 把噪音/旧插件的误判当现场。
+func (d *Daemon) handleProbeRejection(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == r.Header.Get("Authorization") || !hmacEqualString(token, d.caps.HTTP) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": "capability required",
+			"hint":  "read the capability record for this port and retry with Authorization: Bearer <http>",
+		})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	var req probeRejectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "body must be a JSON object"})
+		return
+	}
+	pv, err := pluginmeta.ParseSemver(req.PluginVersion)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "plugin_version must be a major.minor.patch version",
+		})
+		return
+	}
+	sv, serr := pluginmeta.ParseSemver(d.cfg.Version)
+	if serr != nil {
+		// 与 checkPluginVersion 的纵深防御语义一致：报不出自己版本的
+		// daemon（测试/dev 构建）不裁决，不记录。
+		writeJSON(w, http.StatusOK, map[string]any{"recorded": false})
+		return
+	}
+	if pluginmeta.Compatible(pv, sv) {
+		writeJSON(w, http.StatusOK, map[string]any{"recorded": false, "compatible": true})
+		return
+	}
+	d.bridge.RecordProbeRejection(req.PluginVersion, req.ProjectPath, req.GodotVersion, req.EditorPID)
+	writeJSON(w, http.StatusOK, map[string]any{"recorded": true})
 }
 
 // handleHealth is the CLI liveness probe. v4 起它是 CLI 探活的主通道

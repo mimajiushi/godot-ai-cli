@@ -156,3 +156,67 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return raw
 }
+
+// TestRecordProbeRejection：探针自阻自报（插件在 HTTP 探针阶段判定版本
+// 不兼容后 POST /godot-ai/probe-rejection）必须进同一个拒绝环，reason
+// 为 probe_version_mismatch 并带全对端身份；同形记录（同 reason+peer+
+// pid+project）连发只留一条——BLOCKED 稳态重查每 60s 一次，不去重会把
+// 8 条环形缓冲冲刷成同一现场的副本（需求
+// handshake-rejection-live-reachability）。
+func TestRecordProbeRejection(t *testing.T) {
+	s := startServer(t)
+
+	s.RecordProbeRejection("4.2.4", "D:/games/rpg", "4.7.2.stable.official", 5020)
+	// 同形连发：去重。
+	s.RecordProbeRejection("4.2.4", "D:/games/rpg", "4.7.2.stable.official", 5020)
+	// 另一台编辑器（不同 pid）：必须另记。
+	s.RecordProbeRejection("4.2.4", "D:/games/rpg", "4.7.2.stable.official", 5021)
+	// 另一条拒绝夹在中间后，同指纹再报也要记（不是全局去重）。
+	mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
+		"session_id": "mix@0001", "plugin_version": "4.9.0"})
+	s.RecordProbeRejection("4.2.4", "D:/games/rpg", "4.7.2.stable.official", 5020)
+
+	recs := s.RecentRejections()
+	if len(recs) != 4 {
+		t.Fatalf("rejections = %d, want 4 (dedup + interleaved): %+v", len(recs), recs)
+	}
+	newest := recs[0]
+	if newest.Reason != "probe_version_mismatch" || newest.PeerVersion != "4.2.4" || newest.Expected != testVersion {
+		t.Errorf("newest probe rejection = %+v", newest)
+	}
+	if newest.EditorPID != 5020 || newest.ProjectPath != "D:/games/rpg" || newest.GodotVersion != "4.7.2.stable.official" {
+		t.Errorf("probe rejection identity = %+v", newest)
+	}
+	if recs[1].Reason != "plugin_version_mismatch" {
+		t.Errorf("recs[1] = %+v, want the interleaved handshake rejection", recs[1])
+	}
+}
+
+// TestNoActiveSessionCarriesInMemoryPlugin：拒绝环里带 peer_version 时，
+// PLUGIN_DISCONNECTED 的 data 还要透出 in_memory_plugin（source 区分
+// rejected_handshake / probe_rejection）——「编辑器活着、daemon 活着、
+// sessions 空」在 ops 路径一句话自解释（需求 §4 第 2 点）。
+func TestNoActiveSessionCarriesInMemoryPlugin(t *testing.T) {
+	s := startServer(t)
+
+	mockplugin.DialRejected(t, s.Addr(), s.WSCapability, map[string]any{
+		"session_id": "hs@0001", "plugin_version": "4.1.0", "editor_pid": 5020,
+		"project_path": "D:/games/rpg"})
+	s.RecordProbeRejection("4.2.4", "D:/games/rpg", "", 5021)
+
+	_, cmdErr := s.SendCommand(t.Context(), "", "editor_state", map[string]any{}, 0)
+	if cmdErr == nil || cmdErr.Code != "PLUGIN_DISCONNECTED" {
+		t.Fatalf("err = %v", cmdErr)
+	}
+	imp, present := cmdErr.Data["in_memory_plugin"].([]map[string]any)
+	if !present || len(imp) != 2 {
+		t.Fatalf("in_memory_plugin = %v", cmdErr.Data["in_memory_plugin"])
+	}
+	// 新→旧：probe 自报在前。
+	if imp[0]["source"] != "probe_rejection" || imp[0]["version"] != "4.2.4" || imp[0]["project_path"] != "D:/games/rpg" {
+		t.Errorf("in_memory_plugin[0] = %v", imp[0])
+	}
+	if imp[1]["source"] != "rejected_handshake" || imp[1]["version"] != "4.1.0" {
+		t.Errorf("in_memory_plugin[1] = %v", imp[1])
+	}
+}

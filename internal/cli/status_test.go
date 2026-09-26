@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -566,10 +567,21 @@ func TestStatusProjectDetectsUnconnectedEditor(t *testing.T) {
 	dir := stubCacheDir(t)
 	d := startRecordedDaemon(t, dir, "4.2.5")
 
+	// 夹具路径必须在本平台是绝对路径：beta.27 起 status --project 会做
+	// filepath.Abs，unix 上 Windows 风格的 D:\... 会被拼上 cwd 而永不匹配。
+	projArg := `D:\games\rpg`
+	projScan := "D:/games/rpg"
+	otherScan := "D:/other/demo" // 别的工程：不得误报
+	if runtime.GOOS != "windows" {
+		projArg = "/tmp/games/rpg"
+		projScan = projArg
+		otherScan = "/tmp/other/demo"
+	}
+
 	restore := godot.SetEditorScannerForTest(func() ([]godot.EditorProcess, error) {
 		return []godot.EditorProcess{
-			{PID: 5020, Project: "D:/games/rpg", GameRunning: &godot.EditorGameProcess{PID: 38004, Scene: "res://test.tscn", Editor: 5020}},
-			{PID: 25548, Project: "D:/other/demo"}, // 别的工程：不得误报
+			{PID: 5020, Project: projScan, GameRunning: &godot.EditorGameProcess{PID: 38004, Scene: "res://test.tscn", Editor: 5020}},
+			{PID: 25548, Project: otherScan},
 		}, nil
 	})
 	defer restore()
@@ -578,7 +590,7 @@ func TestStatusProjectDetectsUnconnectedEditor(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"status", "--project", "D:\\games\\rpg", "--http-port", strconv.Itoa(d.HTTPPort())})
+	cmd.SetArgs([]string{"status", "--project", projArg, "--http-port", strconv.Itoa(d.HTTPPort())})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("status --project with an unconnected editor must fail")
 	}
@@ -700,16 +712,19 @@ func TestStatusProjectRelativePathDetectsUnconnectedEditor(t *testing.T) {
 	d := startRecordedDaemon(t, dir, "4.2.5")
 
 	// 在临时工程目录里跑，--project 传相对路径 "."；扫描器返回的是绝对路径。
+	// 注意 macOS 的 /var 是指向 /private/var 的符号链接：t.TempDir 返回逻辑
+	// 路径而 getwd 返回物理路径——扫描器侧必须用 os.Getwd 的物理路径，否则
+	// Abs(".") 与扫描结果在 macOS 上永不匹配。
 	projectDir := t.TempDir()
-	absProject, err := filepath.Abs(projectDir)
-	if err != nil {
-		t.Fatalf("filepath.Abs: %v", err)
-	}
 	t.Chdir(projectDir)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
 
 	restore := godot.SetEditorScannerForTest(func() ([]godot.EditorProcess, error) {
 		return []godot.EditorProcess{
-			{PID: 5020, Project: absProject},
+			{PID: 5020, Project: wd},
 		}, nil
 	})
 	defer restore()

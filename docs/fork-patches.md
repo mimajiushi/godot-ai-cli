@@ -911,3 +911,61 @@ whose injected debugger root was freed silently fell through to the LIVE
 editor UI and promoted real errors into test-scoped state. The tracker now
 remembers whether a root was ever injected (`_debugger_errors_root_set`) and
 treats an injected-but-invalid root as "scan nothing".
+
+## 21. Inline materials, screenshot coordinates and update fallbacks (v0.2.0-beta.1)
+
+`plugin.cfg` 4.2.5 → **4.3.0** (minor). The 2026-09-26 shoot-2d submission
+(R-1…R-6) landed as one batch; the plugin-side fork patches are:
+
+- **Inline shader materials** (`handlers/material_handler.gd`,
+  `handlers/resource_handler.gd`, `plugin.gd`, RS-046/047/048):
+  `material apply-to-node` reads `shader_path` for `type=shader` (a missing
+  parameter is `MISSING_REQUIRED_PARAM` with the same wording constant as
+  `material create`, instead of silently attaching a `ShaderMaterial` whose
+  shader is null), binds the shader BEFORE applying `--props` so
+  `shader_parameter/*` and `resource_local_to_scene` resolve through
+  `get_property_list()`, and defaults to an inline (never saved to disk)
+  material; `material assign --from-node-path` shares the SAME instance with a
+  second node (no duplicate; mutually exclusive with `--resource-path`);
+  `material set-shader-param` / `material get` accept `--node-path` (an inline
+  material has no `resource_path`), with `get` returning the full
+  `shader_parameter_values` dict; and the new `resource_set_property` op
+  (registered in `plugin.gd`) writes a field on the resource already sitting in
+  a node slot, reporting `old_value`/`new_value`.
+- **`resource create` snapshot re-query** (`handlers/resource_handler.gd`,
+  RS-056): `_apply_resource_properties` re-reads `get_property_list()` once
+  when a key is missing from the entry snapshot — applying the shader first is
+  what puts `shader_parameter/*` there — and only then falls through to the
+  original `PROPERTY_NOT_ON_CLASS` path. The error contract and its
+  `valid_properties` list are unchanged; without the re-query the same call
+  failed 5/5 while `valid_properties` listed the very key it rejected.
+- **Reload diagnostic grading** (`handlers/script_handler.gd`, RS-050):
+  editor-async reload jitter is no longer reported as `parse_error`; it is
+  downgraded to `level:"info"` + `reload_jitter:true` with
+  `reload_pending:true` / `reload_reason:"reload_pending"`, while a CONFIRMED
+  parse failure keeps the error level and `parse_error`. The classification is
+  a retestable predicate (`_gdscript_parse_failure_confirmed`), and the log
+  capture path was split into a static method so the suite can substitute it.
+- **`scene open --force-reload`** (`handlers/scene_handler.gd`, RS-051): the
+  current scene goes through `EditorInterface.reload_scene_from_path()` (a
+  hand-edited .tscn is really re-read on the first call, with no
+  `filesystem scan` detour), and the two loading channels became injectable
+  seams (`_editor_open_scene` / `_editor_reload_scene`); when the target is not
+  the current scene the reply carries a `hint` naming `filesystem scan` and the
+  retry instead of a silent `reloaded_from_disk:false`.
+- **Screenshot coordinate metadata + node rects**
+  (`handlers/editor_handler.gd`, `runtime/game_helper.gd`,
+  `debugger/mcp_debugger_plugin.gd`, RS-052): screenshot replies carry
+  `canvas_size`/`canvas_scale`/`note` (the game source computes the real window
+  ratio inside the game process and sends it over the 9th debugger field;
+  editor sources have no window stretch and truthfully report `[1,1]`), and the
+  new `game node-screen-rect` read-only game command reports
+  `canvas_rect`/`image_rect`/`scale` through a capability dispatch —
+  `rect_kind:"bounds"` when the node implements `get_rect` (Control /
+  Sprite2D), `origin_only` (transform origin + zero size) otherwise — never a
+  fabricated rectangle and never a SCRIPT ERROR. One limit of the new update
+  fallback channels is registered in `references/troubleshooting.md` rather
+  than papered over: a GitHub secondary rate limit (403 + `Retry-After`, no
+  `X-RateLimit-Remaining: 0` header) still reports `UPDATE_CHECK_FAILED`,
+  `--tag` only installs a NEWER release (no rollback), and `--zip` verifies the
+  file name + SHA256 but not the archive's OS/arch.

@@ -319,13 +319,22 @@ func _register_written_file(path: String) -> void:
 ## refreshed itself. The question is what was loaded before the write, so it
 ## is answered first; the editor's own pass then meets the same bytes.
 ##
-## Skipped when validation failed: the diagnostics capture above has already
-## reloaded the shared GDScriptCache entry with the broken source, so there is
-## no good code to push; `reload_reason: parse_error` tells the caller the
-## loaded code did NOT change to something runnable.
+## `parse_error` is reserved for a CONFIRMED parse failure (see
+## `_gdscript_parse_failure_confirmed`): error-level diagnostics on their own
+## can be editor reload jitter (R-4 问题2). Unconfirmed noise instead reports
+## `reloaded: false` + `reload_pending: true` + `reload_reason: "reload_pending"`
+## with the noise entries downgraded to `level: "info"`, so a caller never
+## "fixes" a file that is actually correct.
 static func _refresh_loaded_gdscript(data: Dictionary, path: String, content: String) -> void:
 	data["reloaded"] = false
 	if _script_has_error_diagnostics(data):
+		if not _gdscript_parse_failure_confirmed(path, content, data):
+			# 诊断里的 error 只是编辑器异步重载的抖动：写入本身解析得动。
+			# 降级为 info 并标明重载尚未落定，别让使用者回头改一个正确的文件。
+			_downgrade_gdscript_diagnostics(data)
+			data["reload_pending"] = true
+			data["reload_reason"] = "reload_pending"
+			return
 		data["reload_reason"] = "parse_error"
 		return
 	if not ResourceLoader.has_cached(path):
@@ -349,6 +358,40 @@ static func _refresh_loaded_gdscript(data: Dictionary, path: String, content: St
 	data["reloaded"] = true
 
 
+## 复核「这是真解析失败吗」（需求 R-4 问题2）。
+##
+## 现场回放：patch 成功、随后 `--check-only` / `--doctool` / `script find-symbols`
+## 三项独立验证全过，回包却带着一条 fallback_line 诊断
+## （"GDScript reload failed with error code 43."，details.code =
+## gdscript_reload_failed）+ `reload_reason: "parse_error"`。那条诊断的错误码来自
+## `_validate_gdscript_source` 的临时 GDScript + reload()：编辑器异步重载
+## （GDScriptCache 里同一脚本、全局类表尚未落定）会让它报出假错误码，而引擎自己
+## 加载同一份字节是干净的。所以判据取两路互相印证：
+##   - 引擎已捕获到真实解析文本（diagnostics_detail == "log_capture"）→ 成立；
+##   - 自身校验通过 → 不成立（诊断只是抖动）；
+##   - 自身校验失败 → 再让引擎加载一次落盘的字节佐证，仍无解析诊断则不成立。
+## 真解析失败在 4.7 上必然被日志捕获（解析错误一定打印且被 capture_this_file
+## 按路径收下），所以这里不会把一次真失败判成抖动。
+static func _gdscript_parse_failure_confirmed(path: String, content: String, data: Dictionary) -> bool:
+	if String(data.get("diagnostics_detail", "")) == "log_capture":
+		return true
+	if _validate_gdscript_source(content).get("ok", true):
+		return false
+	return not _capture_gdscript_load_diagnostics_once(path).get("diagnostics", []).is_empty()
+
+
+## 把诊断条目降级为 info 并打上抖动标记：它们是重载时序噪声，不是本次写入的
+## 解析失败（引擎加载同一份字节是干净的）。原文与 details 全部保留，排查时仍有
+## 据可查；diagnostics_detail 换成 "reload_jitter"，让「error 级」与「已降级」
+## 在回包里一眼可分。
+static func _downgrade_gdscript_diagnostics(data: Dictionary) -> void:
+	for diagnostic in data.get("diagnostics", []):
+		if diagnostic is Dictionary:
+			diagnostic["level"] = "info"
+			diagnostic["reload_jitter"] = true
+	data["diagnostics_detail"] = "reload_jitter"
+
+
 static func _validate_gdscript_source(content: String) -> Dictionary:
 	var script := GDScript.new()
 	script.source_code = content
@@ -365,6 +408,13 @@ static func _validate_gdscript_source(content: String) -> Dictionary:
 
 
 func _capture_gdscript_load_diagnostics(path: String) -> Dictionary:
+	return _capture_gdscript_load_diagnostics_once(path)
+
+
+## 真正的捕获实现，保持 static：`_refresh_loaded_gdscript` 是 static，复核路径
+## （`_gdscript_parse_failure_confirmed`）需要在它里面再抓一次引擎日志。实例方法
+## 那层只留给子类替身覆盖（接缝），两处共用这一份实现，避免行为漂移。
+static func _capture_gdscript_load_diagnostics_once(path: String) -> Dictionary:
 	var buffer := McpEditorLogBuffer.new()
 	var logger := ValidationLogger.new(buffer)
 	var capture := DiagnosticsCapture.capture_this_file(buffer, path, func() -> Dictionary:

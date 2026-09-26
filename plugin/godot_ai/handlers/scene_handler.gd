@@ -8,6 +8,12 @@ const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 var _connection: McpConnection
 var _save_scene_callable: Callable = Callable()
 var _save_scene_as_callable: Callable = Callable()
+# godot-ai-cli fork patch（R-2）：场景加载通道的注入点。EditorInterface 是单例、
+# 无法打桩，而 headless 测试里真调 reload_scene_from_path 会换掉当前编辑场景的
+# 根（拖垮同会话的后续套件）——替身只记录被调用的通道，见
+# demo/tests/test_scene_open.gd。
+var _open_scene_callable: Callable = Callable()
+var _reload_scene_callable: Callable = Callable()
 
 # godot-ai-cli fork patch（§14）：场景"加载/保存时间戳"内存表：
 # scene path -> 磁盘 mtime（秒）。static 是有意的：handler 会随连接/插件
@@ -17,6 +23,21 @@ static var _scene_load_mtimes: Dictionary = {}
 # 磁盘过期警告文案：scene open（非 force-reload）发现磁盘 mtime 比记录新时
 # 附加到响应 data.warning。
 const _STALE_DISK_WARNING := "scene file on disk is newer than the in-memory copy (externally modified); re-open with --force-reload to load the disk version"
+
+# godot-ai-cli fork patch（R-2）：force_reload 没走磁盘重载通道时的补救提示。
+# 只有当前编辑场景才会走 reload_scene_from_path；目标开在别的页签时
+# open_scene_from_path 只切页签、不会重读磁盘，编辑器内存里仍是手改 .tscn
+# 之前的旧副本——回包必须把这件事说清楚，而不是让 reloaded_from_disk:false
+# 无声无息。
+const _FORCE_RELOAD_HINT := "force_reload only reloads the scene the editor is currently editing; this scene was opened through the editor's in-memory copy, so externally modified bytes on disk may not be loaded. Run `godot-ai-cli filesystem scan` (or give the editor window focus so it rescans) and re-run this open with --force-reload."
+
+
+# 返回 force_reload 的补救提示（无则空串）：要求了 force_reload、但本次回包
+# reloaded_from_disk 仍为 false 时才给。
+static func _force_reload_hint(force_reload: bool, reloaded_from_disk: bool) -> String:
+	if force_reload and not reloaded_from_disk:
+		return _FORCE_RELOAD_HINT
+	return ""
 
 
 # 返回磁盘过期警告（无则空串）。force-reload 与首次打开（无记录）不报。
@@ -220,6 +241,24 @@ func _pack_and_save_with_uid(root: Node, path: String) -> Error:
 	return err
 
 
+## 场景加载通道：有注入替身（测试）就走替身，否则调 EditorInterface。
+## 拆出来的唯一目的是让 `force_reload 走 reload 通道 / 其他走 open 通道` 这条
+## 分支在 headless 套件里可断言（见 _open_scene_callable 的注释）。
+func _editor_open_scene(path: String) -> void:
+	if _open_scene_callable.is_valid():
+		_open_scene_callable.call(path)
+		return
+	EditorInterface.open_scene_from_path(path)
+
+
+## 磁盘重载通道：同上，替身优先。
+func _editor_reload_scene(path: String) -> void:
+	if _reload_scene_callable.is_valid():
+		_reload_scene_callable.call(path)
+		return
+	EditorInterface.reload_scene_from_path(path)
+
+
 ## How long open_scene waits for the editor to actually switch to the
 ## requested scene before replying switched=false. Tab switches normally land
 ## within a few frames; keep this under the dispatcher's 4500 ms deferred
@@ -273,10 +312,15 @@ func open_scene(params: Dictionary) -> Dictionary:
 		return {"data": payload}
 
 	if force_reload and current_path == path:
-		EditorInterface.reload_scene_from_path(path)
+		## R-2 真修：目标就是当前编辑场景时直接 reload_scene_from_path ——
+		## 手改 .tscn 后编辑器内存里还是旧副本，只有这条通道会重读磁盘。
+		_editor_reload_scene(path)
 		payload["reloaded_from_disk"] = true
 	else:
-		EditorInterface.open_scene_from_path(path)
+		_editor_open_scene(path)
+		var hint := _force_reload_hint(force_reload, payload["reloaded_from_disk"])
+		if not hint.is_empty():
+			payload["hint"] = hint
 
 	## The tab switch completes asynchronously; replying now lets an immediate
 	## follow-up write land on the PREVIOUS scene (#633 — a scene_save issued

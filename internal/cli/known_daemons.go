@@ -367,7 +367,16 @@ func pruneDaemonRecords() (pruned []int, kept []int) {
 			kept = append(kept, rec.HTTPPort)
 			continue
 		}
-		if err := os.Remove(daemonRecordPath(rec.HTTPPort)); err != nil && !os.IsNotExist(err) {
+		// 以 Remove 的结果为唯一判据：记录文件根本不存在（端口仅由
+		// last-daemon.json 指认）时 IsNotExist——没有可删之物，既不记
+		// pruned 也不记 kept（last-daemon.json 按设计绝不触碰，把它报成
+		// pruned 会造成「重复 prune 永远非空」的虚报，需求
+		// status-prune-phantom-lastdaemon）；真正删掉才记 pruned。
+		err := os.Remove(daemonRecordPath(rec.HTTPPort))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
 			kept = append(kept, rec.HTTPPort) // 删不掉的保留，报错交给 warnings
 			continue
 		}

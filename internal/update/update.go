@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,9 @@ const DefaultAPIBase = "https://api.github.com"
 // Machine-readable failure codes surfaced in the CLI error envelope.
 const (
 	CodeCheckFailed      = "UPDATE_CHECK_FAILED"
+	CodeCheckRateLimited = "UPDATE_CHECK_RATE_LIMITED"
+	CodeAtomFailed       = "UPDATE_ATOM_FAILED"
+	CodeTagNotFound      = "UPDATE_TAG_NOT_FOUND"
 	CodeAssetNotFound    = "UPDATE_ASSET_NOT_FOUND"
 	CodeDownloadFailed   = "UPDATE_DOWNLOAD_FAILED"
 	CodeChecksumInvalid  = "UPDATE_CHECKSUM_INVALID"
@@ -105,6 +109,17 @@ type Options struct {
 	// Windows 再读注册表系统代理（HKCU Internet Settings）；其它值按
 	// 显式代理 URL 解析（如 http://127.0.0.1:7897）。
 	Proxy string
+	// Tag (--tag)：显式版本，改走 /releases/tags/<tag> 单点查询，绕开
+	// 被限流的列表端点；命中后复用同一套资产选择/sha256 校验/替换流程。
+	Tag string
+	// FromAtom (--from-atom)：API 整体不可达时降级到 releases.atom，解析
+	// 出最新 tag 后走 --tag 那条路。
+	FromAtom bool
+	// ZipPath (--zip)：已下载的 release zip，完全离线通道（不发起任何
+	// 网络请求）；必须配 ChecksumsPath，双源校验通过才替换。
+	ZipPath string
+	// ChecksumsPath (--checksums)：与 --zip 配对的 checksums.txt。
+	ChecksumsPath string
 }
 
 // withDefaults fills zero-value fields with their production defaults.
@@ -177,7 +192,16 @@ func ResolveProxy(proxy string) (string, bool) {
 func Run(ctx context.Context, opts Options) (map[string]any, error) {
 	opts = opts.withDefaults()
 
-	rel, err := FetchLatestRelease(ctx, opts.HTTPClient, opts.BaseURL, version.RepoOwner, version.RepoName)
+	if err := validateSources(opts); err != nil {
+		return nil, err
+	}
+	// --zip：完全离线通道，没有任何 release 元数据可查（它正是为 API
+	// 不可达准备的），因此整条流程单独走。
+	if opts.ZipPath != "" {
+		return runOfflineZip(ctx, opts)
+	}
+
+	rel, err := resolveRelease(ctx, opts)
 	if err != nil {
 		// 查询失败也带上代理诊断：TUN/fake-ip 现场里「API 通不通」与
 		// 「走没走代理」是同一个问题（需求 update-behind-tun-fakeip）。
@@ -268,6 +292,152 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 		result["docs_hint"] = hint
 	}
 	return result, nil
+}
+
+// validateSources 拒绝互相冲突的来源选项：--tag 与 --from-atom 是同一件
+// 事的两种问法（后者只是先问 atom 要 tag），--zip 又完全离线；一次给多个
+// 只会让「谁生效」变成猜谜，所以在发任何请求之前就明确拒绝。
+func validateSources(opts Options) error {
+	if opts.ZipPath != "" && (opts.Tag != "" || opts.FromAtom) {
+		return &Error{
+			Code:    CodeCheckFailed,
+			Message: "--zip is fully offline and cannot be combined with --tag or --from-atom; pass exactly one release source",
+			Data:    map[string]any{"zip": opts.ZipPath, "tag": opts.Tag, "from_atom": opts.FromAtom},
+		}
+	}
+	if opts.Tag != "" && opts.FromAtom {
+		return &Error{
+			Code:    CodeCheckFailed,
+			Message: "--tag and --from-atom both name a release; pass only one (--from-atom resolves the tag itself)",
+			Data:    map[string]any{"tag": opts.Tag},
+		}
+	}
+	if opts.ChecksumsPath != "" && opts.ZipPath == "" {
+		return &Error{
+			Code:    CodeCheckFailed,
+			Message: "--checksums only pairs with --zip; the online channels verify the release's own checksums asset",
+			Data:    map[string]any{"checksums": opts.ChecksumsPath},
+		}
+	}
+	return nil
+}
+
+// resolveRelease 按选项挑选 release 来源：--from-atom 先向 releases.atom
+// 要最新 tag 再走单点查询；显式 --tag 直接单点查询；默认查列表端点。
+func resolveRelease(ctx context.Context, opts Options) (Release, error) {
+	if opts.FromAtom {
+		tag, err := FetchLatestTagFromAtom(ctx, opts.HTTPClient, opts.BaseURL, version.RepoOwner, version.RepoName)
+		if err != nil {
+			return Release{}, err
+		}
+		return FetchReleaseByTag(ctx, opts.HTTPClient, opts.BaseURL, version.RepoOwner, version.RepoName, tag)
+	}
+	if opts.Tag != "" {
+		return FetchReleaseByTag(ctx, opts.HTTPClient, opts.BaseURL, version.RepoOwner, version.RepoName, opts.Tag)
+	}
+	return FetchLatestRelease(ctx, opts.HTTPClient, opts.BaseURL, version.RepoOwner, version.RepoName)
+}
+
+// runOfflineZip 是 --zip 通道：全程离线。先双源校验（文件名 + sha256），
+// 通过之后才复用与在线通道同一套替换机制——Windows 先改名让位、写失败
+// 回滚，任何一步失败都不留半成品（需求 R-6 的手工替代流程）。
+func runOfflineZip(ctx context.Context, opts Options) (map[string]any, error) {
+	zipData, err := ReadAndVerifyLocalZip(opts.ZipPath, opts.ChecksumsPath)
+	if err != nil {
+		return nil, err
+	}
+	binary, err := ExtractBinary(zipData, opts.GOOS)
+	if err != nil {
+		return nil, err
+	}
+
+	// --check 在离线通道同样只查不下：校验并报告，一个字节都不写。
+	if opts.CheckOnly {
+		return map[string]any{
+			"status":            "ok",
+			"offline_zip":       opts.ZipPath,
+			"checksum_verified": true,
+			"binary_bytes":      len(binary),
+			"message":           "offline package verified; re-run without --check to replace the install",
+		}, nil
+	}
+
+	// 离线通道仍然要人点头：--zip 一旦生效就会换掉正在跑的二进制。
+	if !opts.AssumeYes {
+		cancelled := map[string]any{
+			"status":            "cancelled",
+			"offline_zip":       opts.ZipPath,
+			"checksum_verified": true,
+		}
+		if !opts.IsTerminal {
+			cancelled["message"] = "no terminal to confirm the update; re-run with --yes to apply"
+			return cancelled, nil
+		}
+		fmt.Fprintf(opts.PromptOut, "Update now? [y/N]: ")
+		if !readYes(opts.In) {
+			return cancelled, nil
+		}
+	}
+
+	target, err := resolveTarget(opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := ReplaceExecutable(opts.GOOS, target, binary); err != nil {
+		return nil, err
+	}
+
+	result := map[string]any{
+		"status":            "updated",
+		"restart_required":  true,
+		"path":              target,
+		"offline_zip":       opts.ZipPath,
+		"checksum_verified": true,
+	}
+	if opts.GOOS == "windows" {
+		result["previous_binary"] = target + ".old"
+	}
+	if hint := docsHint(ctx, target); hint != nil {
+		result["docs_hint"] = hint
+	}
+	return result, nil
+}
+
+// ReadAndVerifyLocalZip 读本地 zip 与配对的 checksums.txt，并做「双源」
+// 校验：zip 文件名必须在 checksums 里有对应行（来源一），且实测 sha256
+// 必须与该行声明的值一致（来源二）。校验全过才返回 zip 内容——不过则
+// 安装目录一个字节都不会动。缺 --checksums 直接拒绝：离线通道同样不许
+// 安装未经验证的二进制。
+func ReadAndVerifyLocalZip(zipPath, checksumsPath string) ([]byte, error) {
+	if checksumsPath == "" {
+		return nil, &Error{
+			Code:    CodeChecksumInvalid,
+			Message: "--zip requires --checksums <checksums.txt>: without the release checksums the zip cannot be verified (refusing to install unverified bits)",
+			Data:    map[string]any{"zip": zipPath},
+		}
+	}
+	zipData, err := os.ReadFile(zipPath)
+	if err != nil {
+		return nil, &Error{
+			Code:    CodeArchiveInvalid,
+			Message: fmt.Sprintf("read the offline package %s: %v", zipPath, err),
+			Data:    map[string]any{"zip": zipPath},
+		}
+	}
+	sumsData, err := os.ReadFile(checksumsPath)
+	if err != nil {
+		return nil, &Error{
+			Code:    CodeChecksumInvalid,
+			Message: fmt.Sprintf("read the checksums file %s: %v", checksumsPath, err),
+			Data:    map[string]any{"checksums": checksumsPath},
+		}
+	}
+	// 比对用 basename：checksums 行里写的永远是资产文件名，而调用方可能
+	// 传全路径（如 ./dist/godot-ai-cli-0.1.0-windows-amd64.zip）。
+	if err := verifyChecksum(filepath.Base(zipPath), zipData, sumsData); err != nil {
+		return nil, err
+	}
+	return zipData, nil
 }
 
 // queryOps lists the op names ("<domain> <name>") the binary at exePath
@@ -426,11 +596,7 @@ func FetchLatestRelease(ctx context.Context, client *http.Client, baseURL, owner
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return Release{}, &Error{
-			Code:    CodeCheckFailed,
-			Message: fmt.Sprintf("GitHub API answered %s", resp.Status),
-			Data:    map[string]any{"url": url},
-		}
+		return Release{}, checkStatusError(resp, url)
 	}
 	var rels []Release
 	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
@@ -451,6 +617,205 @@ func FetchLatestRelease(ctx context.Context, client *http.Client, baseURL, owner
 		Message: "no release has been published yet (the releases list is empty)",
 		Data:    map[string]any{"url": url},
 	}
+}
+
+// FetchReleaseByTag GETs <base>/repos/<owner>/<repo>/releases/tags/<tag>：
+// 单点查询，绕开列表端点。限流窗口里列表端点先挂、单点查询常常还能用，
+// 因此这条既是 --tag 的实现，也是 --from-atom 解析出 tag 之后的取资产
+// 步骤；命中后与在线通道共用同一套资产选择/sha256 校验/替换流程。
+func FetchReleaseByTag(ctx context.Context, client *http.Client, baseURL, owner, repo, tag string) (Release, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s",
+		strings.TrimSuffix(baseURL, "/"), owner, repo, urlpkg.PathEscape(tag))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Release{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return Release{}, &Error{
+			Code:    CodeCheckFailed,
+			Message: fmt.Sprintf("query the release for tag %s: %v", tag, err),
+			Data:    map[string]any{"url": url, "tag": tag},
+		}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return Release{}, &Error{
+			Code:    CodeTagNotFound,
+			Message: fmt.Sprintf("no release is published under tag %q — pass the tag exactly as published (for example v0.1.0)", tag),
+			Data:    map[string]any{"url": url, "tag": tag, "http_status": resp.StatusCode},
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Release{}, checkStatusError(resp, url)
+	}
+	var rel Release
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return Release{}, &Error{
+			Code:    CodeCheckFailed,
+			Message: fmt.Sprintf("decode the release payload for tag %s: %v", tag, err),
+			Data:    map[string]any{"url": url, "tag": tag},
+		}
+	}
+	if rel.TagName == "" {
+		// 载荷缺 tag_name 时用请求的 tag 兜底：后续资产名由它推导。
+		rel.TagName = tag
+	}
+	return rel, nil
+}
+
+// checkStatusError 把查询端点的非 200 响应分类成结构化错误。
+//
+// 403 且 X-RateLimit-Remaining: 0 才是「限流」：GitHub 对限流与权限不足
+// 都回 403，两者唯一可靠的区分就是剩余额度归零，而限流是「等窗口过去就
+// 好」、必须与权限/其它失败分开报（新码 UPDATE_CHECK_RATE_LIMITED），并
+// 带上重置时间与三条降级通道指引。其余非 200 维持 UPDATE_CHECK_FAILED，
+// 只补一个 http_status 让机器侧自行判定。
+func checkStatusError(resp *http.Response, url string) *Error {
+	if resp.StatusCode == http.StatusForbidden &&
+		strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0" {
+		data := map[string]any{
+			"url":         url,
+			"http_status": resp.StatusCode,
+			"next_steps":  rateLimitNextSteps(),
+		}
+		message := fmt.Sprintf("GitHub API rate limit reached for %s (%s)", url, resp.Status)
+		if reset := rateLimitReset(resp); reset != "" {
+			data["rate_limit_reset"] = reset
+			message += fmt.Sprintf("; the limit resets at %s", reset)
+		}
+		message += " — the release list can be bypassed with --tag, --from-atom or --zip (see next_steps)"
+		return &Error{Code: CodeCheckRateLimited, Message: message, Data: data}
+	}
+	return &Error{
+		Code:    CodeCheckFailed,
+		Message: fmt.Sprintf("GitHub API answered %s", resp.Status),
+		Data:    map[string]any{"url": url, "http_status": resp.StatusCode},
+	}
+}
+
+// rateLimitReset 把 X-RateLimit-Reset 的 unix 秒转成 RFC3339（UTC，避免
+// 时区随机器漂移），不可解析时返回空串（字段就不写进 data）。
+func rateLimitReset(resp *http.Response) string {
+	sec, err := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("X-RateLimit-Reset")), 10, 64)
+	if err != nil {
+		return ""
+	}
+	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
+}
+
+// rateLimitNextSteps 是限流现场的下一步：API 不可达 ≠ 无法升级，三条通道
+// 按「联网优先、离线兜底」排序（需求 R-6 的建议新增）。
+func rateLimitNextSteps() []string {
+	return []string{
+		"显式版本走单点查询，绕开被限流的列表端点：godot-ai-cli update --tag vX.Y.Z",
+		"API 不可达时降级到 releases.atom 取最新 tag：godot-ai-cli update --from-atom",
+		"已下载好 zip 时完全离线安装（需配套 checksums.txt 双源校验）：godot-ai-cli update --zip <zip> --checksums <checksums.txt>",
+	}
+}
+
+// atomFeed 是 releases.atom 里我们消费的最小子集：按 GitHub 的排布，
+// entry 从最新到最旧。
+type atomFeed struct {
+	Entries []atomEntry `xml:"entry"`
+}
+
+// atomEntry 是一条 release 条目：链接指向 …/releases/tag/<tag>，标题在
+// GitHub 的 feed 里就是 tag。
+type atomEntry struct {
+	Title string     `xml:"title"`
+	Links []atomLink `xml:"link"`
+}
+
+// atomLink 只取 href：feed 里带 rel="alternate" 的那条正是 tag 链接。
+type atomLink struct {
+	Href string `xml:"href,attr"`
+}
+
+// FetchLatestTagFromAtom 在 API 不可达时降级到 releases.atom：解析最新
+// 一条 entry 的 tag。atom 与列表端点一样包含 prerelease 条目（需求方的
+// 手工替代流程已验证），因此 beta 版本照样看得到。取到 tag 之后由调用方
+// 走 FetchReleaseByTag 那条路。网络/解析失败统一回 UPDATE_ATOM_FAILED。
+func FetchLatestTagFromAtom(ctx context.Context, client *http.Client, baseURL, owner, repo string) (string, error) {
+	url := fmt.Sprintf("%s/%s/%s/releases.atom", siteRoot(baseURL), owner, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", &Error{
+			Code:    CodeAtomFailed,
+			Message: fmt.Sprintf("query releases.atom: %v", err),
+			Data:    map[string]any{"url": url},
+		}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", &Error{
+			Code:    CodeAtomFailed,
+			Message: fmt.Sprintf("releases.atom answered %s", resp.Status),
+			Data:    map[string]any{"url": url, "http_status": resp.StatusCode},
+		}
+	}
+	var feed atomFeed
+	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
+		return "", &Error{
+			Code:    CodeAtomFailed,
+			Message: fmt.Sprintf("decode releases.atom: %v", err),
+			Data:    map[string]any{"url": url},
+		}
+	}
+	if len(feed.Entries) == 0 {
+		return "", &Error{
+			Code:    CodeAtomFailed,
+			Message: "releases.atom carries no entry (no release has been published yet)",
+			Data:    map[string]any{"url": url},
+		}
+	}
+	tag := atomEntryTag(feed.Entries[0])
+	if tag == "" {
+		return "", &Error{
+			Code:    CodeAtomFailed,
+			Message: "releases.atom's newest entry names no tag",
+			Data:    map[string]any{"url": url},
+		}
+	}
+	return tag, nil
+}
+
+// atomEntryTag 取一条 entry 的 tag：优先 …/releases/tag/<tag> 链接，链接
+// 缺失时退回标题（GitHub feed 的标题就是 tag）。
+func atomEntryTag(entry atomEntry) string {
+	const marker = "/releases/tag/"
+	for _, link := range entry.Links {
+		if i := strings.Index(link.Href, marker); i >= 0 {
+			if tag := strings.Trim(link.Href[i+len(marker):], "/"); tag != "" {
+				return tag
+			}
+		}
+	}
+	return strings.TrimSpace(entry.Title)
+}
+
+// siteRoot 从 API 根推导站点根：官方 API 主机 api.github.com 换成
+// github.com（releases.atom 在站点上，不在 API 上）；其它情况（测试注入
+// 的 httptest 服务器）同源直连。解析不出来时退回原值，让请求本身去报
+// 网络错误。
+func siteRoot(baseURL string) string {
+	u, err := urlpkg.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return strings.TrimSuffix(baseURL, "/")
+	}
+	if u.Host == "api.github.com" {
+		return "https://github.com"
+	}
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + u.Host
 }
 
 // semver is a parsed semantic version; pre holds the pre-release string.

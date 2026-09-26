@@ -19,10 +19,14 @@ var updateAPIBase = update.DefaultAPIBase
 // newUpdateCommand implements the `update` self-update flow.
 func newUpdateCommand() *cobra.Command {
 	var (
-		yes     bool
-		fromDir string
-		check   bool
-		proxy   string
+		yes           bool
+		fromDir       string
+		check         bool
+		proxy         string
+		tag           string
+		fromAtom      bool
+		zipPath       string
+		checksumsPath string
 	)
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -45,16 +49,48 @@ reports machine-readable diagnostics (url, http_status, content_length,
 bytes_read, redirect_host, proxy_used, attempts) plus the actionable
 next steps (an explicit --proxy retry, or manual install).
 
+--check stops after the availability answer: {"status":"ok",
+"update_available":true, ...release details} — nothing is downloaded
+or replaced. With --tag or --from-atom it checks the tag you named and
+still downloads nothing.
+
+Rate-limit fallbacks (限流降级): the release LIST endpoint is the one
+GitHub throttles first (403 + X-RateLimit-Remaining: 0), which used to
+fail the whole command. That case is now reported as
+UPDATE_CHECK_RATE_LIMITED with url, rate_limit_reset and next_steps,
+and three ways around it exist:
+
+  --tag <vX.Y.Z>   query that one release directly
+                   (/releases/tags/<tag>), skipping the list endpoint
+  --from-atom      read releases.atom (the site's feed, not the API)
+                   and use its newest tag
+  --zip <zip> --checksums <checksums.txt>
+                   install an already-downloaded package with no
+                   network at all; both the file name and the SHA256
+                   must match the checksums file (double-source check)
+
+--tag and --from-atom install the named release when it is newer than
+the running build and reuse the normal asset/checksum/replace path; a
+tag that is absent or not newer is reported plainly and nothing is
+downloaded. --zip requires --checksums: without it the package cannot
+be verified and the command refuses to touch the install. A failed
+verification never leaves a half-finished install behind.
+
+Known limits of the fallback channels (registered, not blocking): a
+GitHub SECONDARY rate limit (403 + Retry-After, no
+X-RateLimit-Remaining: 0 header) still reports UPDATE_CHECK_FAILED with
+http_status instead of the rate-limit code, so a real block is never
+mislabelled; --tag installs the named release only when it is NEWER, so
+it is not a rollback channel; and --zip verifies the file name plus
+SHA256 but NOT the archive's OS/arch — a package for another platform
+passes verification and only fails when it is run.
+
 --proxy selects a download proxy: an explicit URL
 (http://127.0.0.1:7897) or "auto" — environment HTTPS_PROXY/HTTP_PROXY
 first, then the Windows system proxy (registry) when unset. Without
 --proxy the Go default applies (environment variables only) — note a
 TUN/fake-ip setup may still break Go's downloads where the system
 stack works, which is exactly what --proxy auto is for.
-
---check stops after the availability answer: {"status":"ok",
-"update_available":true, ...release details} — nothing is downloaded
-or replaced.
 
 The update applies only after an interactive confirmation; --yes skips
 the prompt. Without a terminal there is no prompt: the result is
@@ -65,7 +101,10 @@ Examples:
   godot-ai-cli update
   godot-ai-cli update --yes
   godot-ai-cli update --check
-  godot-ai-cli update --yes --proxy auto`,
+  godot-ai-cli update --yes --proxy auto
+  godot-ai-cli update --check --tag v0.1.0
+  godot-ai-cli update --yes --from-atom
+  godot-ai-cli update --yes --zip godot-ai-cli-0.1.0-windows-amd64.zip --checksums checksums.txt`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			result, err := update.Run(cmd.Context(), update.Options{
@@ -75,6 +114,10 @@ Examples:
 				AssumeYes:      yes,
 				CheckOnly:      check,
 				Proxy:          proxy,
+				Tag:            tag,
+				FromAtom:       fromAtom,
+				ZipPath:        zipPath,
+				ChecksumsPath:  checksumsPath,
 				In:             cmd.InOrStdin(),
 				IsTerminal:     stdinIsTerminal(cmd.InOrStdin()),
 				PromptOut:      cmd.ErrOrStderr(),
@@ -93,6 +136,10 @@ Examples:
 	cmd.Flags().BoolVar(&check, "check", false, "only report whether a newer version exists (no download, no replace)")
 	cmd.Flags().StringVar(&proxy, "proxy", "", `download proxy: an explicit URL (http://127.0.0.1:7897) or "auto" (HTTPS_PROXY/HTTP_PROXY env, then the Windows system proxy)`)
 	cmd.Flags().StringVar(&fromDir, "from", "", "update the godot-ai-cli install in this directory instead of the running executable")
+	cmd.Flags().StringVar(&tag, "tag", "", "install this exact release tag, querying /releases/tags/<tag> instead of the rate-limited releases list")
+	cmd.Flags().BoolVar(&fromAtom, "from-atom", false, "resolve the newest tag from releases.atom when the GitHub API is rate-limited or unreachable")
+	cmd.Flags().StringVar(&zipPath, "zip", "", "install from an already-downloaded release zip (fully offline; requires --checksums)")
+	cmd.Flags().StringVar(&checksumsPath, "checksums", "", "checksums.txt paired with --zip: the zip's file name and SHA256 must both match before anything is replaced")
 	// --from exists so tests can drive the replace mechanics against a fake
 	// install dir; hidden because end users should never need it.
 	_ = cmd.Flags().MarkHidden("from")

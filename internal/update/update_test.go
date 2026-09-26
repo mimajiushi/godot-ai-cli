@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mimajiushi/godot-ai-cli/internal/testutil/fakegithub"
 )
@@ -813,4 +815,537 @@ func TestRunFailedDownloadLeavesNoOld(t *testing.T) {
 	if _, statErr := os.Stat(target + ".old"); !os.IsNotExist(statErr) {
 		t.Errorf("failed update left a .old behind (stat err = %v)", statErr)
 	}
+}
+
+// statusServer 回一个固定状态码与响应头，用于钉死查询端点的分类规则。
+func statusServer(t *testing.T, code int, headers map[string]string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for k, v := range headers {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(code)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestUpdateRateLimitedClassification：需求 R-6 的错误分类现场——403 且
+// X-RateLimit-Remaining: 0 才是限流，回 UPDATE_CHECK_RATE_LIMITED，data 带
+// url / http_status / rate_limit_reset（X-RateLimit-Reset 的 unix 秒转
+// RFC3339）/ next_steps（--tag / --from-atom / --zip 三条降级通道）；其余
+// 非 200（含不带限流头的 403）维持 UPDATE_CHECK_FAILED 但补 http_status。
+func TestUpdateRateLimitedClassification(t *testing.T) {
+	resetSec := time.Now().Add(42 * time.Minute).Unix()
+	wantReset := time.Unix(resetSec, 0).UTC().Format(time.RFC3339)
+
+	t.Run("403 with the rate-limit headers", func(t *testing.T) {
+		server := statusServer(t, http.StatusForbidden, map[string]string{
+			"X-RateLimit-Remaining": "0",
+			"X-RateLimit-Reset":     strconv.FormatInt(resetSec, 10),
+		})
+		_, err := FetchLatestRelease(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeCheckRateLimited)
+
+		var uerr *Error
+		if !errors.As(err, &uerr) {
+			t.Fatalf("error %v is not an *update.Error", err)
+		}
+		if url, _ := uerr.Data["url"].(string); !strings.Contains(url, "/repos/o/r/releases") {
+			t.Errorf("data url = %v", uerr.Data["url"])
+		}
+		if uerr.Data["http_status"] != http.StatusForbidden {
+			t.Errorf("http_status = %v", uerr.Data["http_status"])
+		}
+		if uerr.Data["rate_limit_reset"] != wantReset {
+			t.Errorf("rate_limit_reset = %v, want %s", uerr.Data["rate_limit_reset"], wantReset)
+		}
+		steps, _ := uerr.Data["next_steps"].([]string)
+		if len(steps) != 3 {
+			t.Fatalf("next_steps = %v", uerr.Data["next_steps"])
+		}
+		joined := strings.Join(steps, "\n")
+		for _, flag := range []string{"--tag", "--from-atom", "--zip"} {
+			if !strings.Contains(joined, flag) {
+				t.Errorf("next_steps does not point at %s: %v", flag, steps)
+			}
+		}
+		if !strings.Contains(uerr.Message, wantReset) {
+			t.Errorf("message does not carry the reset time: %q", uerr.Message)
+		}
+	})
+
+	t.Run("403 without the rate-limit header", func(t *testing.T) {
+		// 权限不足/其它 403 是确定性失败：等一会儿也不会好，绝不能报成限流。
+		server := statusServer(t, http.StatusForbidden, nil)
+		_, err := FetchLatestRelease(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeCheckFailed)
+		var uerr *Error
+		if errors.As(err, &uerr) && uerr.Data["http_status"] != http.StatusForbidden {
+			t.Errorf("http_status = %v", uerr.Data["http_status"])
+		}
+	})
+
+	t.Run("403 with a remaining budget", func(t *testing.T) {
+		server := statusServer(t, http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "42"})
+		_, err := FetchLatestRelease(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeCheckFailed)
+	})
+
+	t.Run("other statuses keep UPDATE_CHECK_FAILED plus http_status", func(t *testing.T) {
+		for _, code := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusInternalServerError} {
+			server := statusServer(t, code, nil)
+			_, err := FetchLatestRelease(context.Background(), server.Client(), server.URL, "o", "r")
+			assertCode(t, err, CodeCheckFailed)
+			var uerr *Error
+			if errors.As(err, &uerr) && uerr.Data["http_status"] != code {
+				t.Errorf("status %d: http_status = %v", code, uerr.Data["http_status"])
+			}
+		}
+	})
+}
+
+// tagHits 记录三类端点的命中次数：列表端点（--tag/--from-atom 都不该碰，
+// 它正是被限流挂掉的那个）、单点查询、资产下载（--check 组合不该碰），
+// 另记 atom 的请求路径（用来证明问的是站点根而不是 API 根）。
+type tagHits struct {
+	list, tag, download, atom int
+	atomPath                  string
+}
+
+// fallbackServerOpts 是降级通道布景的全部输入。
+type fallbackServerOpts struct {
+	Tag      string   // /releases/tags/<Tag> 命中的 tag
+	Asset    string   // 本平台 zip 资产名
+	Zip      []byte   // zip 内容
+	AtomTags []string // 非空则提供 releases.atom（entry 从新到旧）
+	AtomRaw  string   // 非空则原样返回该 atom 体（畸形 XML 用）
+	Hits     *tagHits
+}
+
+// fallbackServer 搭出限流现场：列表端点恒 403 + 限流头，单点查询按 tag 回
+// 单个 release，资产按名字回内容，需要时同时提供 releases.atom。
+func fallbackServer(t *testing.T, opts fallbackServerOpts) *httptest.Server {
+	t.Helper()
+	sumsName := ChecksumsName(strings.TrimPrefix(opts.Tag, "v"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases.atom") && (opts.AtomRaw != "" || len(opts.AtomTags) > 0):
+			opts.Hits.atom++
+			opts.Hits.atomPath = r.URL.Path
+			if opts.AtomRaw != "" {
+				_, _ = w.Write([]byte(opts.AtomRaw))
+				return
+			}
+			_, _ = w.Write([]byte(atomFeedXML(base, opts.AtomTags...)))
+		case strings.HasSuffix(r.URL.Path, "/releases"):
+			opts.Hits.list++
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			w.WriteHeader(http.StatusForbidden)
+		case strings.Contains(r.URL.Path, "/releases/tags/"):
+			opts.Hits.tag++
+			if !strings.HasSuffix(r.URL.Path, "/releases/tags/"+opts.Tag) {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": opts.Tag,
+				"html_url": base + "/releases/tag/" + opts.Tag,
+				"draft":    false,
+				"assets": []map[string]any{
+					{"name": opts.Asset, "browser_download_url": base + "/download/" + opts.Asset},
+					{"name": sumsName, "browser_download_url": base + "/download/" + sumsName},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/download/"):
+			opts.Hits.download++
+			switch name := strings.TrimPrefix(r.URL.Path, "/download/"); name {
+			case opts.Asset:
+				_, _ = w.Write(opts.Zip)
+			case sumsName:
+				_, _ = w.Write(fakegithub.Checksums(opts.Asset, opts.Zip))
+			default:
+				http.NotFound(w, r)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// atomFeedXML 渲染一份 releases.atom 形状的 feed：entry 从新到旧，链接
+// 指向 …/releases/tag/<tag>（GitHub 的真实排布）。
+func atomFeedXML(base string, tags ...string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-US">` + "\n")
+	for _, tag := range tags {
+		b.WriteString("<entry>\n")
+		b.WriteString("<title>" + tag + "</title>\n")
+		b.WriteString(`<link rel="alternate" type="text/html" href="` + base + "/mimajiushi/godot-ai-cli/releases/tag/" + tag + `"/>` + "\n")
+		b.WriteString("</entry>\n")
+	}
+	b.WriteString("</feed>\n")
+	return b.String()
+}
+
+// TestUpdateTagChannel：--tag 走 /releases/tags/<tag> 单点查询，完全不碰
+// 被限流的列表端点；命中后复用现有资产选择/sha256 校验/替换流程；tag 不
+// 存在回明确错误；与 --check 组合只查不下。
+func TestUpdateTagChannel(t *testing.T) {
+	const tag = "v0.2.0"
+	zipData := fakegithub.Zip(t, "godot-ai-cli.exe", []byte("new-binary"))
+	assetName := AssetName("0.2.0", "windows", "amd64")
+
+	t.Run("single release query", func(t *testing.T) {
+		hits := &tagHits{}
+		server := fallbackServer(t, fallbackServerOpts{Tag: tag, Asset: assetName, Zip: zipData, Hits: hits})
+		rel, err := FetchReleaseByTag(context.Background(), server.Client(), server.URL, "o", "r", tag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rel.TagName != tag || len(rel.Assets) != 2 {
+			t.Errorf("release = %+v", rel)
+		}
+		if hits.tag != 1 || hits.list != 0 {
+			t.Errorf("hits = %+v", hits)
+		}
+	})
+
+	t.Run("--check only checks", func(t *testing.T) {
+		hits := &tagHits{}
+		server := fallbackServer(t, fallbackServerOpts{Tag: tag, Asset: assetName, Zip: zipData, Hits: hits})
+		result, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+			GOOS: "windows", GOARCH: "amd64", Tag: tag, CheckOnly: true, PromptOut: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["status"] != "ok" || result["update_available"] != true || result["latest_version"] != "0.2.0" {
+			t.Errorf("result = %v", result)
+		}
+		if hits.download != 0 || hits.list != 0 {
+			t.Errorf("--check touched download/list: %+v", hits)
+		}
+	})
+
+	t.Run("installs through the shared pipeline", func(t *testing.T) {
+		hits := &tagHits{}
+		server := fallbackServer(t, fallbackServerOpts{Tag: tag, Asset: assetName, Zip: zipData, Hits: hits})
+		dir := t.TempDir()
+		target := filepath.Join(dir, "godot-ai-cli.exe")
+		if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+			GOOS: "windows", GOARCH: "amd64", Tag: tag, InstallDir: dir,
+			AssumeYes: true, PromptOut: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["status"] != "updated" || result["latest_version"] != "0.2.0" {
+			t.Errorf("result = %v", result)
+		}
+		if result["previous_binary"] != target+".old" {
+			t.Errorf("previous_binary = %v", result["previous_binary"])
+		}
+		assertFileContent(t, target, "new-binary")
+		if hits.list != 0 {
+			t.Errorf("the list endpoint was hit: %+v", hits)
+		}
+	})
+
+	t.Run("unknown tag", func(t *testing.T) {
+		hits := &tagHits{}
+		server := fallbackServer(t, fallbackServerOpts{Tag: tag, Asset: assetName, Zip: zipData, Hits: hits})
+		_, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+			Tag: "v9.9.9", AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeTagNotFound)
+		if err == nil || !strings.Contains(err.Error(), "v9.9.9") {
+			t.Errorf("message does not name the tag: %v", err)
+		}
+	})
+}
+
+// TestUpdateFromAtomChannel：--from-atom 解析 releases.atom 最新一条 entry
+// 的 tag（含 prerelease），再走 --tag 那条路径；atom 的网络/解析失败回结构
+// 化 UPDATE_ATOM_FAILED。
+func TestUpdateFromAtomChannel(t *testing.T) {
+	const tag = "v0.2.0-beta.1" // prerelease：atom 里同样看得到
+	zipData := fakegithub.Zip(t, "godot-ai-cli.exe", []byte("new-binary"))
+	assetName := AssetName("0.2.0-beta.1", "windows", "amd64")
+
+	t.Run("newest entry wins and installs", func(t *testing.T) {
+		hits := &tagHits{}
+		server := fallbackServer(t, fallbackServerOpts{
+			Tag: tag, Asset: assetName, Zip: zipData, AtomTags: []string{tag, "v0.1.0"}, Hits: hits,
+		})
+		dir := t.TempDir()
+		target := filepath.Join(dir, "godot-ai-cli.exe")
+		if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+			GOOS: "windows", GOARCH: "amd64", FromAtom: true, InstallDir: dir,
+			AssumeYes: true, PromptOut: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["status"] != "updated" || result["latest_version"] != "0.2.0-beta.1" {
+			t.Errorf("result = %v", result)
+		}
+		assertFileContent(t, target, "new-binary")
+		if hits.atom != 1 || hits.tag != 1 || hits.list != 0 {
+			t.Errorf("hits = %+v", hits)
+		}
+		if strings.Contains(hits.atomPath, "/repos/") {
+			t.Errorf("releases.atom was queried on the API root: %s", hits.atomPath)
+		}
+	})
+
+	t.Run("parses the first entry", func(t *testing.T) {
+		hits := &tagHits{}
+		server := fallbackServer(t, fallbackServerOpts{
+			Tag: tag, Asset: assetName, Zip: zipData, AtomTags: []string{tag, "v0.1.0"}, Hits: hits,
+		})
+		got, err := FetchLatestTagFromAtom(context.Background(), server.Client(), server.URL, "o", "r")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tag {
+			t.Errorf("tag = %q, want %q", got, tag)
+		}
+	})
+
+	t.Run("http failure", func(t *testing.T) {
+		server := httptest.NewServer(http.NotFoundHandler())
+		defer server.Close()
+		_, err := FetchLatestTagFromAtom(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeAtomFailed)
+	})
+
+	t.Run("unreachable host", func(t *testing.T) {
+		server := httptest.NewServer(http.NotFoundHandler())
+		url := server.URL
+		server.Close()
+		_, err := FetchLatestTagFromAtom(context.Background(), server.Client(), url, "o", "r")
+		assertCode(t, err, CodeAtomFailed)
+	})
+
+	t.Run("malformed xml", func(t *testing.T) {
+		server := fallbackServer(t, fallbackServerOpts{Tag: tag, AtomRaw: "<feed><entry>", Hits: &tagHits{}})
+		_, err := FetchLatestTagFromAtom(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeAtomFailed)
+	})
+
+	t.Run("empty feed", func(t *testing.T) {
+		empty := `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>`
+		server := fallbackServer(t, fallbackServerOpts{Tag: tag, AtomRaw: empty, Hits: &tagHits{}})
+		_, err := FetchLatestTagFromAtom(context.Background(), server.Client(), server.URL, "o", "r")
+		assertCode(t, err, CodeAtomFailed)
+		if err == nil || !strings.Contains(err.Error(), "no entry") {
+			t.Errorf("message = %v", err)
+		}
+	})
+}
+
+// TestUpdateSiteRootFromAPIBase：releases.atom 在站点上而不是 API 上——
+// 官方 API 根换成 github.com，测试注入的 httptest 服务器同源直连，路径
+// 部分不参与（atom 在仓库根下）。
+func TestUpdateSiteRootFromAPIBase(t *testing.T) {
+	cases := map[string]string{
+		"https://api.github.com":    "https://github.com",
+		"https://api.github.com/":   "https://github.com",
+		"http://127.0.0.1:8080":     "http://127.0.0.1:8080",
+		"http://127.0.0.1:8080/api": "http://127.0.0.1:8080",
+	}
+	for in, want := range cases {
+		if got := siteRoot(in); got != want {
+			t.Errorf("siteRoot(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// 解析不出来时退回原值，让请求本身去报网络错误。
+	if got := siteRoot("://bad"); got != "://bad" {
+		t.Errorf("siteRoot(\"://bad\") = %q", got)
+	}
+}
+
+// TestOfflineZipChannel：--zip 完全离线——一个网络请求都不发。给了
+// --checksums 才做双源校验（文件名 + sha256）并在通过后替换；没给直接拒绝
+// 并提示；校验不过时安装目录一个字节都不动、也不留 .old 半成品。
+func TestOfflineZipChannel(t *testing.T) {
+	const asset = "godot-ai-cli-0.1.0-windows-amd64.zip"
+	zipData := fakegithub.Zip(t, "godot-ai-cli.exe", []byte("new-binary"))
+	sums := fakegithub.Checksums(asset, zipData)
+
+	// package 把 zip 与 checksums 落到临时目录（zip 用资产名，checksums 行
+	// 里写的就是它）。
+	pkg := func(t *testing.T, zipName string, zipBody, sumsBody []byte) (zipPath, sumsPath string) {
+		t.Helper()
+		dir := t.TempDir()
+		zipPath = filepath.Join(dir, zipName)
+		sumsPath = filepath.Join(dir, "checksums.txt")
+		if err := os.WriteFile(zipPath, zipBody, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sumsPath, sumsBody, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return zipPath, sumsPath
+	}
+	// install 备一个装着旧二进制的假安装目录。
+	install := func(t *testing.T) (dir, target string) {
+		t.Helper()
+		dir = t.TempDir()
+		target = filepath.Join(dir, "godot-ai-cli.exe")
+		if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir, target
+	}
+	// noNetwork 回一个记录命中次数的「必须不被访问」的服务器。
+	noNetwork := func(t *testing.T) (*httptest.Server, *int) {
+		t.Helper()
+		hits := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(server.Close)
+		return server, &hits
+	}
+
+	t.Run("verifies and replaces", func(t *testing.T) {
+		zipPath, sumsPath := pkg(t, asset, zipData, sums)
+		dir, target := install(t)
+		server, hits := noNetwork(t)
+
+		result, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", BaseURL: server.URL, HTTPClient: server.Client(),
+			GOOS: "windows", GOARCH: "amd64", ZipPath: zipPath, ChecksumsPath: sumsPath,
+			InstallDir: dir, AssumeYes: true, PromptOut: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["status"] != "updated" || result["checksum_verified"] != true {
+			t.Errorf("result = %v", result)
+		}
+		if result["offline_zip"] != zipPath || result["previous_binary"] != target+".old" {
+			t.Errorf("result = %v", result)
+		}
+		assertFileContent(t, target, "new-binary")
+		if *hits != 0 {
+			t.Errorf("the offline channel made %d network requests", *hits)
+		}
+	})
+
+	t.Run("--check verifies without replacing", func(t *testing.T) {
+		zipPath, sumsPath := pkg(t, asset, zipData, sums)
+		dir, target := install(t)
+
+		result, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", GOOS: "windows", GOARCH: "amd64",
+			ZipPath: zipPath, ChecksumsPath: sumsPath, InstallDir: dir,
+			CheckOnly: true, AssumeYes: true, PromptOut: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["status"] != "ok" || result["checksum_verified"] != true {
+			t.Errorf("result = %v", result)
+		}
+		assertFileContent(t, target, "old-binary")
+		if _, statErr := os.Stat(target + ".old"); !os.IsNotExist(statErr) {
+			t.Errorf("--check left a .old behind (stat err = %v)", statErr)
+		}
+	})
+
+	t.Run("without --checksums it refuses", func(t *testing.T) {
+		zipPath, _ := pkg(t, asset, zipData, sums)
+		dir, target := install(t)
+
+		_, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", GOOS: "windows", GOARCH: "amd64",
+			ZipPath: zipPath, InstallDir: dir, AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeChecksumInvalid)
+		if err == nil || !strings.Contains(err.Error(), "--checksums") {
+			t.Errorf("message does not point at --checksums: %v", err)
+		}
+		assertFileContent(t, target, "old-binary")
+	})
+
+	t.Run("checksum mismatch leaves the install untouched", func(t *testing.T) {
+		zipPath, sumsPath := pkg(t, asset, zipData, fakegithub.Checksums(asset, []byte("other-bytes")))
+		dir, target := install(t)
+
+		_, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", GOOS: "windows", GOARCH: "amd64",
+			ZipPath: zipPath, ChecksumsPath: sumsPath, InstallDir: dir, AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeChecksumMismatch)
+		assertFileContent(t, target, "old-binary")
+		if _, statErr := os.Stat(target + ".old"); !os.IsNotExist(statErr) {
+			t.Errorf("mismatch left a .old behind (stat err = %v)", statErr)
+		}
+	})
+
+	t.Run("no entry for the zip name", func(t *testing.T) {
+		zipPath, sumsPath := pkg(t, asset, zipData, fakegithub.Checksums("other.zip", zipData))
+		dir, target := install(t)
+
+		_, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", GOOS: "windows", GOARCH: "amd64",
+			ZipPath: zipPath, ChecksumsPath: sumsPath, InstallDir: dir, AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeChecksumInvalid)
+		assertFileContent(t, target, "old-binary")
+	})
+
+	t.Run("zip without this platform's binary", func(t *testing.T) {
+		other := fakegithub.Zip(t, "godot-ai-cli", []byte("new-binary"))
+		zipPath, sumsPath := pkg(t, asset, other, fakegithub.Checksums(asset, other))
+		dir, target := install(t)
+
+		_, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", GOOS: "windows", GOARCH: "amd64",
+			ZipPath: zipPath, ChecksumsPath: sumsPath, InstallDir: dir, AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeArchiveInvalid)
+		assertFileContent(t, target, "old-binary")
+	})
+
+	t.Run("conflicting release sources are refused", func(t *testing.T) {
+		zipPath, sumsPath := pkg(t, asset, zipData, sums)
+		_, err := Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", GOOS: "windows", GOARCH: "amd64",
+			ZipPath: zipPath, ChecksumsPath: sumsPath, Tag: "v0.1.0", AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeCheckFailed)
+		if err == nil || !strings.Contains(err.Error(), "--zip") {
+			t.Errorf("message = %v", err)
+		}
+
+		_, err = Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", Tag: "v0.1.0", FromAtom: true, AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeCheckFailed)
+
+		_, err = Run(context.Background(), Options{
+			CurrentVersion: "0.1.0", ChecksumsPath: sumsPath, AssumeYes: true, PromptOut: io.Discard,
+		})
+		assertCode(t, err, CodeCheckFailed)
+	})
 }

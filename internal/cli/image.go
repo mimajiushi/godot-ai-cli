@@ -29,6 +29,7 @@ func newImageCommand() *cobra.Command {
 	cmd.AddCommand(newImageGridDetectCommand())
 	cmd.AddCommand(newImageCellsCommand())
 	cmd.AddCommand(newImageViewCommand())
+	cmd.AddCommand(newImageFindColorCommand())
 	return cmd
 }
 
@@ -478,6 +479,118 @@ Examples:
 	cmd.Flags().StringVar(&project, "project", "", "Godot project dir for res:// paths (default: project of the last launch)")
 	cmd.Flags().StringArrayVar(&ats, "at", nil, "pixel coordinate x,y (repeatable)")
 	_ = cmd.MarkFlagRequired("path")
+	return cmd
+}
+
+// newImageFindColorCommand 按颜色反查像素（需求 R-5 4.1）："红点=刷怪点"
+// 这类美术约定要的"哪些图块 / 哪些像素是那个颜色"，一条命令给出可复现的结果。
+func newImageFindColorCommand() *cobra.Command {
+	var (
+		path       string
+		project    string
+		color      string
+		tolerance  float64
+		region     string
+		regionSize string
+		pixels     bool
+	)
+	cmd := &cobra.Command{
+		Use:   "find-color --path <file> --color R,G,B|#RRGGBB --tolerance N",
+		Short: "Find the pixels of a PNG/JPEG within an RGB distance of a color (fixed algorithm, no editor)",
+		Long: `image find-color scans a PNG/JPEG for pixels inside an RGB euclidean
+distance of --color. The matching rule is fixed — it is the same text here, in
+references/commands.md and in the CLI source, so two runs with the same flags
+always agree (hand-tuned per-project thresholds are exactly what this replaces):
+
+  distance = sqrt(dr^2 + dg^2 + db^2)   over the 8-bit R,G,B channels (0..255)
+  a pixel matches when distance <= --tolerance   (the boundary value matches)
+  pixels whose alpha is 0 are skipped (transparent padding carries no color)
+
+--color accepts R,G,B (e.g. 255,80,0) or #RRGGBB (e.g. '#FF5000' — quote it in
+PowerShell 5.1, where a leading # starts a comment).
+--tolerance is required on purpose: the report is only reproducible together
+with the threshold that produced it, and max_distance tells you how close the
+nearest miss was (a well-chosen threshold leaves a gap).
+
+--region-size WxH groups the scan into atlas-grid blocks (a TileSet atlas grid):
+only blocks with at least one matching pixel appear in matches, and all
+coordinates are block-local. Without it the whole image is one block.
+--region x,y,w,h limits the scan to a sub-rectangle first — the response's
+coordinates stay relative to that region.
+--pixels adds every matching pixel coordinate (block-local, same frame as
+centroid/extent), which is what you need to align a Marker2D on a red dot.
+
+Response: texture (--path as given), resolved (disk path), size, region_size,
+color (canonical #RRGGBB), tolerance, matches[] (region "cx,cy", pixel_count,
+centroid [x,y], extent {x:[min,max],y:[min,max]}, max_distance, optional
+pixels[]), scanned (alpha != 0 pixels compared) and transparent_skipped.
+
+Examples:
+  godot-ai-cli image find-color --path res://resources/texture/tiles.png --project . --color 255,80,0 --tolerance 60 --region-size 16x16
+  godot-ai-cli image find-color --path sheet.png --color '#FF5000' --tolerance 20 --region 48,0,16,16 --pixels`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if tolerance < 0 {
+				return jsonError(cmd, "INVALID_PARAMS",
+					fmt.Sprintf("--tolerance must be >= 0, got %v", tolerance), nil)
+			}
+			target, err := imganalysis.ParseColorSpec(color)
+			if err != nil {
+				return jsonError(cmd, "INVALID_PARAMS", fmt.Sprintf("--color: %v", err), nil)
+			}
+			resolved, err := resolveImagePath(path, project)
+			if err != nil {
+				return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
+			}
+			img, err := imganalysis.Load(resolved)
+			if err != nil {
+				return jsonError(cmd, "IMAGE_LOAD_FAILED", err.Error(), nil)
+			}
+			payload := map[string]any{
+				"texture":  path,
+				"resolved": resolved,
+			}
+			if region != "" {
+				x, y, w, h, rerr := parseRect(region)
+				if rerr != nil {
+					return jsonError(cmd, "INVALID_PARAMS",
+						fmt.Sprintf("--region %q: %v (want x,y,w,h)", region, rerr), nil)
+				}
+				img, err = imganalysis.Crop(img, x, y, w, h)
+				if err != nil {
+					return jsonError(cmd, "INVALID_PARAMS", fmt.Sprintf("--region: %v", err), nil)
+				}
+				payload["region"] = region
+			}
+			bw, bh := 0, 0
+			if regionSize != "" {
+				bw, bh, err = parseCellSpec(regionSize)
+				if err != nil {
+					return jsonError(cmd, "INVALID_PARAMS",
+						fmt.Sprintf("--region-size: %v (want WxH, e.g. 16x16)", err), nil)
+				}
+			}
+			res := imganalysis.ColorFind(img, target, tolerance, bw, bh, pixels)
+			payload["size"] = res.Size
+			payload["region_size"] = res.RegionSize
+			payload["color"] = imganalysis.ColorHex(target)
+			payload["tolerance"] = tolerance
+			payload["matches"] = res.Matches
+			payload["scanned"] = res.Scanned
+			payload["transparent_skipped"] = res.TransparentSkipped
+			return printJSON(cmd.OutOrStdout(), payload, prettyOutput)
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", "", "image file (disk path or res://)")
+	cmd.Flags().StringVar(&project, "project", "", "Godot project dir for res:// paths (default: project of the last launch)")
+	cmd.Flags().StringVar(&color, "color", "", "target color: R,G,B (e.g. 255,80,0) or #RRGGBB (e.g. '#FF5000')")
+	cmd.Flags().Float64Var(&tolerance, "tolerance", 0, "max RGB euclidean distance (0..441.67); 0 = exact color match")
+	cmd.Flags().StringVar(&region, "region", "", "only scan a sub-region: x,y,w,h in source-image pixels")
+	cmd.Flags().StringVar(&regionSize, "region-size", "", "group the scan into atlas-grid blocks WxH (e.g. 16x16; default: whole image)")
+	cmd.Flags().BoolVar(&pixels, "pixels", false, "include every matching pixel coordinate (block-local) in each match")
+	_ = cmd.MarkFlagRequired("path")
+	_ = cmd.MarkFlagRequired("color")
+	_ = cmd.MarkFlagRequired("tolerance")
 	return cmd
 }
 

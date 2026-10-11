@@ -107,19 +107,23 @@ type CLIFlagSpec struct {
 // because they talk to the daemon, not to a plugin command (or route
 // through a dynamic command name, or — the image group — run fully local).
 var HandWiredLeaves = []string{
-	"session list",      // daemon-side: GET /godot-ai/cli/sessions
-	"session activate",  // daemon-side: POST /godot-ai/cli/activate
-	"custom list",       // daemon-side: custom-tool catalog cached from plugin events
-	"custom invoke",     // dynamic plugin command custom_tool:<name>
-	"call",              // escape hatch for arbitrary plugin commands
-	"image palette",     // local: pure-Go texture palette analysis, no daemon
-	"image probe",       // local: pure-Go pixel sampling, no daemon
-	"image grid-detect", // local: pure-Go sprite-sheet grid detection, no daemon
-	"image cells",       // local: pure-Go per-cell alpha occupancy, no daemon
-	"image view",        // local: pure-Go nearest-neighbor upscale for inspection, no daemon
-	"script run",        // local: engine --script probe without editor/daemon
-	"tilemap dump",      // local: .tscn tile_map_data decode without opening the scene
-	"tilemap render",    // local: TileMapLayer → PNG composite without opening the scene
+	"session list",          // daemon-side: GET /godot-ai/cli/sessions
+	"session activate",      // daemon-side: POST /godot-ai/cli/activate
+	"custom list",           // daemon-side: custom-tool catalog cached from plugin events
+	"custom invoke",         // dynamic plugin command custom_tool:<name>
+	"call",                  // escape hatch for arbitrary plugin commands
+	"image palette",         // local: pure-Go texture palette analysis, no daemon
+	"image probe",           // local: pure-Go pixel sampling, no daemon
+	"image grid-detect",     // local: pure-Go sprite-sheet grid detection, no daemon
+	"image cells",           // local: pure-Go per-cell alpha occupancy, no daemon
+	"image view",            // local: pure-Go nearest-neighbor upscale for inspection, no daemon
+	"image find-color",      // local: pure-Go RGB-distance color reverse lookup, no daemon
+	"script run",            // local: engine --script probe without editor/daemon
+	"tilemap dump",          // local: .tscn tile_map_data decode without opening the scene
+	"tilemap render",        // local: TileMapLayer → PNG composite without opening the scene
+	"tilemap find-by-color", // local: cell reverse lookup by atlas pixel color, no daemon
+	"filesystem snapshot",   // local: workspace hash snapshot, no daemon
+	"filesystem changed",    // local: workspace diff against a snapshot, no daemon
 }
 
 // InternalOnlySpec documents a registered plugin command that is

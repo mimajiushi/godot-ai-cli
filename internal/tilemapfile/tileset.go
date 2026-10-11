@@ -2,6 +2,7 @@ package tilemapfile
 
 import (
 	"fmt"
+	"image"
 	"os"
 	"regexp"
 	"strconv"
@@ -146,4 +147,31 @@ func parseVector2i(value string) ([2]int, bool) {
 	x, _ := strconv.Atoi(m[1])
 	y, _ := strconv.Atoi(m[2])
 	return [2]int{x, y}, true
+}
+
+// vector2Re 匹配 Vector2(x, y) 形式的属性值（允许浮点——Node2D 的坐标
+// 不一定都是整数）。
+var vector2Re = regexp.MustCompile(`^Vector2\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)`)
+
+// parseVector2 解析 Vector2(x, y) 形式的取值。
+func parseVector2(value string) ([2]float64, bool) {
+	m := vector2Re.FindStringSubmatch(value)
+	if m == nil {
+		return [2]float64{}, false
+	}
+	x, err1 := strconv.ParseFloat(m[1], 64)
+	y, err2 := strconv.ParseFloat(m[2], 64)
+	if err1 != nil || err2 != nil {
+		return [2]float64{}, false
+	}
+	return [2]float64{x, y}, true
+}
+
+// AtlasRect 是某个 atlas 坐标在纹理上的像素矩形：margin + atlas_coord *
+// (region + separation)。tilemap render 的合成与 tilemap find-by-color 的
+// 逐格像素体检共用它，两条命令的"这一格对应纹理哪块像素"必须完全一致。
+func (s *AtlasSource) AtlasRect(atlas [2]int) image.Rectangle {
+	sx := s.Margin[0] + atlas[0]*(s.RegionSize[0]+s.Separation[0])
+	sy := s.Margin[1] + atlas[1]*(s.RegionSize[1]+s.Separation[1])
+	return image.Rect(sx, sy, sx+s.RegionSize[0], sy+s.RegionSize[1])
 }

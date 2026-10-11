@@ -15,6 +15,18 @@ type RenderResult struct {
 	Cells              int
 	RegionSize         [2]int
 	AlternativeIgnored int // cells whose alternative tile was rendered as alternative 0
+	// Origin 是输出图左上角像素在图层像素坐标系里的偏移：used_rect 的最小格
+	// 坐标 × 格子像素尺寸。于是 "输出第 (px,py) 个像素属于哪一格" =
+	// ((Origin[0]+px)/cell, (Origin[1]+py)/cell)。图层自身的 position 不叠加
+	// （见 LayerPosition），因为 origin 描述的是这次裁剪的偏移。
+	Origin [2]int
+	// CellSize 是每个格子的像素尺寸（= RegionSize，单独回报是因为需求里
+	// "第 N 个像素属于哪一格"要的就是它）。
+	CellSize [2]int
+	// LayerPosition 是图层节点自身的 position：世界坐标 = Origin + 像素 +
+	// LayerPosition（HasTransform 为真时旋转/缩放未叠加）。
+	LayerPosition [2]float64
+	HasTransform  bool
 }
 
 // RenderLayer composites one TileMapLayer into a PNG-ready image: every
@@ -88,9 +100,7 @@ func RenderLayer(sc *Scene, layerName string) (*RenderResult, error) {
 			ignored++
 		}
 		// Atlas pixel position: margin + atlas_coord * (region + separation).
-		sx := src.Margin[0] + c.Atlas[0]*(regionSize[0]+src.Separation[0])
-		sy := src.Margin[1] + c.Atlas[1]*(regionSize[1]+src.Separation[1])
-		sr := image.Rect(sx, sy, sx+regionSize[0], sy+regionSize[1])
+		sr := src.AtlasRect(c.Atlas)
 		if !sr.In(tex.Bounds()) {
 			return nil, fmt.Errorf("cell (%d,%d): atlas region %v is outside the %v texture", c.X, c.Y, sr, tex.Bounds())
 		}
@@ -104,5 +114,9 @@ func RenderLayer(sc *Scene, layerName string) (*RenderResult, error) {
 		Cells:              len(layer.Cells),
 		RegionSize:         regionSize,
 		AlternativeIgnored: ignored,
+		Origin:             [2]int{minX * regionSize[0], minY * regionSize[1]},
+		CellSize:           regionSize,
+		LayerPosition:      layer.Position,
+		HasTransform:       layer.HasTransform,
 	}, nil
 }

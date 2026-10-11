@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -243,6 +248,124 @@ func TestDecodeTileMapDataErrors(t *testing.T) {
 	}
 	if got, err := DecodeTileMapData(base64.StdEncoding.EncodeToString([]byte{0, 0})); err != nil || len(got) != 0 {
 		t.Errorf("header-only payload = %v, %v; want empty, nil", got, err)
+	}
+}
+
+// encodeCellsNumeric 用 Godot format=3 的**数值列表**形态编码 tile_map_data
+// （与 encodeCells 的 base64 形态字节完全一致，只是写法不同）。
+func encodeCellsNumeric(cells ...Cell) string {
+	raw, _ := base64.StdEncoding.DecodeString(encodeCells(cells...))
+	parts := make([]string, len(raw))
+	for i, b := range raw {
+		parts[i] = strconv.Itoa(int(b))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// rewriteTileMapData 把 fixture 场景里第一处 tile_map_data 属性行替换成给定文本
+// （数值列表形态 / 折行形态 / 不支持的形态都靠它构造）。
+func rewriteTileMapData(t *testing.T, scenePath, propertyText string) {
+	t.Helper()
+	data, err := os.ReadFile(scenePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?m)^tile_map_data = .*$`)
+	loc := re.FindStringIndex(string(data))
+	if loc == nil {
+		t.Fatalf("scene has no tile_map_data line:\n%s", data)
+	}
+	text := string(data)[:loc[0]] + propertyText + string(data)[loc[1]:]
+	if err := os.WriteFile(scenePath, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestParseSceneNumericTileMapData：format=3 的数值列表形态
+// PackedByteArray(0, 0, 1, 0, ...) 必须解析出与 base64 形态**完全相同**的格子
+// （vF-4：旧解析器只认 base64 字符串，数值形态被静默跳过成 cells: []）。
+// 覆盖单行与导出器折行两种写法。
+func TestParseSceneNumericTileMapData(t *testing.T) {
+	scenePath := fixtureProject(t, groundFixtureCells(), []Cell{{X: 0, Y: 0, Source: 0, Atlas: [2]int{0, 0}}})
+
+	base, err := ParseScene(scenePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := base.Layers[0].Cells
+	if len(want) != 4 {
+		t.Fatalf("base64 fixture decoded %d cells, want 4", len(want))
+	}
+
+	// 单行数值列表形态。
+	rewriteTileMapData(t, scenePath,
+		"tile_map_data = PackedByteArray("+encodeCellsNumeric(groundFixtureCells()...)+")")
+	got, err := ParseScene(scenePath)
+	if err != nil {
+		t.Fatalf("数值列表形态解析失败：%v", err)
+	}
+	if !reflect.DeepEqual(got.Layers[0].Cells, want) {
+		t.Errorf("数值列表形态 = %+v, want %+v（与 base64 形态一致）", got.Layers[0].Cells, want)
+	}
+
+	// 折行形态：超长列表被导出器断开（续行只有数字/逗号）。
+	nums := strings.Split(encodeCellsNumeric(groundFixtureCells()...), ", ")
+	rewriteTileMapData(t, scenePath,
+		"tile_map_data = PackedByteArray("+strings.Join(nums[:6], ", ")+",\n"+
+			strings.Join(nums[6:], ", ")+")")
+	wrapped, err := ParseScene(scenePath)
+	if err != nil {
+		t.Fatalf("折行数值列表形态解析失败：%v", err)
+	}
+	if !reflect.DeepEqual(wrapped.Layers[0].Cells, want) {
+		t.Errorf("折行形态 = %+v, want %+v", wrapped.Layers[0].Cells, want)
+	}
+	// 下一层的属性没有被吞掉（折行续行判定不能越过属性行）。
+	if len(wrapped.Layers) != 2 || wrapped.Layers[1].TileSetRef != "1_ts" {
+		t.Errorf("折行后第二层 = %+v, want Decor 且 tile_set 仍解析到", wrapped.Layers)
+	}
+}
+
+// TestParseSceneRejectsUnsupportedTileMapData：解析不了的 tile_map_data 形态
+// 必须报错，不能静默给空 cells（vF-4 的"静默空比报错危险"）。
+func TestParseSceneRejectsUnsupportedTileMapData(t *testing.T) {
+	cases := []struct {
+		name     string
+		property string
+	}{
+		{"数组字面量", "tile_map_data = [1, 2, 3]"},
+		{"字节越界", "tile_map_data = PackedByteArray(0, 0, 300)"},
+		{"非数值项", "tile_map_data = PackedByteArray(0, 0, 1, x)"},
+		{"无闭合括号", "tile_map_data = PackedByteArray(0, 0, 1"},
+		{"空字面量", "tile_map_data = null"},
+		{"非法 base64", `tile_map_data = PackedByteArray("!!!")`},
+	}
+	for _, c := range cases {
+		scenePath := fixtureProject(t, groundFixtureCells(), nil)
+		rewriteTileMapData(t, scenePath, c.property)
+		sc, err := ParseScene(scenePath)
+		if err == nil {
+			cells := "<no layer>"
+			if len(sc.Layers) > 0 {
+				cells = fmt.Sprintf("%d cells", len(sc.Layers[0].Cells))
+			}
+			t.Errorf("%s: ParseScene 必须报错，却静默给出 %s", c.name, cells)
+			continue
+		}
+		if !strings.Contains(err.Error(), "tile_map_data") {
+			t.Errorf("%s: 错误信息要指出 tile_map_data，got %v", c.name, err)
+		}
+	}
+
+	// 显式空数据是合法的空层（不是"解析不了"）。
+	scenePath := fixtureProject(t, groundFixtureCells(), nil)
+	rewriteTileMapData(t, scenePath, "tile_map_data = PackedByteArray()")
+	sc, err := ParseScene(scenePath)
+	if err != nil {
+		t.Fatalf("PackedByteArray() 应视为显式空数据：%v", err)
+	}
+	if len(sc.Layers[0].Cells) != 0 {
+		t.Errorf("PackedByteArray() = %+v, want 0 格", sc.Layers[0].Cells)
 	}
 }
 

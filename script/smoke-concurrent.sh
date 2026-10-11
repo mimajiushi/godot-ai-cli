@@ -111,8 +111,12 @@ echo "== full stop quits every editor (G2) =="
 PIDS=$("$CLI" status --http-port "$HTTP" | python -c "import json,sys; print(' '.join(str(s['editor_pid']) for s in json.load(sys.stdin)['sessions']))")
 STOP_ALL=$("$CLI" stop --http-port "$HTTP" 2>&1) \
   && stage_pass "full stop" || stage_fail "full stop" "$STOP_ALL"
-echo "$STOP_ALL" | grep -q '"settings_restored":true' \
-  && stage_pass "settings restored" || stage_fail "settings restored" "$STOP_ALL"
+# godot-ai-cli fork：改用 stop 回执的现代契约。settings_restored 只在遗留 pre-3.2.9
+# 备份被还原时才置位（internal/cli/status_stop.go），插件 >=3.2.9 的现代路径不再产生
+# 备份，该键永不出现，旧断言不可满足会误报；编辑器是否真的退出由紧随其后的
+# "no orphaned editors" 阶段实测覆盖。
+echo "$STOP_ALL" | grep -q '"status":"stopped"' \
+  && stage_pass "full stop (status stopped)" || stage_fail "full stop (status stopped)" "$STOP_ALL"
 # Headless editors take a while to exit; allow a grace window. The image
 # match uses a prefix of the actual binary name (tasklist truncates long
 # image names, and a custom GODOT_BIN need not contain "godot").

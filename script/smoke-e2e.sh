@@ -106,10 +106,14 @@ fi
 
 echo "== stop + settings restore =="
 STOP_OUT=$("$CLI" stop --http-port "$HTTP" 2>&1)
+# godot-ai-cli fork：改用 stop 回执的现代契约。settings_restored 只在遗留 pre-3.2.9
+# 备份被还原时才置位（internal/cli/status_stop.go），插件 >=3.2.9 的现代路径不再产生
+# 备份，该键永不出现，旧断言不可满足会误报；EditorSettings 是否被改动由紧随其后的
+# byte-identical 阶段实测覆盖，遗留还原路径由 internal/godot/launch_backup*_test.go 单测覆盖。
 if [ $? -ne 0 ]; then
   stage_fail "stop" "$STOP_OUT"
-elif echo "$STOP_OUT" | grep -q '"settings_restored":true'; then
-  stage_pass "stop (settings_restored)"
+elif echo "$STOP_OUT" | grep -q '"status":"stopped"'; then
+  stage_pass "stop (status stopped)"
 else
   stage_fail "stop" "$STOP_OUT"
 fi

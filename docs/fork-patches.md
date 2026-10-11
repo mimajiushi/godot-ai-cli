@@ -1,7 +1,7 @@
-# Fork patches vs upstream v4.2.3
+# Fork patches vs upstream v4.3.0
 
 `plugin/godot_ai/` is a fork of [hi-godot/godot-ai](https://github.com/hi-godot/godot-ai)
-**v4.2.3** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
+**v4.3.0** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
 is the complete list of divergences. The behavioral patches are
 marked in the GDScript source with a `godot-ai-cli fork patch` comment —
 `grep -rn "godot-ai-cli fork patch" plugin/godot_ai` audits them — and gated
@@ -14,7 +14,9 @@ rewording, so neither shows up in that grep.
 > names the fork release that introduced it). **§16 documents the v4.1.0
 > rebase**: which patches were re-applied onto the new upstream architecture,
 > which upstream deletions made v3-era patches obsolete, and the upgrade
-> consequence for projects still on a 3.2.x plugin.
+> consequence for projects still on a 3.2.x plugin. **§21/§22 are the two
+> beta.1-era requirement batches and §23 is the v4.3.0 upstream sync** (the
+> current base, and the entry that supersedes every earlier version number).
 
 ## 1. `telemetry.gd` — rewritten as no-ops
 
@@ -308,8 +310,8 @@ Upstream-side follow-ups landed outside the vendored tree:
 ## Syncing with upstream
 
 1. Diff `plugin/godot_ai/` against the upstream tag (current base:
-   **v4.1.0**); every hunk that is not behind a `godot-ai-cli fork patch`
-   marker is upstream drift to review.
+   **v4.3.0** — see §23 for the sync that moved it there); every hunk that is
+   not behind a `godot-ai-cli fork patch` marker is upstream drift to review.
 2. Re-apply upstream changes **around** the marked patches; never remove a
    `ForkConfig` gate — extend `fork_config.gd` instead.
 3. Keep dormant upstream code compiling (guards early-return, never delete),
@@ -761,6 +763,28 @@ identical), so this sync is plugin-side plus version pins.
   `test_project/tests/test_clients.gd` is 329 KiB, so live mutations are
   unusable there too; the RS-030/032/033 scenarios park the oversized file
   out of `res://` for the duration of the mutation steps.
+  **Update — partially fixed upstream in v4.3.0 (§23, `#1131` /
+  `39ce72f7`).** The blanket refusal is gone for **oversized packed-binary
+  owners**: a `.res` / `.scn` above `MAX_FILE_BYTES` is no longer read
+  byte-wise at all — its references are enumerated from the engine's own
+  dependency records (`ResourceLoader.get_dependencies()` +
+  `ResourceUID`), so a move/rename/remove whose only oversized owner is a
+  packed binary now goes through. What is **not** fixed: an oversized
+  **script or text owner** (`.gd` / `.cs` / `.gdshader` / `.gdshaderinc` /
+  `.tscn` / `.tres`) still fails the whole order closed, because such a file
+  can name a target in an ordinary string the dependency graph never
+  reports. The refusal is at least honest about itself now: it carries the
+  new structured code `FILESYSTEM_DISCOVERY_FAILED` (declared in
+  `utils/error_codes.gd`, mirrored in upstream's Python
+  `protocol/errors.py`) instead of surfacing as an undifferentiated
+  `unchanged` / `INVALID_PARAMS`, and the reference scan is paced by the
+  observed frame interval (`#1137`), so a large tree no longer stalls the
+  editor. The byte bound also moved to where it belongs for a compressed
+  container: an `RSCC`-magic `.res`/`.scn` is expanded first
+  (`COMPRESSED_MAGIC`) and `MAX_FILE_BYTES` applies to the **expanded**
+  payload, not the on-disk bytes. ⇒ **RS-030/032/033 must keep parking the
+  file**: the parked `tests/test_clients.gd` is a script owner, not a
+  packed binary, so it still trips the fail-closed branch.
 
 ## 19. beta.25 requirement batch (6 user requirement docs)
 
@@ -1049,3 +1073,266 @@ stale-`.old` fallback with `locked_by` / `next_steps` error data (R-7), the
 release-time skill ops-count rendering (R-8) and the `status` rejection
 lifecycle fields with hint gating (R-9) all live in the Go CLI/daemon or in
 the skill docs — none of them touches a file under `plugin/godot_ai/`.
+
+## 23. Upstream v4.3.0 sync (unreleased worktree)
+
+`plugin.cfg` 4.3.1 → **4.3.2** (patch). This is the entry that supersedes every
+version number above: the fork's base is now upstream **v4.3.0**, the page
+title and `## Syncing with upstream` step 1 name it, and §18's "known upstream
+limitation" note carries an update because v4.3.0 changed part of that
+behaviour. §21/§22 are left exactly as written — they record what those two
+batches did at the time and are not statements about the current tree, so the
+`4.3.0` / `4.3.1` inside them stays.
+
+Sync shape: a per-file three-way merge with `base` = upstream **v4.2.3**
+(`f58314d`, the tree the fork was last synced to), `ours` = fork HEAD,
+`theirs` = upstream **v4.3.0** (`b82b5c5`, upstream CHANGELOG dated
+2026-10-03). 17 upstream commits (`#1121`…`#1145`) touch **26 files under
+`plugin/godot_ai/`, all `M`** — no additions, deletions or renames — so the
+whole sync is line-level, and the sentinel pass could classify every file:
+`SENTINEL-OK A=7 B=18 C=1`, 109 fork hunks of which 103 sit behind a marker
+and 6 were proven fork-private by grepping both upstream trees.
+
+State on disk: **nothing is committed.** The fork repository is `godot-ai-cli/`
+(its own `.git`, branch `main`); this round made no commit, tag or push, so
+`HEAD` is still `d41426d` (untagged) and every path `git status --porcelain`
+reports there is an unstaged ` M`. Read that list by *scope*, not as a running
+total: the **merge + review-fix set is 29 paths** — the 26 `plugin/godot_ai/**`
+files, this document, and the two smoke scripts `script/smoke-e2e.sh` /
+`script/smoke-concurrent.sh` — while the same round's release-notes rewrite adds
+`RELEASE_NOTES.md` as a **30th** uncommitted path (a separate deliverable, not
+part of the merge). The tree held exactly those 30 paths when this paragraph was
+written (2026-10-12), and any later edit moves the number — which is why the
+anchor here is the set's scope rather than a count to re-check.
+(`script/smoke-concurrent.sh` joined the set in the post-review fix round, which
+corrected the same stale `settings_restored` stop-phase expectation there as in
+the e2e script; the 26 / A=7 / B=18 / C=1 figures above describe the merge itself
+and are unaffected.) One trap worth recording: the
+*workspace root* is a separate repository whose `.gitignore` is `*` (everything
+ignored), so a `git status` run from there prints nothing and proves nothing —
+`cd godot-ai-cli` first.
+
+### 23.1 A/B/C — how each of the 26 files was handled
+
+- **A (7) — fork-marked, three-way merged**: `runtime/game_helper.gd` (40
+  markers), `utils/server_lifecycle.gd` (25), `handlers/node_handler.gd` (16),
+  `mcp_dock.gd` (15), `client_configurator.gd` (4),
+  `runtime/game_logger.gd` (3), `utils/port_resolver.gd` (1).
+- **B (18) — byte-identical to upstream v4.2.3, so mirrored verbatim from
+  v4.3.0**: `clients/_base.gd`, `_cli_finder.gd`, `_cli_strategy.gd`,
+  `_dsh_strategy.gd`, `_json_strategy.gd`, `_path_template.gd`,
+  `_toml_strategy.gd`, `_yaml_strategy.gd`, the shims `cline.gd`,
+  `kilo_code.gd`, `roo_code.gd`, `vscode.gd`, `zed.gd`, `zoo_code.gd`, plus
+  `handlers/filesystem_mutation.gd`, `utils/client_mutation_lock.gd`,
+  `utils/error_codes.gd` and `utils/transport_capability.gd`. That the fork
+  has never forked this half of the tree is what makes the merge cheap — and
+  it is also why the Flatpak divergence in §23.6 is a *new* gap rather than a
+  merge artifact.
+- **C (1) — `plugin.cfg`**: fork-owned; only `version` moved (C4).
+
+### 23.2 The four conflicts, and how each was decided
+
+Four files conflicted in the dry run; the other 22 merged clean.
+
+- **C1 — `handlers/node_handler.gd`, 9 lines (mechanical).** Both sides wrote
+  `var prop_hint: int = PROPERTY_HINT_NONE` plus a hint-string slot: ours
+  inferred it (`var prop_hint_string := ""`), upstream made it explicit
+  (`var prop_hint_string: String = ""`) via `#1132`. Decision: keep the fork's
+  marker comment, take upstream's explicit type — identical semantics, and the
+  next sync stops conflicting at that line.
+- **C2 — `handlers/node_handler.gd`, 434 lines (both sides appended at the
+  same point).** Not a real overlap: the fork's `reset-property` /
+  `_node_ref_display` additions and upstream's Node-typed value work
+  (`_resolve_node_value`, `_node_matches_hint`, `_serialize_slot`, `#1144`)
+  live in different functions. Decision: keep **both** sets.
+- **C3 — `runtime/game_helper.gd`, 13 lines, the one blocking conflict.**
+  v4.2.3 built the eval script source from inline concatenation; the fork and
+  upstream (`#1129`) independently extracted it into a function with the same
+  name but a different shape — instance vs `static`, `(code, run_fn)` vs
+  `(run_fn, code)`, `"func execute():"` vs `"func execute() -> Variant:"`, no
+  annotation vs `@warning_ignore("untyped_declaration")` on the user function
+  header. A naive merge leaves **two definitions of
+  `_build_eval_script_source`**, which GDScript rejects at parse time, so the
+  plugin would not load and every gate would fail. Decision: fuse into ONE
+  `static func _build_eval_script_source(run_fn: String, code: String) ->
+  String` that keeps upstream's signature and body shape while retaining the
+  fork's `_rewrite_dollar_refs` rewrite and `_SN_HELPER_SOURCE` injection; the
+  single call site in `_handle_eval` passes `(run_fn, code)`. A whole-tree
+  duplicate-definition scan confirms no other same-name collision.
+- **C4 — `plugin.cfg`.** Fork-owned version, no other key: 4.3.1 → **4.3.2**.
+
+### 23.3 What landed
+
+- **Flatpak / sandbox support — the round's dominant theme** (`#1138` start the
+  server inside a Flatpak/Steam sandbox, `#1139` configure clients from and for
+  Flatpak, `#1140` refuse to configure an unreachable client from a Flatpak
+  editor, `#1133` launcher-lookup diagnostics): `client_configurator.gd`, the
+  whole `clients/` layer including `_path_template.gd`'s environment
+  passthrough list, and `utils/transport_capability.gd`.
+- **Server lifecycle and process identity** (`#1134`): `utils/server_lifecycle.gd`
+  and `utils/port_resolver.gd` now report process-identity diagnostics instead
+  of guessing at a stale port.
+- **Node editing** (`#1132` reparent instanced owners, `#1144` Node-typed value
+  resolution, `#1145` Node-typed export assignment): `handlers/node_handler.gd`
+  resolves a `Node`-typed property to and from a scene path, so an agent sets
+  and reads `/Main/Player` rather than Godot's object repr.
+- **Runtime eval and logging** (`#1129` the extracted
+  `_build_eval_script_source` with `-> Variant` and the untyped-declaration
+  suppression, `#1130` a bounded queue for the detached game logger):
+  `runtime/game_helper.gd`, `runtime/game_logger.gd`.
+- **Filesystem discovery** (`#1120` the new `FILESYSTEM_DISCOVERY_FAILED` code
+  plus a frame-count deadline, `#1131` no more blanket binary refusals, `#1137`
+  pacing by the observed frame interval): `handlers/filesystem_mutation.gd` and
+  `utils/error_codes.gd` (+5/−0). The behavioural half of this is annotated at
+  §18 — it **partially** fixes the 256 KiB limitation recorded there.
+- **Dock** (`#1121`/`#1122` server-version label restyle, writing only what
+  changed): `mcp_dock.gd`.
+- **Nothing behavioural in `plugin/godot_ai/`** from `#1135` (telemetry
+  batching — telemetry is stripped in this fork, §1), `#1136` (dependency
+  bump), `#1141` (`Tool.input_schema` test fix), `#1142` (nightly CI log
+  retention) and `#1143` (prepare 4.3.0).
+
+### 23.4 Re-audit of the four brittle interfaces
+
+Checked before merging, because each one would have turned the sync into a
+breaking change rather than a patch:
+
+- **(a) WebSocket handshake frames — unchanged.** The files that carry the
+  format, `plugin/godot_ai/connection.gd` and `plugin.gd`, are byte-identical
+  between upstream v4.2.3 and v4.3.0, and none of the 26 changed files is a
+  handshake file. No adapter needed.
+- **(b) capability record format — unchanged.** The GDScript key list
+  (`version`, `http`, `websocket`, `instance_nonce`) appears in the diff as
+  context lines only, and no added or removed Python line touches the record
+  schema. Both sides keep reading each other's record. What *did* change is
+  where Linux looks for the file — see §23.6.
+- **(c) error codes — one addition, no renames.** Exactly one new member,
+  `FILESYSTEM_DISCOVERY_FAILED`, with the same literal and the same 4-line
+  comment on both sides (`utils/error_codes.gd`, upstream
+  `protocol/errors.py`); no code was renamed, removed or reused. The Go side
+  passes codes through without enumerating them, and
+  `internal/ops/parity_test.go`'s `TestErrorCodeParity` is one-directional
+  (bridge→plugin, via `cliSideOnly`), so a plugin-side addition cannot fail it.
+  RS-067 pins that the new code is not swallowed into `INTERNAL_ERROR`.
+- **(d) Godot version gate — unchanged.** `MIN_GODOT_MAJOR := 4`,
+  `MIN_GODOT_MINOR := 7` and the predicate
+  `major == MIN_GODOT_MAJOR and minor >= MIN_GODOT_MINOR` are untouched
+  (upstream `plugin.gd` is byte-identical between the two tags), so the
+  "Godot 4.7+" documentation stays correct.
+
+### 23.5 Why the plugin pin is 4.3.2, and what a stale plugin sees
+
+§21 took the plugin to 4.3.0 and §22 to 4.3.1 for *fork* batches, and then
+upstream shipped its own 4.3.0 — three trees would have claimed the same patch
+line. The merge therefore lands one patch above the tag it absorbed:
+**4.3.2**, taken from the `plugin.cfg` that the CLI reads for `-v` and
+`status`.
+
+A project still carrying a 4.3.0 or 4.3.1 plugin connects to this daemon: the
+handshake tolerates patch-level drift and flags the session `plugin_stale`
+(§12) until `plugin install --project <dir>` plus a full editor restart. A
+4.2.x or 3.2.x plugin is still refused as a `minor` / `major` mismatch
+(`internal/bridge`), and the same `plugin.cfg` is what the install path uses
+to detect the upgrade.
+
+### 23.6 Known divergence — Linux/Flatpak capability directory (Go side not aligned)
+
+Upstream v4.3.0 taught the plugin, inside a Flatpak sandbox, to look for the
+capability record where the *host* would see it. Fork side, now mirrored
+verbatim: `utils/transport_capability.gd`'s `path_for_http_port()` resolves
+Linux through `linux_config_home(_flatpak_info())`, and
+`linux_config_home_variable()` returns `HOST_XDG_CONFIG_HOME` when the sandbox
+shares the host config directory (`flatpak_shares_config_home()`, reading
+`/.flatpak-info`), otherwise `XDG_CONFIG_HOME`, otherwise `$HOME/.config`.
+
+The fork's own Go daemon does not know that rule:
+`internal/capability/capability.go` reads the sandbox-local
+`XDG_CONFIG_HOME`, and `HOST_XDG_CONFIG_HOME` appears nowhere on the Go side.
+So under a Flatpak editor that shares the host config directory the plugin
+publishes and looks for
+`HOST_XDG_CONFIG_HOME/godot-ai/capabilities/http-<port>.json` while the daemon
+writes `XDG_CONFIG_HOME/godot-ai/capabilities/...` — the two sides can miss
+each other's record even though the record itself is byte-compatible. Windows
+is unaffected (both sides use `%LOCALAPPDATA%\godot-ai\capabilities`, and an
+override is refused by each), which is why this did not block the sync.
+
+**Status: registered, not fixed.** Aligning the Go side is a separate
+requirement, deliberately out of scope for a plugin sync — RS-068 carries the
+repro and the acceptance criteria.
+
+### 23.7 Known gap — marker coverage of the untouched files
+
+The promise in the header ("the behavioral patches are marked … `grep -rn
+"godot-ai-cli fork patch" plugin/godot_ai` audits them") holds for the 7 files
+this round merged, but not across the whole tree. 23 `.gd` files differ from
+upstream v4.3.0, are not part of this sync, and are unevenly attributed:
+
+- 9 files are fully attributed — every diff hunk sits behind a marker; 7 of
+  them use only the canonical `godot-ai-cli fork patch` form
+  (`handlers/shader_handler.gd`, `handlers/tileset_handler.gd`,
+  `handlers/visual_shader_handler.gd`, `testing/test_runner.gd`,
+  `utils/client_job_owner.gd`, `utils/mcp_server_state.gd`,
+  `utils/server_version_check.gd`) and 2 more (`plugin.gd`,
+  `debugger/mcp_debugger_plugin.gd`) also rely on short-form markers.
+- 14 files carry at least one hunk with no marker in any form: 43 hunks under
+  the looser rule (canonical or short-form), 48 under the strict canonical-only
+  rule.
+- 3 files have no marker anywhere despite real fork content:
+  `handlers/material_handler.gd` (16 unattributed hunks — the §21
+  inline-material work), `handlers/script_handler.gd` (3) and
+  `utils/resource_io.gd` (1). `telemetry.gd` is *not* a counterexample: it is
+  the §1 whole-file rewrite, whose body says "STRIPPED in the godot-ai-cli
+  fork" — the exception the header already documents.
+- Short-form markers (`# fork 补丁（需求 …）`) still exist in
+  `handlers/editor_handler.gd`, `debugger/mcp_debugger_plugin.gd` and
+  `plugin.gd`, and the merge deliberately did **not** normalize them: touching
+  untouched files to restyle comments would bloat a diff whose whole value is
+  being reviewable. Five fork-only additions are worth naming too, because they
+  can never appear in an upstream diff at all:
+  `handlers/spriteframes_handler.gd` and
+  `utils/{cli_daemon,fork_config,port_pins,version_compat}.gd`.
+
+**Status: registered, not fixed.** This is historical legacy from §16–§22, not
+something this sync introduced; normalizing it is its own TODO with its own
+review — RS-069.
+
+### 23.8 Deliberately not synced
+
+Upstream v4.3.0 also changed files outside the plugin: `docs/**`, `AGENTS.md`,
+`CHANGELOG.md`, `README.md`, `.github/workflows/nightly-diagnostics.yml`,
+`pyproject.toml`, `script/runtime_qualification.py`, `src/godot_ai/` (protocol,
+transport, telemetry, runtime dependency and node tool modules) and both test
+trees. None of it is in the fork's scope — the fork ships a Go CLI/daemon and
+an in-editor plugin, not the upstream Python server — so nothing there was
+merged, and the audit's Linux/Flatpak finding only reaches the fork through
+§23.6.
+
+### 23.9 Version-reference audit
+
+`grep -rn '4\.3\.[012]' godot-ai-cli godot-ai-skill` was run after the merge; every
+surviving `4.3.0` / `4.3.1` hit is one of the following, and none of them is a
+stale *current-version* pointer:
+
+- `plugin/godot_ai/plugin.cfg` — `4.3.2` (C4); no `4.3.0` / `4.3.1` remains.
+- `docs/fork-patches.md` — §21 (`4.2.5 → 4.3.0`) and §22 (`4.3.0 → 4.3.1`) are
+  per-batch history and keep their numbers verbatim; §23 declares 4.3.2 current.
+  The page title, the base-version line, the opening blockquote and
+  `Syncing with upstream` step 1 now say upstream **v4.3.0** — that is the *base*
+  axis, which moves independently of the plugin's own patch level.
+- `RELEASE_NOTES.md` — a release body, never a version pointer, and it differs
+  by copy: the **committed** copy is the released `v0.2.0-beta.1` body (tag
+  `v0.2.0-beta.1` → `65d1b5e`), which records plugin 4.3.0 as shipped; the
+  **worktree** copy is the still-unreleased `v0.2.0-beta.2` body (this round is
+  uncommitted, no tag at `HEAD`) and pins **4.3.2** — its `4.3.0` / `4.3.1`
+  occurrences are the upstream base axis and the 4.3.0 → 4.3.1 → 4.3.2 upgrade
+  path, not a current-version claim. (An earlier revision of this bullet read
+  the file as the released 4.3.0 body: true of the committed copy, stale for the
+  rewritten one.) The audit verdict is unchanged.
+- `internal/bridge/bridge_test.go` and `bridge_rejections_test.go` —
+  `"plugin_version": "4.3.0"` is a deliberate fixture that *must* differ from
+  `testVersion` (`4.2.5`) to exercise the minor-mismatch rejection path; changing
+  it to 4.3.2 would silently disarm that test.
+- `script/smoke-e2e.sh` — one comment naming v4.3.0 as the sync that absorbed
+  suites; the counts beside it are live values owned by the suite refresh.
+- `godot-ai-skill/` — zero occurrences of `4.3.0`, `4.3.1` or `4.3.2`, so no edit
+  was needed there.

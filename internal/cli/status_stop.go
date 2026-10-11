@@ -144,7 +144,11 @@ Examples:
 				}
 				// 失败路径也合并拒绝线索：被拒绝的编辑器连的往往就是另一
 				// 个端口上活着的 daemon（需求 handshake-rejection-visibility）。
-				if rj := mergedRecentRejections(live); len(rj) > 0 {
+				// 会话列表传 nil：本端口 daemon 不可达时无从确认「已被就绪
+				// 会话取代」，按文档 (a) 的第一分支（该项目当前没有 ready
+				// 会话）保守保留 hint——没有证据就不宣布陈旧。记录本身照给
+				// 生命周期字段（需求 R-9 (b)）。
+				if rj, _ := renderedRecentRejections(live, nil); len(rj) > 0 {
 					payload["recent_rejections"] = rj
 					payload["hint"] = fmt.Sprintf("%v；有编辑器在尝试连接但被拒绝：见 recent_rejections（修法通常是完全退出并重启编辑器）", payload["hint"])
 				}
@@ -170,6 +174,10 @@ Examples:
 			if projectDir != "" && findProjectSession(mustSessionList(sessions), projectDir) == nil {
 				if editors, scanErr := unconnectedEditorsReport(projectDir); len(editors) > 0 {
 					live := liveDaemonEntries(knownDaemonsReport(port))
+					// 与成功路径走同一渲染入口（需求 R-9）：这里该工程在解析
+					// 到的 daemon 上无 session，superseded_by 自然缺席，但
+					// age_seconds/process_alive 仍然给全。
+					rejections, _ := renderedRecentRejections(live, mustSessionList(sessionsBody["sessions"]))
 					return jsonError(cmd, "EDITOR_OPEN_UNCONNECTED",
 						fmt.Sprintf("检测到工程 %s 的编辑器进程已打开，但它没有连接任何 daemon；launch 会再开一个编辑器实例（场景锁/保存互相覆盖风险）", projectDir),
 						map[string]any{
@@ -181,7 +189,7 @@ Examples:
 							},
 							"retryable":         false,
 							"scan_note":         scanErr,
-							"recent_rejections": mergedRecentRejections(live),
+							"recent_rejections": rejections,
 						})
 				}
 			}
@@ -216,9 +224,18 @@ Examples:
 			// 握手拒绝线索（需求 handshake-rejection-visibility）：本机任意
 			// 活 daemon 上的拒绝记录合并展示——「编辑器面板显示 Incompatible
 			// server、CLI 侧 sessions 永远空」的现场由此可诊断。
-			if rj := mergedRecentRejections(liveDaemonEntries(known)); len(rj) > 0 {
+			// 需求 R-9：每条记录补生命周期字段（age_seconds/process_alive/
+			// superseded_by），且只在「该项目当前没有 ready 会话」或「关联的
+			// editor_pid 仍存活」时才给现在时 hint。这里选择省略 hint，而不是
+			// 文档 (c) 的过去时陈述句：生命周期事实已由 recent_rejections 的
+			// 新字段结构化表达（调用方可自行判定），而 hint 在本回包里是
+			// 「下一步动作」通道——历史记录不该占用它，省略即不误导。
+			// sessions 传解析到的 daemon 的那一份（与回包 sessions 区同源）。
+			if rj, current := renderedRecentRejections(liveDaemonEntries(known), mustSessionList(sessionsBody["sessions"])); len(rj) > 0 {
 				payload["recent_rejections"] = rj
-				payload["hint"] = "有编辑器在尝试连接但被拒绝：见 recent_rejections；修法通常是【完全退出并重启编辑器】（磁盘插件已对齐时 reload-plugin 不够）"
+				if current {
+					payload["hint"] = "有编辑器在尝试连接但被拒绝：见 recent_rejections；修法通常是【完全退出并重启编辑器】（磁盘插件已对齐时 reload-plugin 不够）"
+				}
 			}
 			if len(compatWarnings) > 0 {
 				payload["warnings"] = compatWarnings

@@ -1006,6 +1006,152 @@ func TestStatusMergesRecentRejections(t *testing.T) {
 	}
 }
 
+// runStatusJSON 跑一次 status 并解析 JSON 回包（R-9 相关用例共用）。
+func runStatusJSON(t *testing.T, httpPort int, extra ...string) map[string]any {
+	t.Helper()
+	args := append([]string{"status", "--http-port", strconv.Itoa(httpPort)}, extra...)
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status %v: %v\n%s", extra, err, buf.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("status output is not JSON: %v\n%s", err, buf.String())
+	}
+	return out
+}
+
+// rejectionEntryOf 取出回包里唯一一条 recent_rejections 记录。
+func rejectionEntryOf(t *testing.T, out map[string]any) map[string]any {
+	t.Helper()
+	rj, ok := out["recent_rejections"].([]any)
+	if !ok || len(rj) != 1 {
+		t.Fatalf("recent_rejections = %v, want exactly one", out["recent_rejections"])
+	}
+	entry, ok := rj[0].(map[string]any)
+	if !ok {
+		t.Fatalf("rejection entry = %v", rj[0])
+	}
+	return entry
+}
+
+// TestStatusSuppressesStaleRejectionHint：拒绝记录关联的编辑器已退出、且该项目
+// 当前已有 ready 会话时，status 不得再用现在时 hint 要求用户「完全退出并重启
+// 编辑器」（需求 R-9 现场：daemon 换版后旧编辑器被拒一次，随后该 pid 消失、
+// 新编辑器就绪，回包却自相矛盾）。记录本身仍要给出——process_alive:false、
+// superseded_by（取代它的会话 id）、age_seconds 三个字段补齐，判断权交给调用方。
+func TestStatusSuppressesStaleRejectionHint(t *testing.T) {
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.5")
+
+	// 旧编辑器（插件 4.9.0 与 daemon 不兼容）被拒握手；pid 用本机不存在的号，
+	// rejectionPIDAlive 的真实判据还会核对进程映像名。
+	mockplugin.DialRejected(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "stale@0001", "plugin_version": "4.9.0", "editor_pid": 999999,
+		"project_path": "C:/projects/mock",
+	})
+	// 随后同一项目有一个对齐版本（mock 默认 4.2.5）的编辑器就绪。
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "ready@0002", "project_path": "C:/projects/mock",
+	})
+
+	out := runStatusJSON(t, d.HTTPPort())
+	entry := rejectionEntryOf(t, out)
+	if entry["process_alive"] != false {
+		t.Errorf("process_alive = %v, want false（pid 已不存在）", entry["process_alive"])
+	}
+	if entry["superseded_by"] != "ready@0002" {
+		t.Errorf("superseded_by = %v, want the ready session id", entry["superseded_by"])
+	}
+	age, ok := entry["age_seconds"].(float64)
+	if !ok || age < 0 || age > 300 {
+		t.Errorf("age_seconds = %v, want a small non-negative number of seconds", entry["age_seconds"])
+	}
+	if hint, present := out["hint"]; present {
+		t.Errorf("stale rejection still produced a now-tense hint: %q", hint)
+	}
+}
+
+// TestStatusKeepsRejectionHintWhileRejectedEditorAlive：pid 仍活着的被拒编辑器
+// 即使已被就绪会话「并行」取代，也仍构成现况——hint 保留（需求 R-9 (a) 的
+// 「或拒绝记录关联的 pid 仍存活」分支）。process_alive:true 与 superseded_by
+// 同时出现，调用方据此自行判断。真实判据需要盘上真有一个 godot* 进程映像，
+// 单测通过注入 rejectionPIDAlive 造出该条件。
+func TestStatusKeepsRejectionHintWhileRejectedEditorAlive(t *testing.T) {
+	orig := rejectionPIDAlive
+	rejectionPIDAlive = func(pid int) bool { return pid == 4242 }
+	t.Cleanup(func() { rejectionPIDAlive = orig })
+
+	dir := stubCacheDir(t)
+	d := startRecordedDaemon(t, dir, "4.2.5")
+
+	mockplugin.DialRejected(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "stale@0001", "plugin_version": "4.9.0", "editor_pid": 4242,
+		"project_path": "C:/projects/mock",
+	})
+	mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"session_id": "ready@0002", "project_path": "C:/projects/mock",
+	})
+
+	out := runStatusJSON(t, d.HTTPPort())
+	entry := rejectionEntryOf(t, out)
+	if entry["process_alive"] != true {
+		t.Errorf("process_alive = %v, want true", entry["process_alive"])
+	}
+	if entry["superseded_by"] != "ready@0002" {
+		t.Errorf("superseded_by = %v, want the ready session id", entry["superseded_by"])
+	}
+	hint, _ := out["hint"].(string)
+	if !strings.Contains(hint, "recent_rejections") {
+		t.Errorf("hint = %q, want the restart hint while the rejected editor is still alive", hint)
+	}
+}
+
+// TestStatusKeepsRejectionHintWithoutReadySession：该项目当前没有 ready 会话时
+// hint 必须保留（需求 R-9 (a) 的第一分支）——两种现场各测一次：就绪会话属于
+// 另一个项目；会话存在但 readiness 不是 ready。
+func TestStatusKeepsRejectionHintWithoutReadySession(t *testing.T) {
+	cases := []struct {
+		name       string
+		sessionDir string
+		readiness  string
+	}{
+		{name: "ready session belongs to another project", sessionDir: "/other/project/", readiness: "ready"},
+		{name: "session exists but is not ready yet", sessionDir: "C:/projects/mock", readiness: "importing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := stubCacheDir(t)
+			d := startRecordedDaemon(t, dir, "4.2.5")
+
+			mockplugin.DialRejected(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+				"session_id": "stale@0001", "plugin_version": "4.9.0", "editor_pid": 999999,
+				"project_path": "C:/projects/mock",
+			})
+			mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+				"session_id": "other@0002", "project_path": tc.sessionDir, "readiness": tc.readiness,
+			})
+
+			out := runStatusJSON(t, d.HTTPPort())
+			entry := rejectionEntryOf(t, out)
+			if _, present := entry["superseded_by"]; present {
+				t.Errorf("superseded_by = %v, want the field omitted（没有可取代记录的 ready 会话）", entry["superseded_by"])
+			}
+			if entry["process_alive"] != false {
+				t.Errorf("process_alive = %v, want false", entry["process_alive"])
+			}
+			hint, _ := out["hint"].(string)
+			if !strings.Contains(hint, "recent_rejections") {
+				t.Errorf("hint = %q, want the restart hint（该项目当前没有 ready 会话）", hint)
+			}
+		})
+	}
+}
+
 // TestStatusPruneSkipsLastDaemonOnlyPhantom：死端口仅由 last-daemon.json
 // 指认（daemon-<port>.json 已不存在）时，--prune 不得把它报成 pruned——
 // last-daemon.json 按设计绝不触碰，旧行为会让 pruned 永远非空

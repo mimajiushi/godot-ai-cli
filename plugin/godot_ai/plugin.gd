@@ -410,6 +410,9 @@ func _continue_enter_tree_after_update_barrier() -> void:
 	_dispatcher.register_lazy("delete_node", "node", &"delete_node")
 	_dispatcher.register_lazy("reparent_node", "node", &"reparent_node")
 	_dispatcher.register_lazy("set_property", "node", &"set_property")
+	# godot-ai-cli fork patch（需求 R-3）：把属性恢复成序列化默认值并消掉 .tscn 覆盖行
+	# （set_property 只能改覆盖值，撤不掉覆盖本身）。
+	_dispatcher.register_lazy("reset_property", "node", &"reset_property")
 	_dispatcher.register_lazy("rename_node", "node", &"rename_node")
 	_dispatcher.register_lazy("duplicate_node", "node", &"duplicate_node")
 	_dispatcher.register_lazy("move_node", "node", &"move_node")

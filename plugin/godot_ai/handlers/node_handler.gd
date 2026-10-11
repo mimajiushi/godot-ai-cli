@@ -331,6 +331,267 @@ func set_property(params: Dictionary) -> Dictionary:
 	}
 
 
+# ============================================================================
+# reset_property — 需求 R-3：恢复序列化默认值并消掉 .tscn 里的覆盖行
+# ============================================================================
+#
+# 依据（Godot 引擎源码 scene/resources/packed_scene.cpp + scene/property_utils.cpp）：
+# SceneState::pack 对每条可存储属性算
+#   default = PropertyUtils::get_property_default_value(node, name, &is_valid, &states_stack, true)
+# 且只在 `is_valid && PropertyUtils::is_property_value_different(node, value, default)`
+# 成立时才把这一行写进 .tscn。所以"撤掉覆盖行"的充要条件是把节点值设成**这一个**
+# 默认值——不是"设成脚本里手写的那个数字"。get_property_default_value 自己的注释
+# 写明了取值顺序（后者优先）：
+#   1) 实例化/继承栈里存过的值：节点处在 instanced 子场景内时，真正的默认值是子场景
+#      里那一份；当前编辑场景自身是继承场景（A extends B）时，默认值来自基场景 B 里
+#      存过的那一份——这两种都不是"脚本里写的那个数"；
+#   2) 最上层脚本的属性默认值（GDScript::get_property_default_value，读的是
+#      update_exports 填充的 member_default_values_cache）；
+#   3) 原生类默认值（ClassDB::class_get_default_property_value）。
+# 于是 `set-property --value <脚本默认值>` 只在最简单的第 2 情形下等价，其余情形都会
+# 留下（甚至新写）一行覆盖。本操作按同一顺序求值，并把来源写进回包的 default_source，
+# 让调用方能判断这次重置依据的是什么。
+#
+# 可移植性约束：Node.get_scene_instance_state() / Node.get_scene_inherited_state() /
+# Node.is_instance() / EditorPropertyRevert 都没绑到 GDScript（node.cpp 只绑了
+# get_scene_file_path/get_owner），所以第 1 层分两处收集、共用同一套 SceneState 查询：
+#   a) 继承层：当前编辑场景根自己的 scene_file_path 指向派生场景 A，load A 的 state 后
+#      **跳过 A 自身**（A 的 state 只记录 A 自己加的覆盖，不是默认值来源），从
+#      get_base_scene_state() 起手沿基场景链找——PropertyUtils 走到 owner 时收的正是
+#      owner 的 scene_inherited_state 链；
+#   b) 实例化层：沿 owner 链找「scene_file_path 非空且不是当前编辑场景根」的实例根，
+#      load 它取 PackedScene.get_state()（节点本身就是实例根时从自身 state 起手）。
+# 两处的相对路径都用 get_path_to 得到，属性用 SceneState 的
+# get_node_path/get_node_property_name/get_node_property_value 查
+# （find_node_by_path/get_property_value 同样没有绑定）。查询次序照抄 PropertyUtils
+# 的 states_stack：反转后是「继承链（派生→基）」在前、「实例栈（外层→内层）」在后。
+func reset_property(params: Dictionary) -> Dictionary:
+	var resolved := _resolve_node(params)
+	if resolved.has("error"):
+		return resolved
+	var node: Node = resolved.node
+	var node_path: String = resolved.path
+	var scene_root: Node = resolved.scene_root
+
+	var property: String = params.get("property", "")
+	if property.is_empty():
+		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: property")
+
+	var found := false
+	var prop_usage: int = 0
+	for prop in node.get_property_list():
+		if prop.name == property:
+			found = true
+			prop_usage = int(prop.get("usage", 0))
+			break
+	if not found:
+		return ErrorCodes.make(ErrorCodes.PROPERTY_NOT_ON_CLASS, McpPropertyErrors.build_message(node, property))
+
+	## 非存储属性直接拒绝（F-2）：pack 只写 PROPERTY_USAGE_STORAGE 的属性，重置一个
+	## 不可存储的属性既撤不掉任何覆盖行，还可能真的改坏场景结构——最典型的是 Node.owner
+	## （usage 不含 STORAGE）：把它置空会让该节点直接从保存的场景里消失。
+	if (prop_usage & PROPERTY_USAGE_STORAGE) == 0:
+		return ErrorCodes.make(
+			ErrorCodes.INVALID_PARAMS,
+			"Property '%s' on %s is not stored in scenes (its usage lacks PROPERTY_USAGE_STORAGE), so it has no serialized override to drop"
+			% [property, node.get_class()]
+		)
+
+	var old_value: Variant = node.get(property)
+	var default_info := _packer_default_value(node, property, scene_root)
+	if not bool(default_info.get("valid", false)):
+		return ErrorCodes.make(
+			ErrorCodes.INTERNAL_ERROR,
+			"Property '%s' on %s has no resolvable serialization default (no instance/inheritance-stack value, no script default, no class default), so its override cannot be dropped"
+			% [property, node.get_class()]
+		)
+	var default_value: Variant = default_info.value
+	## 检查器里被 pin 的属性会被 pack 无条件写入（_pack 的 pinned_props 分支），即使
+	## 值等于默认值——这种情况必须如实上报，否则"改完覆盖行还在"看起来像本操作没生效。
+	var pinned: bool = _is_pinned_property(node, property)
+
+	_undo_redo.create_action("MCP: Reset %s.%s" % [node.name, property])
+	_undo_redo.add_do_property(node, property, default_value)
+	_undo_redo.add_undo_property(node, property, old_value)
+	_undo_redo.commit_action()
+
+	var current: Variant = node.get(property)
+	## is_default：现在的值 == 默认值；removed_override：调用前的值 != 默认值
+	## （即调用前确实有一条会被 pack 写进 .tscn 的覆盖，本次把它撤掉了）。
+	## 两者都直接用 _values_differ 的返回值——它返回 true 表示"不同"，不要再加 not。
+	var is_default := not _values_differ(current, default_value)
+	var removed_override := _values_differ(old_value, default_value)
+
+	return {
+		"data": {
+			"path": node_path,
+			"property": property,
+			"value": _serialize_value(current),
+			"old_value": _serialize_value(old_value),
+			"is_default": is_default,
+			"removed_override": removed_override,
+			"default_source": default_info.get("source", ""),
+			"pinned": pinned,
+			"undoable": true,
+		}
+	}
+
+
+## 序列化默认值求解：PropertyUtils::get_property_default_value 的三层顺序。
+## 返回 {"valid": bool, "value": Variant, "source": "inheritance_stack"|"instance_stack"|
+## "script"|"class"}。
+static func _packer_default_value(node: Node, property: String, scene_root: Node) -> Dictionary:
+	var from_stack := _scene_stack_default(node, property, scene_root)
+	if bool(from_stack.get("valid", false)):
+		return from_stack
+
+	var script: Script = node.get_script()
+	if script != null:
+		## Script.get_property_default_value 已绑定到 GDScript，语义与引擎内部对
+		## "最上层脚本"的取值一致；没有默认值时返回 null。
+		var script_default: Variant = script.get_property_default_value(property)
+		if script_default != null:
+			return {"valid": true, "value": script_default, "source": "script"}
+		## 绑定层丢掉了 C++ 的 bool 出参（Script._get_property_default_value 只回值），
+		## 所以"默认值就是 null"（未初始化的 @export var target: Node2D）与"脚本没这条
+		## 属性"同形。用脚本自身的属性列表区分，前者照样算有效默认值——否则重置一个
+		## 对象引用属性会错误地报"没有默认值"。
+		if _script_exports_property(script, property):
+			return {"valid": true, "value": null, "source": "script"}
+
+	## 原生类默认值：裸实例（不带脚本）的构造默认值就是 ClassDB 的默认值。
+	var fresh: Object = ClassDB.instantiate(node.get_class())
+	if fresh == null:
+		return {"valid": false}
+	var has_native := false
+	for prop in fresh.get_property_list():
+		if prop.name == property:
+			has_native = true
+			break
+	var native_default: Variant = fresh.get(property) if has_native else null
+	if fresh is Node:
+		(fresh as Node).free()
+	if has_native:
+		return {"valid": true, "value": native_default, "source": "class"}
+	return {"valid": false}
+
+
+## 脚本是否导出了这条属性（GDScript 只把 exported 成员放进 script_property_list，
+## 与 member_default_values_cache 的填充条件一致）。
+static func _script_exports_property(script: Script, property: String) -> bool:
+	for info in script.get_script_property_list():
+		if str(info.get("name", "")) == property:
+			return true
+	return false
+
+
+## 场景栈那一层的默认值（PropertyUtils::get_node_states_stack +
+## get_property_default_value 的前两步）。source 为 "inheritance_stack"（来自当前编辑
+## 场景的基场景）或 "instance_stack"（来自子场景实例）。
+##
+## 收集与查询次序照抄 PropertyUtils：owner 链上的实例根先按「内层→外层」收集再
+## reverse，再加上 owner（= 当前编辑场景根）的继承链入口，最终顺序是
+## 「继承链（派生→基）」在前、「实例栈（外层→内层）」在后；每条再沿
+## get_base_scene_state() 往更基的层找。
+static func _scene_stack_default(node: Node, property: String, scene_root: Node) -> Dictionary:
+	var entries: Array[Dictionary] = []
+	var inherited := _inherited_scene_entry(node, scene_root)
+	if not inherited.is_empty():
+		entries.append(inherited)
+
+	var instance_entries: Array[Dictionary] = []
+	var cursor: Node = node
+	while cursor != null and cursor != scene_root:
+		## 子场景实例根 = 自身带 scene_file_path 且不是当前编辑场景的根。
+		if not cursor.scene_file_path.is_empty():
+			var packed := ResourceLoader.load(cursor.scene_file_path) as PackedScene
+			if packed != null and packed.get_state() != null:
+				instance_entries.append({
+					"state": packed.get_state(),
+					"rel": cursor.get_path_to(node),
+					"source": "instance_stack",
+				})
+		cursor = cursor.get_owner()
+	instance_entries.reverse()
+	entries.append_array(instance_entries)
+
+	for entry in entries:
+		var chain: SceneState = entry.state
+		while chain != null:
+			var hit := _state_property_value(chain, entry.rel, property)
+			if bool(hit.get("valid", false)):
+				return {"valid": true, "value": hit.value, "source": entry.source}
+			chain = chain.get_base_scene_state()
+	return {"valid": false}
+
+
+## 当前编辑场景根的"继承链入口"（F-1）：它的 scene_file_path 指向派生场景 A，A 的 state
+## 记录的是 A 自己加的覆盖，不是默认值来源——PropertyUtils 收集 owner 的
+## scene_inherited_state 时也只从基场景链上取值。所以这里 load A 的 state 后**跳过 A
+## 自身**，从 get_base_scene_state() 起手；相对路径用 scene_root.get_path_to(node)
+## （基场景与派生场景的节点相对结构一致，节点就是根时为 "."）。A 不是继承场景
+## （无 base_scene，get_base_scene_state() 为 null）时返回空字典，调用方退回脚本/类默认值。
+static func _inherited_scene_entry(node: Node, scene_root: Node) -> Dictionary:
+	if scene_root == null or scene_root.scene_file_path.is_empty():
+		return {}
+	var packed := ResourceLoader.load(scene_root.scene_file_path) as PackedScene
+	if packed == null or packed.get_state() == null:
+		return {}
+	var base_state := packed.get_state().get_base_scene_state()
+	if base_state == null:
+		return {}
+	return {
+		"state": base_state,
+		"rel": scene_root.get_path_to(node),
+		"source": "inheritance_stack",
+	}
+
+
+## 在一条 SceneState 里按相对路径定位节点并取它存过的属性值。
+##
+## 路径形式必须归一化：SceneState.get_node_path() 对**非根**节点给出带 "./" 前缀的形式
+## （引擎内部用 "." 表示根的写法，实测 node[1] → "./BaseChild"），而 Node.get_path_to()
+## 不带前缀（"BaseChild"）；直接比字符串会让实例/继承场景里的非根节点被静默漏掉，退回
+## 脚本默认值——正是本层要消灭的"假成功"。这里两边都按去掉前导 "./" 后比较。
+static func _state_property_value(state: SceneState, rel_path: NodePath, property: String) -> Dictionary:
+	var target := _normalized_relative_path(rel_path)
+	for i in state.get_node_count():
+		if _normalized_relative_path(state.get_node_path(i)) != target:
+			continue
+		for j in state.get_node_property_count(i):
+			if str(state.get_node_property_name(i, j)) == property:
+				return {"valid": true, "value": state.get_node_property_value(i, j)}
+		return {"valid": false}
+	return {"valid": false}
+
+
+## 去掉 NodePath 的前导 "./"（仅 SceneState 那一侧会出现），保留根的 "."。
+static func _normalized_relative_path(path: NodePath) -> String:
+	var text := str(path)
+	if text.begins_with("./"):
+		return text.substr(2)
+	return text
+
+
+## 检查器 pin（`_edit_pinned_properties_` 元数据）会让 pack 无条件写入该属性。
+static func _is_pinned_property(node: Node, property: String) -> bool:
+	var pinned: Variant = node.get_meta("_edit_pinned_properties_", [])
+	if not (pinned is Array):
+		return false
+	return (pinned as Array).has(property)
+
+
+## PropertyUtils::is_property_value_different 的可移植版本：两个 float 用近似比较
+## （文本场景往返存在数值误差），null 对象视同 NIL。NodePath↔Node 的那两个特例只影响
+## 节点引用属性，重置到默认值时两侧形态一致，直接走 `!=` 即可。
+static func _values_differ(a: Variant, b: Variant) -> bool:
+	if typeof(a) == TYPE_FLOAT and typeof(b) == TYPE_FLOAT:
+		return not is_equal_approx(a, b)
+	var left: Variant = null if (typeof(a) == TYPE_OBJECT and a == null) else a
+	var right: Variant = null if (typeof(b) == TYPE_OBJECT and b == null) else b
+	return left != right
+
+
 # godot-ai-cli fork patch: {"$node": "<NodePath>"} 节点引用赋值——把相对目标
 # 节点自身解析到的场景内节点对象赋给 Node 派生的 TYPE_OBJECT 属性（如
 # @export var target: CanvasItem）。序列化由引擎负责——被引用节点与持有节点

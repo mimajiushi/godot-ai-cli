@@ -453,6 +453,10 @@ func _handle_game_command(data: Array) -> void:
 			result = _game_input_gamepad(json.data)
 		"input_action":
 			result = _game_input_action(json.data)
+		"ui_activate":
+			## godot-ai-cli fork patch（需求 R-4②）：对指定 Control（缺省当前焦点
+			## 控件）激活——不做事件合成，直接广播按钮自己的 pressed/toggled。
+			result = _game_ui_activate(json.data)
 		"input_state":
 			result = _game_input_state(json.data)
 		"debug_draw":
@@ -620,13 +624,29 @@ func _control_disabled(control: Control) -> bool:
 	return false
 
 
+## Control 是否"在场景里可见"。
+##
+## 祖先遍历必须**止于当前场景根**（回归 vF-3）：编辑器上下文里被编辑场景挂在编辑器
+## 窗口之下，父链上会出现隐藏的编辑器 UI（实测父链末端是 visible=false 的
+## @CanvasItemEditor@…），继续往上爬会让**任何** Control 都在这里提前 return false——
+## 末尾那句编辑器兜底 `return true` 于是永远走不到，game ui-activate / get-ui-elements
+## 在编辑器里集体误判 not_visible。真 game 的父链本来就止于场景根（游戏窗口），所以
+## 两条路径统一为"只看场景内的可见性"：先判自身 visible，再沿父链判到场景根为止
+## （场景根本身的 visible 计入判定），绝不越界进编辑器/宿主 UI。
 func _control_visible_in_tree(control: Control) -> bool:
 	if not control.visible:
 		return false
+	var scene_root := _current_scene_root()
 	var parent := control.get_parent()
 	while parent != null:
 		if parent is CanvasItem and not (parent as CanvasItem).visible:
 			return false
+		if parent == scene_root:
+			break
+		## 防御：调用方给进来的 Control 不属于当前场景时（例如编辑器里焦点落在编辑器
+		## 自己的控件上），走到场景之外就停，不要一路爬进编辑器 UI。
+		if scene_root == null or not scene_root.is_ancestor_of(parent):
+			break
 		parent = parent.get_parent()
 	if Engine.is_editor_hint():
 		return true
@@ -981,6 +1001,96 @@ func _game_input_state(params: Dictionary) -> Dictionary:
 		var name := str(action)
 		states[name] = Input.is_action_pressed(name)
 	return {"actions": states}
+
+
+## --- ui_activate：在运行中的游戏里激活一个 Button（R-4②）---
+##
+## `input_action` 走 Input.action_press，只改动作状态、不产生 InputEvent，Control/
+## Window 永远收不到（暂停态 AcceptDialog 的按钮就是这么"点不动"的）。本操作换一条
+## 明确的路：直接对目标 Button 广播它自己的信号，等于替调用方完成
+## 「先 grab_focus 再发一个 ui_accept 按键」那两步，而且不需要焦点、不受暂停影响
+## （信号是直接调用已连接方法，process_mode 不参与）。
+##
+## 不做事件合成的代价是"只对 BaseButton 有意义"——其它 Control 就明确拒绝并给出
+## 结构化原因与替代命令，而不是发一个没人消费的事件后报成功。
+func _game_ui_activate(params: Dictionary) -> Dictionary:
+	var requested_path := str(params.get("node_path", ""))
+	var control: Control = null
+	if requested_path.is_empty():
+		var viewport := get_viewport()
+		control = viewport.gui_get_focus_owner() if viewport != null else null
+		if control == null:
+			return {
+				"activated": false,
+				"reason": "no_focus_owner",
+				"control_path": "",
+				"hint": "No Control holds GUI focus; pass node_path (see game get-ui-elements).",
+			}
+	else:
+		var node := _resolve_runtime_node(requested_path)
+		if node == null:
+			return {
+				"activated": false,
+				"reason": "not_found",
+				"control_path": requested_path,
+				"hint": "No node at that path; check game get-scene-tree.",
+			}
+		if not node is Control:
+			return {
+				"activated": false,
+				"reason": "not_a_control",
+				"control_path": _runtime_path(node),
+				"hint": "Node is a %s; ui-activate targets Controls only." % node.get_class(),
+			}
+		control = node as Control
+
+	var control_path := _runtime_path(control)
+	## 隐藏/禁用控件在真实点击下也不会响应——这里同样拒绝，避免"报成功但其实没人会
+	## 在真实操作里点到它"。
+	if not _control_visible_in_tree(control):
+		return {
+			"activated": false,
+			"reason": "not_visible",
+			"control_path": control_path,
+			"hint": "Hidden Controls cannot be activated; make it visible first.",
+		}
+	if _control_disabled(control):
+		return {
+			"activated": false,
+			"reason": "disabled",
+			"control_path": control_path,
+			"hint": "The Control is disabled; a real click would be ignored too.",
+		}
+	if not control is BaseButton:
+		return {
+			"activated": false,
+			"reason": "unsupported_control",
+			"control_path": control_path,
+			"hint": "%s is not a BaseButton — focus it and use game input-key, or click it with game input-mouse." % control.get_class(),
+		}
+
+	var button := control as BaseButton
+	var toggled := false
+	## toggle 按钮：赋值 `button_pressed` 就**由引擎**广播 toggled——BaseButton::set_pressed()
+	## 在值真的变化时走 `_toggled(status.pressed)` → `emit_signal("toggled", 新值)`
+	## （scene/gui/base_button.cpp；值没变则提前 return，一个信号都不发）。所以这里**不能**
+	## 再手动 emit_signal("toggled", …)：一次激活会广播两次，挂在 CheckBox.toggled 上的
+	## 游戏逻辑跑两遍（F-8）。
+	## `pressed` 相反：引擎只在真实点击路径 `_pressed()` 里广播它，`set_pressed()` 不调用
+	## `_pressed()`——所以 toggle 与普通按钮的 pressed 都必须由这里手动广播**一次**
+	## （唯一来源，不会与引擎重复）。
+	## 顺序与引擎自带的 BaseButton::press() 相同：toggled（随赋值）先于 pressed。
+	if button.toggle_mode:
+		button.button_pressed = not button.button_pressed
+		toggled = button.button_pressed
+	button.emit_signal("pressed")
+	return {
+		"activated": true,
+		"control_path": control_path,
+		"signal": "pressed",
+		"type": button.get_class(),
+		"toggled": toggled,
+	}
 
 
 ## --- input_sequence: frame-timed action timeline (deferred) ---

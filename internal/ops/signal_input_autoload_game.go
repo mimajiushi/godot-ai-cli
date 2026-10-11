@@ -246,10 +246,33 @@ func gameOps() []OpSpec {
 			Domain: "game", Name: "input-action", PluginCommand: "game_command", WrapOp: "input_action",
 			Summary: "Press/release an input action in the running game",
 			Timeout: GameTimeout,
+			// fork 补丁（需求 R-4①）：delivery=action_state 的适用边界必须写在 help 里，
+			// 否则调用方会以为 sent:true 已经"点到了按钮"（实测暂停态的 AcceptDialog
+			// 按钮完全无反应）。
+			ResponseNote: `{"sent","action","pressed","strength","delivery":"action_state"}` +
+				` — delivery=action_state means the action state was set through Input.action_press/release: it is visible to Input.is_action_pressed-style consumers only and produces NO InputEvent.`,
+			// HelpNote 是同一口径的短版，只进 `--help`（需求 R-4① 的原文要求：
+			// 「在 game input-action --help 里加一句」）。DocNote 是长版、只进
+			// commands.md，两者各自服务一个面，别把长版灌进 help 淹没其它说明。
+			HelpNote: "delivery=action_state only reaches `Input.is_action_*` consumers — no InputEvent is produced, so GUI Controls/Windows never see it and a Button or menu entry cannot be clicked with it (the reply still says `sent:true`). To drive UI use `game input-key` (a real key event), `game input-mouse` (a real click), or `game ui-activate` to press a specific Button directly.",
+			DocNote:  "Only reaches `Input.is_action_*` consumers (player movement, shooting, action held/pressed polls). It produces no InputEvent, so GUI Controls/Windows never see it and a button or menu entry cannot be clicked with it — even though the reply says `sent:true`. To drive UI use `game input-key` (a real key event, e.g. `--key Enter`, which the focused Control consumes as ui_accept) or `game input-mouse` (a real click at canvas coordinates), or `game ui-activate` to press a specific Button directly.",
 			Params: []ParamSpec{
 				ps("action", "action", true, "", "Input action name"),
 				pb("pressed", "pressed", false, "true", "true = press, false = release"),
 				pf("strength", "strength", false, "1.0", "Action strength (analog)"),
+			},
+		},
+		{
+			// fork 补丁（需求 R-4②）：GUI 激活的原子操作——对指定 Control（缺省当前
+			// 焦点控件）激活，省掉"按键事件要先把焦点摆对"这一步。
+			Domain: "game", Name: "ui-activate", PluginCommand: "game_command", WrapOp: "ui_activate",
+			Summary: "Activate a Button in the running game (emits its pressed/toggled signals)",
+			Timeout: GameTimeout,
+			ResponseNote: `{"activated","control_path","signal","type","toggled"}` +
+				` — activated:true plus the signal actually emitted ("pressed", plus "toggled" when the button is a toggle); on refusal the payload is {"activated":false,"reason","control_path","hint"} with reason in not_found / not_a_control / no_focus_owner / disabled / not_visible / unsupported_control.`,
+			DocNote: "The UI counterpart of `game input-action`: it does not synthesize an event, it emits the target Button's own `pressed` signal (and flips `button_pressed` + emits `toggled` when `toggle_mode` is on), so a paused `AcceptDialog` OK button can be exercised in one call. `--node-path` names the Control in the running game (same path form as `game get-scene-tree`); omit it to use the current GUI focus owner. Refused — with a structured `activated:false` payload rather than a signal attempt — for a missing node, a non-Control, a disabled or hidden button, or a Control that is not a BaseButton (those need `game input-key` / `game input-mouse`). Note that a `Control.set_process_mode(PROCESS_MODE_WHEN_PAUSED)` dialog's handler still runs: emitting the signal calls the connected method directly.",
+			Params: []ParamSpec{
+				ps("node-path", "node_path", false, "", "Node path of the Control (default: current GUI focus owner)"),
 			},
 		},
 		{

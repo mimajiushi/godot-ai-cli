@@ -287,6 +287,12 @@ func run_project(params: Dictionary) -> Dictionary:
 	if _debugger_plugin != null:
 		_debugger_plugin.begin_game_run(_editor_log_cursor(), _game_helper_autoload_expected())
 
+	# 需求 R-6 4.2：autosave 是第二条"顺带改写"路径——play_*_scene() 内部会
+	# try_autosave() 落地编辑器内存里的改动，而落盘时会把已加载的其它资源一并重新
+	# 序列化。保存前后各拍一次资源快照，把窗口期内被动过的文件分成"显式保存的（编辑器
+	# 打开的场景，即 autosave 的目标）"与"被顺带重新序列化的其它资源"。
+	var before_snapshot := McpResourceIO.resource_mtime_snapshot()
+
 	match mode:
 		"main":
 			EditorInterface.play_main_scene()
@@ -296,18 +302,22 @@ func run_project(params: Dictionary) -> Dictionary:
 			var scene_path: String = params.get("scene", "")
 			EditorInterface.play_custom_scene(scene_path)
 
+	var after_snapshot := McpResourceIO.resource_mtime_snapshot()
+
 	if restore_setting:
 		editor_settings.set_setting(autosave_key, prior_autosave)
 
 	if _connection:
 		_connection.pause_processing = false
 
+	var write_tracking := _run_project_write_tracking(autosave, before_snapshot, after_snapshot)
 	var base_data := _run_project_base_data(
 		mode,
 		str(params.get("scene", "")),
 		autosave,
 		false,
-		"Play/stop is a runtime action"
+		"Play/stop is a runtime action",
+		write_tracking
 	)
 	var request_id: String = params.get("_request_id", "")
 	if _connection != null and _debugger_plugin != null and not request_id.is_empty():
@@ -330,15 +340,44 @@ static func _run_project_base_data(
 	scene: String,
 	autosave: bool,
 	was_already_running: bool,
-	reason: String
+	reason: String,
+	write_tracking: Dictionary = {}
 ) -> Dictionary:
-	return {
+	var data := {
 		"mode": mode,
 		"scene": scene,
 		"autosave": autosave,
 		"was_already_running": was_already_running,
+		# 需求 R-6 4.2：autosave 写入回执。没有 autosave 时两个列表都是空的。
+		"written_paths": write_tracking.get("written_paths", []),
+		"resaved_resources": write_tracking.get("resaved_resources", []),
 		"undoable": false,
 		"reason": reason,
+	}
+	if bool(write_tracking.get("truncated", false)):
+		data["write_track_truncated"] = true
+	return data
+
+
+## 需求 R-6 4.2：把 autosave 窗口期内被动过的资源分成显式保存的场景与顺带重新
+## 序列化的资源。autosave 关掉时（编辑器被临时关掉 run/auto_save/save_before_running）
+## 不会写任何文件，直接返回空清单，免得把调用方自己在此期间改的文件算进来。
+static func _run_project_write_tracking(autosave: bool, before: Dictionary, after: Dictionary) -> Dictionary:
+	if not autosave:
+		return {"written_paths": [], "resaved_resources": [], "truncated": false}
+	var open_scenes: Array = EditorInterface.get_open_scenes()
+	var changed := McpResourceIO.changed_resources(before, after, [])
+	var written: Array[String] = []
+	var resaved: Array[String] = []
+	for path in changed:
+		if open_scenes.has(path):
+			written.append(path)
+		else:
+			resaved.append(path)
+	return {
+		"written_paths": written,
+		"resaved_resources": resaved,
+		"truncated": McpResourceIO.snapshot_truncated(before, after),
 	}
 
 

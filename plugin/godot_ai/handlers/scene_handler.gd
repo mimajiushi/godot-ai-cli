@@ -407,6 +407,10 @@ func save_scene(_params: Dictionary) -> Dictionary:
 
 	if _connection:
 		_connection.pause_processing = true
+	# 需求 R-6 4.2：保存前拍一份资源快照——保存会把编辑器已加载的"其它资源"一并
+	# 重新序列化（.tres 的手写注释被抹掉就是这条路径），保存后对比即得到"顺带改写了
+	# 什么"的可核对清单。见 McpResourceIO 里对机制与精度边界的说明。
+	var before_snapshot := McpResourceIO.resource_mtime_snapshot()
 	var err := _save_current_scene()
 	if _connection:
 		_connection.pause_processing = false
@@ -417,13 +421,18 @@ func save_scene(_params: Dictionary) -> Dictionary:
 	# godot-ai-cli fork patch：保存后内存与磁盘一致，刷新该场景的 mtime 记录（open 不应再告警）。
 	_record_scene_mtime(path)
 
-	return {
-		"data": {
-			"path": path,
-			"undoable": false,
-			"reason": "File save cannot be undone via editor undo",
-		}
+	var after_snapshot := McpResourceIO.resource_mtime_snapshot()
+	var data := {
+		"path": path,
+		"written_paths": [path],
+		"resaved_resources": McpResourceIO.changed_resources(before_snapshot, after_snapshot, [path]),
+		"undoable": false,
+		"reason": "File save cannot be undone via editor undo",
 	}
+	if McpResourceIO.snapshot_truncated(before_snapshot, after_snapshot):
+		data["write_track_truncated"] = true
+
+	return {"data": data}
 
 
 ## Save the currently edited scene to a new file path.

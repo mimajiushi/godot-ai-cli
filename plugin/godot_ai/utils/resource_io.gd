@@ -284,3 +284,92 @@ static func _settle_text_write(
 	payload["import_settle"] = "settled" if settled else "timeout"
 	payload["import_pending"] = not settled
 	connection.send_deferred_response(request_id, {"data": payload})
+
+
+# ============================================================================
+# 工作区资源写入追踪（需求 R-6 4.2）
+# ============================================================================
+#
+# 「保存场景 → 另外三个 .tres 被静默重写（手写注释被抹掉、等于脚本默认值的属性被
+# 删掉、补上 uid/load_steps）」这条需求要把未知副作用变成可核对事实。引擎没有暴露
+# 「刚才谁写了哪些文件」的 API（ResourceSaver 无信号，EditorFileSystem 只在重扫时
+# 更新，Node.get_scene_instance_state 之类也都没绑到 GDScript），所以这里用唯一的
+# 可移植办法：保存前后各拍一次工程内资源文件的 (mtime, size) 快照，差集即"被动过
+# 的文件"。快照只读元数据、不读内容，代价是一次目录遍历。
+
+## 会被引擎重新序列化、且值得跟踪的 Resource 文件扩展名。`.material`/`.theme` 就是
+## `.tres` 的编辑器别名，`.tscn`/`.scn` 是 PackedScene——"只保存了场景却顺带改写
+## 了资源"正是要抓的那一类。
+const TRACKED_RESOURCE_EXTENSIONS := ["tscn", "scn", "tres", "res", "material", "theme"]
+
+## 目录遍历的条目上限：保存路径上做一次全工程快照，超大工程不该把保存拖住。命中
+## 上限时快照标记 truncated，回包据此提示清单不完整。
+const WRITE_TRACK_MAX_FILES := 20000
+
+
+## 拍一份工程内受跟踪资源文件的快照：{"files": {path: {"mtime": int, "size": int}},
+## "truncated": bool}。mtime 的精度是秒（FileAccess.get_modified_time），所以 size
+## 一并记录作为兜底；两者都未变则视为未被动过（同一秒内等长改写会漏报，调用方若
+## 需要字节级保证应自己算哈希）。
+static func resource_mtime_snapshot() -> Dictionary:
+	var files: Dictionary = {}
+	var truncated: Array = [false]
+	_collect_resource_mtimes("res://", files, truncated)
+	return {"files": files, "truncated": truncated[0]}
+
+
+static func _collect_resource_mtimes(dir_path: String, out: Dictionary, truncated: Array) -> void:
+	if bool(truncated[0]):
+		return
+	var dir := DirAccess.open(dir_path)
+	if dir == null:
+		return
+	for name in dir.get_directories():
+		## .godot / .git 一类隐藏目录里没有可被顺带改写的工程资源。
+		if name.begins_with("."):
+			continue
+		_collect_resource_mtimes(dir_path.path_join(name), out, truncated)
+		if bool(truncated[0]):
+			return
+	for name in dir.get_files():
+		if not TRACKED_RESOURCE_EXTENSIONS.has(name.get_extension().to_lower()):
+			continue
+		if out.size() >= WRITE_TRACK_MAX_FILES:
+			truncated[0] = true
+			return
+		var path := dir_path.path_join(name)
+		out[path] = {"mtime": FileAccess.get_modified_time(path), "size": _file_size(path)}
+
+
+static func _file_size(path: String) -> int:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return -1
+	var size := file.get_length()
+	file.close()
+	return size
+
+
+## 前后两份快照的差集：保存窗口期内被动过（改写或新建）的资源路径，`explicit_paths`
+## 里显式保存的文件已排除（它们本来就要写，不属于"顺带"）。返回排序后的路径数组。
+static func changed_resources(before: Dictionary, after: Dictionary, explicit_paths: Array) -> Array[String]:
+	var explicit: Dictionary = {}
+	for path in explicit_paths:
+		explicit[str(path)] = true
+	var before_files: Dictionary = before.get("files", {})
+	var after_files: Dictionary = after.get("files", {})
+	var changed: Array[String] = []
+	for path in after_files:
+		if explicit.has(path):
+			continue
+		var previous: Variant = before_files.get(path, null)
+		var current: Dictionary = after_files[path]
+		if previous == null or int(previous.mtime) != int(current.mtime) or int(previous.size) != int(current.size):
+			changed.append(path)
+	changed.sort()
+	return changed
+
+
+## 快照是否因为条目上限而不完整——回包据此决定要不要提示清单是部分结果。
+static func snapshot_truncated(before: Dictionary, after: Dictionary) -> bool:
+	return bool(before.get("truncated", false)) or bool(after.get("truncated", false))

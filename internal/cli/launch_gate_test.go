@@ -507,7 +507,7 @@ func TestLiveDaemonWSPort(t *testing.T) {
 }
 
 // patchOffset 把当前内置插件版本平移 n 个 patch（需求 R-5 的方向测试必须
-// 动态取版本：插件版本会随集成任务升到 4.3.0，测试里绝不硬编码）。
+// 动态取版本：插件版本会随发版推进，测试里绝不硬编码）。
 func patchOffset(t *testing.T, n int) string {
 	t.Helper()
 	v, err := pluginmeta.ParseSemver(pluginmeta.PluginVersion())

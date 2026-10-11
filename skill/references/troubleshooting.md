@@ -8,6 +8,8 @@ Every failure is one JSON object on stdout with exit 1:
 
 Route on `error.code`, then `error.data.sub_code` when present. `error.data.retryable` tells you whether a blind retry can work. `status` (exit 1 + `{"status":"daemon_not_running","hint":"Run: godot-ai-cli launch --project <path>","ports_tried":[...]}`) means no daemon answers — launch first; `ports_tried` names every port probed (explicit flag > recorded last-daemon port > 8000 default). A `stale_pid_file` field there means a daemon died without cleanup; it is informational, not blocking.
 
+`status`'s `recent_rejections` are HISTORY, not a verdict on the current state. Every entry carries `age_seconds` (computed when status renders it), `process_alive` (whether the record's `editor_pid` is still a live `godot*` process — the same image check `stop` uses; the field is omitted when the record carries no pid) and `superseded_by` (the `session_id` that project now has, when it has a ready session). The top-level `hint` that sends you off to fully restart the editor is emitted ONLY while at least one record is still current — that project has no ready session, or its editor pid is still alive. So a rejection left over from an editor that exited long ago, on a project that is connected again today, still appears in `recent_rejections` (with its age) but no longer occupies `hint`: do not restart the editor for it.
+
 ## Launch-phase codes
 
 Emitted by `launch` itself, before any editor op is possible.
@@ -45,6 +47,18 @@ extras of `editor screenshot`.
 | `BASELINE_DIFF_FAILED` | The final image differs from `--baseline`: either the sizes disagree (`data.baseline_size` / `data.image_size`) or `data.diff_ratio` exceeds `--diff-threshold` (`data.diff_pixels` / `data.total_pixels` / `data.samples` name the first differing pixels; `data.diff_out` is the annotated PNG when `--diff-out` was given) | Inspect `data.samples` and the `--diff-out` image to tell a real visual regression from rendering noise; raise `--diff-threshold` only for noise, and re-shoot the baseline after an intentional change. |
 | `COORD_SPACE_UNAVAILABLE` | `--coords canvas` was requested but the reply carries no `canvas_scale` — the connected editor plugin predates canvas/image coordinate metadata | Use `--coords image` (source pixels), or install the current plugin (`plugin install --project <dir>` + reopen the editor); the scale is never guessed, so coordinates can never silently pick the wrong pixels. |
 
+## Local workspace codes
+
+Emitted by the commands that need neither a daemon nor an editor (`filesystem snapshot` / `filesystem changed`, `tilemap dump` / `tilemap render` / `tilemap find-by-color`).
+
+| Code | Meaning | Recovery |
+|---|---|---|
+| `SNAPSHOT_FAILED` | `filesystem snapshot` / `filesystem changed` could not resolve the project (`--project` absent, the current directory is not a Godot project, and no prior launch recorded one) or could not read/write the snapshot | Pass `--project <dir>` explicitly; check `<project>/.godot/godot_ai_snapshots/` is writable. |
+| `SNAPSHOT_NOT_FOUND` | `filesystem changed --tag <tag>` found no baseline with that tag for that project | Take the baseline first: `filesystem snapshot --tag <tag> --project <dir>`. Tags are per project, not global. |
+| `SCENE_PARSE_FAILED` | A `tilemap` command could not parse the `.tscn` | Check the path and that the file is a real scene (`--scene` takes a disk path; a `res://` path needs the project resolved). |
+| `LAYER_NOT_FOUND` | The named `--layer` is not a TileMapLayer in that scene | `tilemap dump --scene <file>` lists the layers it found. |
+| `FIND_FAILED` | `tilemap find-by-color` could not decode the layer's TileSet atlas texture(s) | Check that the TileSet's atlas source paths resolve on disk; `tilemap dump` / `tilemap render` parse the same data. |
+
 ## Update-phase codes
 
 Emitted by `update`. None of them modify the install — checksum/download failures always abort before any file is touched.
@@ -59,7 +73,9 @@ Emitted by `update`. None of them modify the install — checksum/download failu
 | `UPDATE_DOWNLOAD_FAILED` | Asset or checksums download failed | Retry on a stable network. |
 | `UPDATE_CHECKSUM_INVALID` / `UPDATE_CHECKSUM_MISMATCH` | Checksums file unusable, or the asset hash differs — install provably untouched | Treat as a supply-chain warning; re-download; report if persistent. |
 | `UPDATE_ARCHIVE_INVALID` | The zip holds no matching binary | Report the broken release asset. |
-| `UPDATE_REPLACE_FAILED` | Could not swap the executable (message names the `.old` fallback path when rollback also failed) | Check file permissions; recover the binary from `<exe>.old` if present. |
+| `UPDATE_REPLACE_FAILED` | Could not swap the executable (`data.path`, `data.locked_by`, `data.next_steps`; the message names the `.old` fallback path when rollback also failed) | `data.locked_by` lists the processes still mapping that file — each entry with `pid` / `exe` / `cmdline`, an empty array on non-Windows or when the scan cannot see them — and `data.next_steps` names the fix. Check file permissions; recover the binary from `<exe>.old` if present. |
+
+**A stale `.old` backup no longer blocks the update.** Windows cannot delete a file that some process still maps (typically the previous binary started as `<exe>.old`), and that leftover used to fail `update` outright. The stale backup is now renamed aside to `<exe>.old.<epoch>` and the update continues; the result payload carries a `warnings[]` entry naming both paths, and the leftover is cleaned up on a later startup once the holder exits. `warnings[]` is the honest channel for that degradation — an `update` that answers `updated` with a non-empty `warnings` did update, but left a copy of the old binary behind.
 
 **Known limits of the fallback channels (registered, not blocking).** Three
 deliberate gaps remain, and the CLI does not paper over them:

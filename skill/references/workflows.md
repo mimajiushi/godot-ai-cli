@@ -1,6 +1,6 @@
 # godot-ai-cli canonical workflows
 
-Seven recipes covering the common tasks. All commands assume the editor is already up via `launch` (see SKILL.md). launch records the daemon's ports, so later commands find the daemon without repeating `--http-port` — pass it only to target a DIFFERENT daemon than the last one launched (e.g. parallel CI jobs). Node paths below use the canonical scene-root-absolute form (`/Root/Child`); see "Path and param conventions" in references/commands.md. JSON flags are shown with bash single quotes — on PowerShell single quotes work too; in cmd.exe use double quotes and escape inner ones, or write payloads to files.
+Eight recipes covering the common tasks. All commands assume the editor is already up via `launch` (see SKILL.md). launch records the daemon's ports, so later commands find the daemon without repeating `--http-port` — pass it only to target a DIFFERENT daemon than the last one launched (e.g. parallel CI jobs). Node paths below use the canonical scene-root-absolute form (`/Root/Child`); see "Path and param conventions" in references/commands.md. JSON flags are shown with bash single quotes — on PowerShell single quotes work too; in cmd.exe use double quotes and escape inner ones, or write payloads to files.
 
 ## 1. Build a scene from scratch
 
@@ -22,7 +22,7 @@ godot-ai-cli scene save
 
 Verify: `scene get-hierarchy --depth 5`, `node get-properties --path /Level1/Player`, `logs read --source editor --count 20`.
 
-Notes: `node create --scene-path res://foo.tscn` instantiates a packed scene instead of a bare class. `--scene-file` on mutations guards against editing the wrong scene. Building several nodes at once → put the `create_node`/`set_property` plugin commands into `batch execute --file ops.json` for atomic apply with rollback.
+Notes: `node create --scene-path res://foo.tscn` instantiates a packed scene instead of a bare class. `--scene-file` on mutations guards against editing the wrong scene. Building several nodes at once → put the `create_node`/`set_property` plugin commands into `batch execute --file ops.json` for atomic apply with rollback. `script create --content` is fine for a one-liner, but any multi-line or non-ASCII source belongs in a file: write it as UTF-8 and pass `--content-file <path>` — a leading BOM is stripped, `--content` + `--content-file` together is `INVALID_PARAMS`, and only PowerShell 5.1 makes this mandatory (it strips embedded quotes from `--content` and re-encodes the rest through the console code page). The response's `source_bytes` / `source_sha256` prove the bytes that reached the plugin.
 
 ## 2. UI + theme
 
@@ -42,10 +42,13 @@ godot-ai-cli theme set-color --theme-path res://ui/main_theme.tres --class-name 
 godot-ai-cli theme set-font-size --theme-path res://ui/main_theme.tres --class-name Label --name font_size --value 32
 godot-ai-cli theme set-stylebox-flat --theme-path res://ui/main_theme.tres --class-name Button --name normal --bg-color '{"r":0.2,"g":0.2,"b":0.3,"a":1}' --corners '{"top_left":8,"top_right":8,"bottom_left":8,"bottom_right":8}'
 godot-ai-cli theme apply --node-path /MainMenu --theme-path res://ui/main_theme.tres
+# Per-node override (no theme resource involved). --fresh starts from an EMPTY
+# StyleBoxFlat, so nothing the patch does not mention is inherited:
+godot-ai-cli theme stylebox-override --path /MainMenu/Menu/StartButton --slot normal --patch '{"bg_color":{"r":0.2,"g":0.2,"b":0.3,"a":1}}' --fresh
 godot-ai-cli scene save
 ```
 
-Verify: `node get-children --path /MainMenu`, and visually with `editor screenshot --source viewport_2d` (windowed editor only).
+Verify: `node get-children --path /MainMenu`, and visually with `editor screenshot --source viewport_2d` (windowed editor only). `theme stylebox-override` patches the node's RESOLVED stylebox for a slot, so a `corner_radius_*` / `content_margin_*` the patch omits is inherited from the theme silently — pass `--fresh` for pixel-art UI that must not inherit them (it starts from an empty `StyleBoxFlat` and stops consulting the theme, so an unknown slot is not an error either). `overrode_existing` in the response is about the node, not about the theme base.
 
 ## 3. Animation
 
@@ -92,13 +95,14 @@ godot-ai-cli game get-scene-tree --depth 4    # the RUNNING game's tree, not the
 godot-ai-cli game get-ui-elements
 godot-ai-cli game input-action --action move_right --pressed true    # project input actions
 godot-ai-cli game input-key --key Space                              # raw keys
+godot-ai-cli game ui-activate --node-path /MainMenu/Menu/StartButton  # press a Button directly (emits its pressed signal)
 godot-ai-cli game input-sequence --steps '[{"at_frame":0,"action":"move_right","pressed":true},{"at_frame":30,"action":"move_right","pressed":false}]' --settle-frames 10
 godot-ai-cli game input-state               # what is currently pressed
 godot-ai-cli editor eval --code 'print(get_tree().current_scene.name)'   # GDScript inside the running game
 godot-ai-cli project stop
 ```
 
-`game input-sequence` drives the game one frame per step (30s budget). `editor eval` failures are attributed: `EVAL_COMPILE_ERROR` / `EVAL_RUNTIME_ERROR` / `EVAL_GAME_NOT_READY` / `EVAL_HUNG` / `EVAL_RESULT_TOO_LARGE` — see references/troubleshooting.md.
+`game input-sequence` drives the game one frame per step (30s budget). `game input-action` only reaches `Input.is_action_*` consumers — it synthesizes no InputEvent, so GUI Controls never see it (`sent:true` is not a click). To drive UI use `game input-key` (a real key event the focused Control consumes as `ui_accept`), `game input-mouse` (a real click at canvas coordinates), or `game ui-activate --node-path <Control>` to emit a specific Button's `pressed` signal directly (`toggled` too when the button is a toggle); omit `--node-path` to activate the current GUI focus owner. `ui-activate` refuses with a structured `activated:false` + `reason` (`not_found` / `not_a_control` / `no_focus_owner` / `disabled` / `not_visible` / `unsupported_control`) instead of pretending to click, and it works on a paused dialog: the signal is emitted directly, so a handler behind `PROCESS_MODE_WHEN_PAUSED` still runs. A Control that is not a BaseButton (a Slider, a LineEdit) still needs `input-key` / `input-mouse`. `editor eval` failures are attributed: `EVAL_COMPILE_ERROR` / `EVAL_RUNTIME_ERROR` / `EVAL_GAME_NOT_READY` / `EVAL_HUNG` / `EVAL_RESULT_TOO_LARGE` — see references/troubleshooting.md.
 
 ## 6. Windowed screenshot verification loop
 
@@ -128,3 +132,25 @@ godot-ai-cli stop
 ```
 
 Caveats: screenshots always fail (`EDITOR_VIEWPORT_EMPTY`); newly written scripts need `filesystem scan` (or `filesystem reimport` for assets) before the editor sees them — the script ops' responses say so via diagnostics; `--wait 90`+ because cold editor startup plus import on CI is slow; custom ports keep a CI job from colliding with a developer session on 8000/9500. Two port-sharing rules for one machine: all jobs share a single last-daemon.json, so parallel jobs must keep passing `--http-port <N>` explicitly on every command (the explicit flag always wins over the record); and only one custom-port OVERRIDE SET may be live at a time per machine — the port override lives in the shared global EditorSettings, so an overlapping launch on DIFFERENT ports fails fast with `SETTINGS_OVERRIDE_ACTIVE` (several jobs may still share one custom-port daemon; jobs on different ports must run sequentially or be isolated per OS user/runner).
+
+## 8. Catch collateral file rewrites
+
+Saving is never a single-file write: the editor re-serializes the scene AND every resource it holds, which is how hand-written comments disappear from an unrelated `.tres` and why a diff-scoped review cannot see the damage. Two channels answer "what did that write actually touch", neither needs a daemon:
+
+```bash
+# 1) Per-call receipts — a save names exactly what IT wrote:
+godot-ai-cli scene save
+#   → {"path":"res://levels/level1.tscn","written_paths":["res://levels/level1.tscn"],
+#      "resaved_resources":["res://ui/main_theme.tres"],...}
+#   project run reports the same pair for its autosave window (--autosave, default true).
+
+# 2) Whole-project diff around any batch of ops (local, no editor):
+godot-ai-cli filesystem snapshot --tag before-batch --project .
+#   ... the mutation batch (scene save, node set-property, resource set-property, ...)
+godot-ai-cli filesystem changed --tag before-batch --project .
+#   → {"changed":[{"path":"res://ui/main_theme.tres","status":"modified",
+#                  "sha_before":"...","sha_after":"..."}],"added":[],"removed":[],
+#      "scanned":N,"ignored_count":M,...}
+```
+
+`written_paths` are the files the call wrote on purpose; anything in `resaved_resources` is collateral — review it before committing. Both lists are size+mtime based (second-granular mtimes) and PARTIAL when `write_track_truncated:true` is present, so use the snapshot diff when you need a provable answer: `filesystem changed` decides on content alone (a file rewritten with identical bytes is not reported even though its mtime moved), needs no git (untracked and git-ignored files are covered), and counts its walk exclusions in `ignored_count` (`.godot/` and `.git/` at any depth, plus root-level `.mono/` `bin/` `obj/` `.vs/` `.idea/`). Snapshots live in `<project>/.godot/godot_ai_snapshots/<tag>.json`; `--tag` takes one snapshot name per baseline, and `filesystem changed` writes nothing.

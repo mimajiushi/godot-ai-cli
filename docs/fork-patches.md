@@ -969,3 +969,83 @@ treats an injected-but-invalid root as "scan nothing".
   `X-RateLimit-Remaining: 0` header) still reports `UPDATE_CHECK_FAILED`,
   `--tag` only installs a NEWER release (no rollback), and `--zip` verifies the
   file name + SHA256 but not the archive's OS/arch.
+
+## 22. Merged R-1…R-9 requirement batch (unreleased worktree)
+
+`plugin.cfg` 4.3.0 → **4.3.1** (patch). The merged nine-requirement
+submission (`godot-ai-cli-requirements-merged-2026-09-27.md`, R-1…R-9)
+landed as one batch; the plugin-side fork patches are:
+
+- **`theme stylebox-override --fresh`** (`handlers/theme_handler.gd`, R-2):
+  without the flag the node's RESOLVED stylebox for the slot stays the base
+  and the patch is applied on top of it, so every visual parameter the patch
+  does not mention is inherited silently — that is how a 48x7 pixel-art bar
+  ends up with the theme's 6 px corner radius. `fresh: true` starts from a
+  blank `StyleBoxFlat` instead (all parameters zeroed, the theme is not
+  consulted at all — an unknown/typo'd slot is not an error on either path,
+  because without the flag `Control.get_theme_stylebox()` falls back to
+  ThemeDB's engine fallback stylebox instead of returning null). The reply
+  carries `fresh` next to `overrode_existing`, and the undo action now
+  restores the override the node ACTUALLY had before the call (read through
+  the portable `theme_override_styles/<slot>` channel) instead of the resolved
+  base — undoing a fresh override that had replaced a non-fresh one used to
+  land back on the theme's stylebox.
+- **`node reset-property`** (`handlers/node_handler.gd`, `plugin.gd`, R-3):
+  the inverse of `node set-property` — instead of writing another override it
+  writes the property's serialization default, so the NEXT `scene save` drops
+  that line from the .tscn and the node falls back to the default the packer
+  itself would use (the value stored by the scene's inheritance or instancing
+  stack, or the script/class default; `default_source` in the reply names
+  which of `inheritance_stack` / `instance_stack` / `script` / `class` was
+  resolved). The reply also reports `is_default` / `removed_override` and
+  flags a property the inspector has pinned (`_edit_pinned_properties_`,
+  which the packer stores no matter the value); a property whose usage lacks
+  PROPERTY_USAGE_STORAGE has no serialized override to drop and is refused
+  with INVALID_PARAMS rather than corrupting the scene. So "the override is
+  really gone" is checkable without re-reading the .tscn. Registered in
+  `plugin.gd` as `reset_property`.
+- **`game ui-activate`** (`runtime/game_helper.gd`, R-4②): the UI counterpart
+  of `game input-action`, which only ever reaches `Input.is_action_*`
+  consumers and therefore cannot press a button. The new game command emits
+  the target Button's OWN `pressed` signal (and flips `button_pressed` +
+  emits `toggled` when `toggle_mode` is on), so a paused `AcceptDialog`'s OK
+  button can be exercised in one call — the connected handler runs whatever
+  the dialog's process mode is, because no event is synthesized. `node_path`
+  names the Control (default: the current GUI focus owner), and a refusal is
+  a structured `activated:false` + `reason` in not_found / not_a_control /
+  no_focus_owner / disabled / not_visible / unsupported_control rather than a
+  signal emission that pretends to be a click (`game input-key` /
+  `game input-mouse` stay the paths for a Control that is not a BaseButton).
+- **Save/autosave write receipts** (`handlers/scene_handler.gd`,
+  `handlers/project_handler.gd`, `utils/resource_io.gd`, R-6 4.2): saving is
+  never a single-file write — the editor re-serializes every resource it has
+  loaded, which is how hand-written comments vanish from an unrelated
+  `.tres`. Both write paths now snapshot the tracked resource-ish files
+  (`.tscn`/`.scn`/`.tres`/`.res`/`.material`/`.theme`) immediately before and
+  after the write and report `written_paths` (the files the call wrote on
+  purpose: the edited scene, or the OPEN scenes for `project run`'s autosave
+  window) plus `resaved_resources` (the ones re-serialized or newly created as
+  a side effect, with the explicit list removed), and
+  `write_track_truncated: true` when the walk hit its entry cap, which makes
+  `resaved_resources` a partial result (`written_paths` stays exact).
+  `--autosave=false` reports both empty, because nothing was written.
+  Detection is size+mtime based (second-granular
+  `FileAccess.get_modified_time`), so a same-second
+  same-size rewrite is not detected — `filesystem snapshot` /
+  `filesystem changed` is the byte-provable channel for that case.
+
+A 4.3.0 project still connects to this build: the plugin↔daemon handshake
+tolerates a patch-level drift and flags the session `plugin_stale` (§12) until
+`plugin install --project <dir>` plus a full editor restart. The new hunks are
+tagged in-source with their requirement — R-2/R-3/R-4② carry the standard
+`godot-ai-cli fork patch` marker (so the header's grep still audits them), and
+the R-6 4.2 write-tracking helpers use the `需求 R-6 4.2` tag.
+
+The rest of the batch adds no `plugin/godot_ai/` divergence and is listed here
+only so this entry stays auditable against the submission: `--content-file`
+(R-1), the local `image find-color` / `tilemap find-by-color` reverse lookups
+and `tilemap render`'s `origin` / `cell_px_size` metadata (R-5), the `update`
+stale-`.old` fallback with `locked_by` / `next_steps` error data (R-7), the
+release-time skill ops-count rendering (R-8) and the `status` rejection
+lifecycle fields with hint gating (R-9) all live in the Go CLI/daemon or in
+the skill docs — none of them touches a file under `plugin/godot_ai/`.

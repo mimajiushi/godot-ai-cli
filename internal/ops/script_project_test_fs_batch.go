@@ -11,6 +11,12 @@ func scriptOps() []OpSpec {
 				ps("path", "path", true, "", "res:// path of the new script"),
 				ps("content", "content", false, "", "Full script source"),
 			},
+			// --content-file（需求 R-1）：脚本正文的文件通道，与 filesystem
+			// write-text 共用同一套 CLI 侧实现（internal/cli/ops.go）。
+			CLIFlags: []CLIFlagSpec{
+				cls("content-file", "", "Read the script source VERBATIM from this UTF-8 file (a leading BOM is stripped); --content must not be combined with it. The PowerShell 5.1-safe channel for multi-line, non-ASCII sources"),
+			},
+			DocNote: "Windows PowerShell 5.1 strips the ASCII double quotes out of an argument and re-encodes the rest through the console code page, so a multi-line source with Chinese comments or Chinese string constants cannot travel through `--content` intact. Write the source to a UTF-8 file first — `[IO.File]::WriteAllText(\"$env:TEMP\\hud.gd\", $src, (New-Object System.Text.UTF8Encoding($false)))`, or `Set-Content -Encoding utf8`, whose BOM this channel strips for you — then pass `--content-file <path>`: `godot-ai-cli script create --path res://scene/ui/hud.gd --content-file %TEMP%\\hud.gd`. Precedence: an explicit `--content` plus `--content-file` is rejected with INVALID_PARAMS (exactly one content source), while `--content-file` outranks a `content` key inside `--params`/`--params-file` — the same \"explicit flag beats the base payload\" rule the other file channels follow. Only a leading BOM is removed: newlines, tabs and quotes arrive verbatim. The successful response carries `source_bytes` and `source_sha256` (hex digest of the exact UTF-8 content the CLI sent), so the caller can prove the bytes on disk are the bytes it prepared.",
 		},
 		{
 			Domain: "script", Name: "patch", PluginCommand: "patch_script",
@@ -97,6 +103,9 @@ func projectOps() []OpSpec {
 			Domain: "project", Name: "run", PluginCommand: "run_project",
 			Summary: "Play the project and wait briefly for game liveness",
 			Timeout: DefaultTimeout, Write: true,
+			ResponseNote: `{"mode","scene","autosave","was_already_running","written_paths":[...],"resaved_resources":[...]}` +
+				` — when autosave is on the play call saves the editor's open scenes first; written_paths names those scenes and resaved_resources names the resource files (.tscn/.scn/.tres/.res/.material/.theme) the editor re-serialized as a side effect of that autosave. "write_track_truncated":true is appended when the scan hit its file cap, so both lists are partial.`,
+			DocNote: "`--autosave` (default true) makes the editor persist in-memory edits before the game starts; that save can rewrite resource files nobody asked about (hand-written comments in a .tres disappear, values equal to a script default get dropped). `resaved_resources` is the checkable list of exactly that: the resource-ish files whose size/mtime changed during the autosave window, minus the open scenes reported in written_paths. Two limits worth knowing (the same detection `scene save` documents): the diff only walks the AFTER snapshot, so a file DELETED during the autosave window is not reported; and a resource NEWLY CREATED in that window does appear in `resaved_resources` (it was not there before the save). Detection is size+mtime based (second-granular mtimes), so same-second same-size rewrites are not detected. The test is a `(mtime,size)` SUPERSET in the other direction too: a file whose size or mtime moved while its bytes stayed identical is still listed, so a `resaved_resources` entry proves a file was TOUCHED, not that its content changed; compare hashes (`filesystem snapshot` / `filesystem changed`) when that distinction matters. `--autosave=false` reports both lists empty.",
 			Params: []ParamSpec{
 				ps("mode", "mode", false, "main", "main | current | custom scene mode"),
 				ps("scene", "scene", false, "", "res:// scene for mode=custom"),
@@ -174,6 +183,11 @@ func filesystemOps() []OpSpec {
 				ps("path", "path", true, "", "res:// path"),
 				ps("content", "content", false, "", "File content"),
 			},
+			// --content-file（需求 R-1）：与 script create 同一条文件通道。
+			CLIFlags: []CLIFlagSpec{
+				cls("content-file", "", "Read the file content VERBATIM from this UTF-8 file (a leading BOM is stripped); --content must not be combined with it"),
+			},
+			DocNote: "The file-content channel (需求 R-1): a multi-line, non-ASCII payload survives here untouched, where `--content` on Windows PowerShell 5.1 loses ASCII double quotes and depends on the console code page — `godot-ai-cli filesystem write-text --path res://scene/ui/hud.gd --content-file %TEMP%\\hud.gd`. Precedence and errors match `script create`: exactly one of `--content`/`--content-file`, file channel over a `content` key in `--params`/`--params-file`, only a leading BOM stripped, CRLF preserved. The response adds `source_bytes` and `source_sha256` (hex) for the content actually sent.",
 		},
 		{
 			Domain: "filesystem", Name: "reimport", PluginCommand: "reimport",

@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -1155,5 +1157,253 @@ func TestCollectParamsSpriteframesOps(t *testing.T) {
 	must(cmd, "texture", "res://assets/hero.png")
 	if _, err = collectParams(cmd, op); err == nil {
 		t.Error("missing required flags accepted")
+	}
+}
+
+// contentFileHarness 起一个 mock daemon + 插件，返回「执行一条 CLI 命令」的
+// 闭包与插件侧收到的请求。--content-file 的验收要走真实命令路径（标志注册、
+// collectParams、回包里的 source_bytes/source_sha256 三处都要覆盖），所以
+// 不能只调 collectParams。
+func contentFileHarness(t *testing.T) (func(args ...string) (string, error), *mockplugin.Plugin) {
+	t.Helper()
+	d, err := daemon.Start(context.Background(), daemon.Config{Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	plugin := mockplugin.Dial(t, d.Bridge().Addr(), d.Bridge().WSCapability, nil)
+	plugin.SetResponder(func(string, map[string]any) *mockplugin.Response {
+		return &mockplugin.Response{Data: map[string]any{"echo": true}}
+	})
+
+	run := func(args ...string) (string, error) {
+		cmd := NewRootCommand()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(append(args, "--http-port", itoa(d.HTTPPort())))
+		err := cmd.Execute()
+		return buf.String(), err
+	}
+	return run, plugin
+}
+
+// TestContentFileChannel：script create / filesystem write-text 的 --content-file
+// （需求 R-1）——CLI 侧读 UTF-8 文件、剥掉 BOM、作为 content 下发；成功回包
+// 附 source_bytes 与 source_sha256（hex），证明「写进去的就是我准备的内容」。
+//
+// 载荷刻意用「BOM + 多行 + 中文注释 + 中文字符串常量 + ASCII 双引号」：
+// PS 5.1 正是把这些东西从命令行吃掉/改编码的。
+func TestContentFileChannel(t *testing.T) {
+	dir := t.TempDir()
+	source := "; 中文注释：生命值\nconst GREETING = \"游戏结束\"\n\nfunc _ready() -> void:\n\tprint(GREETING)\n"
+	file := filepath.Join(dir, "hud.gd")
+	if err := os.WriteFile(file, append([]byte("\ufeff"), []byte(source)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run, plugin := contentFileHarness(t)
+	out, err := run("script", "create", "--path", "res://scene/ui/hud.gd", "--content-file", file)
+	if err != nil {
+		t.Fatalf("script create --content-file: %v\n%s", err, out)
+	}
+
+	got := plugin.Received()
+	if len(got) != 1 || got[0].Command != "create_script" {
+		t.Fatalf("mock received %v", got)
+	}
+	if content, _ := got[0].Params["content"].(string); content != source {
+		t.Errorf("wire content = %q, want the BOM-stripped file verbatim", content)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+	sum := sha256.Sum256([]byte(source))
+	if payload["source_bytes"] != float64(len(source)) {
+		t.Errorf("source_bytes = %v, want %d", payload["source_bytes"], len(source))
+	}
+	if payload["source_sha256"] != fmt.Sprintf("%x", sum) {
+		t.Errorf("source_sha256 = %v, want %x", payload["source_sha256"], sum)
+	}
+
+	// filesystem write-text 走同一条通道。
+	plain := "；纯文本\nline2\n"
+	plainFile := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(plainFile, []byte(plain), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("filesystem", "write-text", "--path", "res://notes.txt", "--content-file", plainFile)
+	if err != nil {
+		t.Fatalf("filesystem write-text --content-file: %v\n%s", err, out)
+	}
+	got = plugin.Received()
+	last := got[len(got)-1]
+	if last.Command != "write_file" || last.Params["content"] != plain {
+		t.Errorf("write_file params = %v", last.Params)
+	}
+	sum = sha256.Sum256([]byte(plain))
+	if !strings.Contains(out, fmt.Sprintf("%x", sum)) {
+		t.Errorf("write-text response lacks the source_sha256 of the file:\n%s", out)
+	}
+
+	// 空文件是合法输入（写一个空文件），不是「没有内容通道」。
+	emptyFile := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(emptyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("filesystem", "write-text", "--path", "res://empty.txt", "--content-file", emptyFile)
+	if err != nil {
+		t.Fatalf("empty --content-file: %v\n%s", err, out)
+	}
+	got = plugin.Received()
+	if content, ok := got[len(got)-1].Params["content"].(string); !ok || content != "" {
+		t.Errorf("empty file must travel as an empty content string, got %#v", got[len(got)-1].Params["content"])
+	}
+}
+
+// TestContentFileErrors：--content 与 --content-file 互斥（INVALID_PARAMS）、
+// 文件读不到要带 flag 前缀报错，且两种情况都不得把命令发到 daemon。
+func TestContentFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "hud.gd")
+	if err := os.WriteFile(file, []byte("pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run, plugin := contentFileHarness(t)
+	out, err := run("script", "create", "--path", "res://hud.gd", "--content", "inline", "--content-file", file)
+	if err == nil {
+		t.Fatal("--content with --content-file was accepted")
+	}
+	if !strings.Contains(out, "INVALID_PARAMS") || !strings.Contains(out, "mutually exclusive") {
+		t.Errorf("conflict envelope missing INVALID_PARAMS/mutually exclusive:\n%s", out)
+	}
+	out, err = run("filesystem", "write-text", "--path", "res://hud.gd", "--content-file", filepath.Join(dir, "missing.gd"))
+	if err == nil {
+		t.Fatal("missing --content-file was accepted")
+	}
+	if !strings.Contains(out, "INVALID_PARAMS") || !strings.Contains(out, "--content-file") {
+		t.Errorf("missing-file envelope must name the channel:\n%s", out)
+	}
+	if n := len(plugin.Received()); n != 0 {
+		t.Errorf("rejected invocations still reached the daemon (%d commands)", n)
+	}
+}
+
+// TestContentFileBeatsParamsBase：--content-file 是显式内容通道，覆盖
+// --params/--params-file 里的 content 基值（与 --value-file 等既有文件通道
+// 同一条优先级规则）。
+func TestContentFileBeatsParamsBase(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "hud.gd")
+	if err := os.WriteFile(file, []byte("from-file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run, plugin := contentFileHarness(t)
+	out, err := run("script", "create", "--path", "res://hud.gd",
+		"--params", `{"content":"from-params","extra":"kept"}`, "--content-file", file)
+	if err != nil {
+		t.Fatalf("--params + --content-file: %v\n%s", err, out)
+	}
+	got := plugin.Received()
+	if len(got) != 1 {
+		t.Fatalf("mock received %v", got)
+	}
+	if got[0].Params["content"] != "from-file\n" {
+		t.Errorf("content = %v, want the file to win over the --params base", got[0].Params["content"])
+	}
+	if got[0].Params["extra"] != "kept" {
+		t.Errorf("--params base keys must survive: %v", got[0].Params)
+	}
+
+	// 不给 --content-file 时行为不变：--params 的 content 照旧下发。
+	run, plugin = contentFileHarness(t)
+	if _, err := run("script", "create", "--path", "res://hud.gd", "--params", `{"content":"from-params"}`); err != nil {
+		t.Fatal(err)
+	}
+	got = plugin.Received()
+	if got[0].Params["content"] != "from-params" {
+		t.Errorf("plain --params content changed: %v", got[0].Params["content"])
+	}
+}
+
+// opHelpOutput 渲染一条 op 命令的 --help 文本（cobra 把它写进 OutOrStdout）。
+func opHelpOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	cmd := NewRootCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs(append(args, "--help"))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("godot-ai-cli %v --help: %v\n%s", args, err, buf.String())
+	}
+	return buf.String()
+}
+
+// TestOpHelpNoteSection：需求 R-4① 的原文要求是「在 game input-action --help 里加
+// 一句」——HelpNote 是只进 -h 的短段，必须真的出现在 per-command help 里，且不得
+// 把整段（很长的）DocNote 灌进 help。没有 HelpNote 的 op 输出里不许冒出 Note 段。
+func TestOpHelpNoteSection(t *testing.T) {
+	op, ok := ops.Lookup("game", "input-action")
+	if !ok {
+		t.Fatal("op game input-action missing")
+	}
+	if op.HelpNote == "" {
+		t.Fatal("game input-action carries no HelpNote — the GUI hint would stay invisible in --help")
+	}
+
+	help := opHelpOutput(t, "game", "input-action")
+	for _, want := range []string{
+		"Note:",
+		"Input.is_action_*",
+		"game input-key",
+		"game input-mouse",
+		"game ui-activate",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("game input-action --help missing %q:\n%s", want, help)
+		}
+	}
+	if n := strings.Count(help, "Note:"); n != 1 {
+		t.Errorf("game input-action --help has %d Note: sections, want exactly 1:\n%s", n, help)
+	}
+	if op.DocNote != "" && strings.Contains(help, op.DocNote) {
+		t.Error("game input-action --help renders the whole DocNote; HelpNote must stay the short -h-only variant")
+	}
+
+	// 没有 HelpNote 的 op：help 里不许新增 Note 段（其余 op 的输出保持原样）。
+	if plain := opHelpOutput(t, "node", "create"); strings.Contains(plain, "Note:") {
+		t.Errorf("node create --help grew a Note: section:\n%s", plain)
+	}
+	// 既有 HelpNote 宿主（editor eval / script patch）仍然渲染：渲染入口没被改坏。
+	for _, args := range [][]string{{"editor", "eval"}, {"script", "patch"}} {
+		host, ok := ops.Lookup(args[0], args[1])
+		if !ok || host.HelpNote == "" {
+			t.Fatalf("op %s %s lost its HelpNote", args[0], args[1])
+		}
+		if out := opHelpOutput(t, args...); !strings.Contains(out, host.HelpNote) {
+			t.Errorf("%s %s --help no longer renders its HelpNote:\n%s", args[0], args[1], out)
+		}
+	}
+}
+
+// TestHelpNoteStaysOutOfCommandsMarkdown：HelpNote 只服务 per-command --help——
+// commands.md 的生成器不消费它，doc 闸门（check-doc-coverage.sh 的 4b 逐字节
+// 比对）因此不受影响；DocNote 反过来必须继续进 catalog。
+func TestHelpNoteStaysOutOfCommandsMarkdown(t *testing.T) {
+	op, ok := ops.Lookup("game", "input-action")
+	if !ok || op.HelpNote == "" {
+		t.Fatal("game input-action HelpNote missing")
+	}
+	md := runCommands(t, "--format", "md")
+	if strings.Contains(md, op.HelpNote) {
+		t.Error("commands --format md rendered the HelpNote — it must stay -h-only")
+	}
+	if op.DocNote != "" && !strings.Contains(md, op.DocNote) {
+		t.Error("commands --format md lost the DocNote prose of game input-action")
 	}
 }

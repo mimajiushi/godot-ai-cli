@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -46,7 +47,10 @@ func newDomainCommands() []*cobra.Command {
 		case "custom":
 			parent.AddCommand(newCustomListCommand(), newCustomInvokeCommand())
 		case "tilemap":
-			parent.AddCommand(newTilemapDumpCommand(), newTilemapRenderCommand())
+			parent.AddCommand(newTilemapDumpCommand(), newTilemapRenderCommand(), newTilemapFindByColorCommand())
+		case "filesystem":
+			// 本地工作区哈希快照/差异（需求 R-6 4.1）：不经 daemon，也不需要编辑器。
+			parent.AddCommand(newFilesystemSnapshotCommand(), newFilesystemChangedCommand())
 		case "script":
 			// 本地探针执行，不经 daemon（需求：headless script run）。
 			parent.AddCommand(newScriptRunCommand())
@@ -92,6 +96,11 @@ Examples:
 			// --code-stdin / --code-b64) before the shared param collection.
 			if op.Domain == "editor" && op.Name == "eval" {
 				return runEval(cmd, op)
+			}
+			// script create / filesystem write-text 的 --content-file 需要
+			// CLI 侧读文件，并在成功回包里附 source_bytes/source_sha256。
+			if hasContentFileChannel(op) {
+				return runContentFileOp(cmd, op)
 			}
 			params, err := collectParams(cmd, op)
 			if err != nil {
@@ -483,6 +492,82 @@ func collectParams(cmd *cobra.Command, op ops.OpSpec) (map[string]any, error) {
 		params = map[string]any{"op": op.WrapOp, "params": params}
 	}
 	return params, nil
+}
+
+// hasContentFileChannel 报告该 op 是否支持 --content-file 文件内容通道
+// （需求 R-1）：正文写入只有 script create 与 filesystem write-text 两个。
+func hasContentFileChannel(op ops.OpSpec) bool {
+	return (op.Domain == "script" && op.Name == "create") ||
+		(op.Domain == "filesystem" && op.Name == "write-text")
+}
+
+// contentSource 记录 --content-file 通道实际读入的正文长度与 sha256（hex）。
+// 成功回包带上它，调用方才能证明「写进去的就是我准备的内容」——PS 5.1 会剥掉
+// 命令行载荷里的 ASCII 双引号，光看命令回显不算数。
+type contentSource struct {
+	bytes  int
+	sha256 string
+}
+
+// runContentFileOp 是 script create / filesystem write-text 的 RunE：先把
+// --content-file 解析到 --content 标志上（之后 collectParams 的既有优先级自然
+// 生效：显式 --content > --content-file > --params/--params-file 里的 content），
+// 再把 source_bytes/source_sha256 注入成功回包。失败走与普通 op 相同的错误
+// 封装（INVALID_PARAMS / 插件错误码原样透传）。
+func runContentFileOp(cmd *cobra.Command, op ops.OpSpec) error {
+	source, err := resolveContentFile(cmd)
+	if err != nil {
+		return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
+	}
+	params, err := collectParams(cmd, op)
+	if err != nil {
+		return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
+	}
+	resp, err := executeOpRaw(cmd, op.PluginCommand, params, op.Timeout, op.Write)
+	if err != nil {
+		return err
+	}
+	// 只在成功回包上附加来源证明：失败回包保持插件原样，便于按错误码机械处理。
+	if source != nil {
+		if status, _ := resp["status"].(string); status == "ok" {
+			data, _ := resp["data"].(map[string]any)
+			if data == nil {
+				data = map[string]any{}
+				resp["data"] = data
+			}
+			data["source_bytes"] = source.bytes
+			data["source_sha256"] = source.sha256
+		}
+	}
+	return printExecuteResponse(cmd, resp)
+}
+
+// resolveContentFile 把 --content-file 的正文落到 --content 标志上：
+//   - 与显式 --content 互斥（同给时无法判断哪一份才是调用方的意图）→ 报错；
+//   - 通过 Set() 写入即被标记为「显式给出」，于是覆盖 --params/--params-file
+//     里的 content 基值，与 CLI 其它文件通道的优先级惯例一致；
+//   - 剥掉前缀的 UTF-8 BOM（PS 5.1 的 Set-Content -Encoding utf8 会写一个，
+//     留在脚本首行会让 Godot 解析失败），其余字节原样（含 CRLF 与引号）。
+//
+// 未给 --content-file 时返回 (nil, nil)，调用方回落到原本的 collectParams 路径。
+func resolveContentFile(cmd *cobra.Command) (*contentSource, error) {
+	path := flagString(cmd, "content-file")
+	if path == "" {
+		return nil, nil
+	}
+	if f := cmd.Flags().Lookup("content"); f != nil && f.Changed {
+		return nil, fmt.Errorf("--content and --content-file are mutually exclusive — pass exactly one content source")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("--content-file: %v", err)
+	}
+	content := stripUTF8BOM(string(data))
+	if err := cmd.Flags().Set("content", content); err != nil {
+		return nil, fmt.Errorf("--content-file: %v", err)
+	}
+	sum := sha256.Sum256([]byte(content))
+	return &contentSource{bytes: len(content), sha256: fmt.Sprintf("%x", sum)}, nil
 }
 
 // readJSONFileValue reads one CLI file channel carrying raw JSON (any JSON

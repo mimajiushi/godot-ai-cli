@@ -276,7 +276,8 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ReplaceExecutable(opts.GOOS, target, binary); err != nil {
+	warnings, err := ReplaceExecutable(opts.GOOS, target, binary)
+	if err != nil {
 		return nil, err
 	}
 
@@ -287,6 +288,11 @@ func Run(ctx context.Context, opts Options) (map[string]any, error) {
 		// The old binary survives as <exe>.old until the next startup's
 		// CleanupStaleBinary removes it.
 		result["previous_binary"] = target + ".old"
+	}
+	// 降级为 best-effort 的步骤（旧备份删不掉、只能改名挪开）如实回报，
+	// 让调用方知道安装目录里多了一份待清理的副本（需求 R-7 a）。
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
 	}
 	if hint := docsHint(ctx, target); hint != nil {
 		result["docs_hint"] = hint
@@ -383,7 +389,8 @@ func runOfflineZip(ctx context.Context, opts Options) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ReplaceExecutable(opts.GOOS, target, binary); err != nil {
+	warnings, err := ReplaceExecutable(opts.GOOS, target, binary)
+	if err != nil {
 		return nil, err
 	}
 
@@ -396,6 +403,10 @@ func runOfflineZip(ctx context.Context, opts Options) (map[string]any, error) {
 	}
 	if opts.GOOS == "windows" {
 		result["previous_binary"] = target + ".old"
+	}
+	// 离线通道同样如实回报降级步骤的 warnings（需求 R-7 a）。
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
 	}
 	if hint := docsHint(ctx, target); hint != nil {
 		result["docs_hint"] = hint
@@ -1195,66 +1206,124 @@ var (
 	rename    = os.Rename
 )
 
-// ReplaceExecutable swaps the binary at target for data.
+// ReplaceExecutable 用 data 替换 target 处的可执行文件，并返回过程中收集到的
+// 非致命警告（一切顺利时为空，调用方在结果负载里给出 `warnings[]`）。
 //
 // Windows cannot overwrite a running executable, but it CAN rename one:
-// the current binary moves to <target>.old (CleanupStaleBinary removes it
-// on the next startup) and the new binary is written at the original path.
+// 当前二进制先挪到 <target>.old，新二进制写到原路径。上一次升级遗留的
+// <target>.old 会先删；删不掉时——最典型的是这份备份仍是旧 daemon 的运行映像
+// （Windows 允许 RENAME 这种文件，但永远 DELETE 不掉）——就把备份改名挪到
+// 唯一的名字下，升级继续：一份删不掉的旧副本不该让升级变得不可能
+// （需求 R-7 (a)）。只有「把当前二进制挪开」与「写入新二进制」失败才算真失败，
+// 那种失败会带上结构化诊断（需求 R-7 (b)）。
+//
 // Unix replaces atomically: same-directory temp file, chmod, rename.
-func ReplaceExecutable(goos, target string, data []byte) error {
+func ReplaceExecutable(goos, target string, data []byte) ([]string, error) {
 	info, err := os.Stat(target)
 	if err != nil || info.IsDir() {
-		return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("no existing executable at %s to replace", target)}
+		return nil, replaceFailed(target, fmt.Sprintf("no existing executable at %s to replace", target))
 	}
 
 	if goos == "windows" {
 		old := target + ".old"
-		// Windows refuses to rename over an existing file, so a leftover
-		// from a previous update goes first.
+		var warnings []string
+		// Windows 不允许改名覆盖已存在的文件，所以要先把上一次升级留下的旧备份
+		// 处理掉。删不掉就降级为「改名挪开」，
+		// 绝不因为一份旧备份把整次升级判死。
 		if err := os.Remove(old); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("remove the stale backup %s: %v", old, err)}
+			unique := fmt.Sprintf("%s.%d", old, time.Now().Unix())
+			if renameErr := rename(old, unique); renameErr != nil {
+				return warnings, replaceFailed(old, fmt.Sprintf(
+					"remove the stale backup %s: %v; renaming it aside to %s also failed: %v",
+					old, err, unique, renameErr))
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"stale backup %s could not be deleted (%v); renamed it to %s instead — the copy is cleaned up on a later startup once the process holding it exits",
+				old, err, unique))
 		}
 		if err := rename(target, old); err != nil {
-			return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("move %s aside: %v", target, err)}
+			return warnings, replaceFailed(target, fmt.Sprintf("move %s aside: %v", target, err))
 		}
 		if err := writeFile(target, data, 0o755); err != nil {
 			// Roll back so the install is never left without a binary. When
 			// even the rollback fails, the message must say exactly where
 			// the previous binary survives for manual recovery.
 			if rbErr := rename(old, target); rbErr != nil {
-				return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf(
+				return warnings, replaceFailed(target, fmt.Sprintf(
 					"write the new binary to %s: %v; rolling back also failed: %v — the previous binary survives at %s",
-					target, err, rbErr, old)}
+					target, err, rbErr, old))
 			}
-			return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("write the new binary to %s: %v", target, err)}
+			return warnings, replaceFailed(target, fmt.Sprintf("write the new binary to %s: %v", target, err))
 		}
-		return nil
+		return warnings, nil
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".godot-ai-cli-update-*")
 	if err != nil {
-		return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("stage the new binary next to %s: %v", target, err)}
+		return nil, replaceFailed(target, fmt.Sprintf("stage the new binary next to %s: %v", target, err))
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
-		return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("stage the new binary: %v", err)}
+		return nil, replaceFailed(target, fmt.Sprintf("stage the new binary: %v", err))
 	}
 	if err := tmp.Chmod(0o755); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
-		return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("mark the new binary executable: %v", err)}
+		return nil, replaceFailed(target, fmt.Sprintf("mark the new binary executable: %v", err))
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
-		return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("stage the new binary: %v", err)}
+		return nil, replaceFailed(target, fmt.Sprintf("stage the new binary: %v", err))
 	}
 	if err := os.Rename(tmpName, target); err != nil {
 		_ = os.Remove(tmpName)
-		return &Error{Code: CodeReplaceFailed, Message: fmt.Sprintf("replace %s: %v", target, err)}
+		return nil, replaceFailed(target, fmt.Sprintf("replace %s: %v", target, err))
 	}
-	return nil
+	return nil, nil
+}
+
+// replaceFailed 构造 UPDATE_REPLACE_FAILED（错误码不变，机器侧的既有分支继续
+// 可用），并统一补上结构化 data（需求 R-7 b）：
+//   - path：出问题的那个路径；
+//   - locked_by：仍有进程把它当映像映射着时给出 pid/exe/cmdline，非 Windows
+//     恒为空数组；
+//   - next_steps：可执行的下一步。
+func replaceFailed(path, message string) *Error {
+	return &Error{
+		Code:    CodeReplaceFailed,
+		Message: message,
+		Data: map[string]any{
+			"path":       path,
+			"locked_by":  processesLocking(path),
+			"next_steps": replaceFailedNextSteps(path),
+		},
+	}
+}
+
+// replaceFailedNextSteps 给出「文件删不掉 / 挪不开」现场的可执行下一步：停掉
+// 常驻的旧进程最有效（需求 R-7 的原始故障里正是上一版的 daemon 还活着），改名
+// 挪开是兜底手段。措辞按宿主平台给（F-7）——Windows 用 PowerShell 的
+// Rename-Item（改名对运行中的映像合法、删除不合法），其它平台用 kill/mv，
+// 否则 Unix 上的失败会报一套在那里跑不了的 Windows 命令。
+func replaceFailedNextSteps(path string) []string {
+	return replaceFailedNextStepsFor(runtime.GOOS, path)
+}
+
+// replaceFailedNextStepsFor 是 replaceFailedNextSteps 的平台参数化实现：抽成
+// 带 goos 的纯函数，两个分支的单测不必依赖跑测试的宿主平台。
+func replaceFailedNextStepsFor(goos, path string) []string {
+	if goos != "windows" {
+		return []string{
+			"停掉仍在使用该文件的进程（最常见的是上一版 daemon）：godot-ai-cli stop；需要 pid 时用 lsof <path> / fuser <path> 查出后 kill <pid>（locked_by 的进程映像扫描只在 Windows 有）",
+			fmt.Sprintf("或先把它改名挪开再重试（Windows 之外删除不受「正在运行」限制，改名仍是最省事的兜底）：mv %s %s.bak", path, path),
+		}
+	}
+	return []string{
+		"停掉仍在运行、映像指向该文件的进程（最常见的是上一版 daemon）：godot-ai-cli stop",
+		fmt.Sprintf("或手工把它改名挪开后再重试（改名对运行中的映像合法，删除不合法）：Rename-Item %s %s.bak", path, path),
+	}
 }
 
 // CleanupStaleBinary removes the <exe>.old backup a Windows self-update
@@ -1272,9 +1341,23 @@ func CleanupStaleBinary() {
 // without being mid-exec).
 func cleanupStaleBackup(exe string) {
 	old := exe + ".old"
-	if info, err := os.Stat(old); err == nil && !info.IsDir() {
-		// Can still fail while an old daemon keeps the image mapped on
-		// Windows — ignored here, retried on the next startup.
-		_ = os.Remove(old)
+	removeStaleBackup(old)
+	// 需求 R-7 (a) 让删不掉的 .old 改名成 <exe>.old.<epoch> 活下来：持有它的
+	// 进程退出后由这里一并收掉，否则每次「被锁的升级」都会在安装目录里永久
+	// 留一份。改名产物与 .old 用同一个入口清理，口径一致。
+	matches, err := filepath.Glob(old + ".*")
+	if err != nil {
+		return
+	}
+	for _, match := range matches {
+		removeStaleBackup(match)
+	}
+}
+
+// removeStaleBackup 删掉一份备份文件；删不掉（仍被映射或仍被占用）就静默留给
+// 下一次启动重试。
+func removeStaleBackup(path string) {
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		_ = os.Remove(path)
 	}
 }

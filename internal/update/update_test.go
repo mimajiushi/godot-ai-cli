@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -266,8 +268,12 @@ func TestReplaceExecutableWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ReplaceExecutable("windows", target, []byte("new-binary")); err != nil {
+	warnings, err := ReplaceExecutable("windows", target, []byte("new-binary"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("a plain stale .old (deletable) must not produce warnings: %v", warnings)
 	}
 	assertFileContent(t, target, "new-binary")
 	assertFileContent(t, target+".old", "old-binary")
@@ -281,7 +287,7 @@ func TestReplaceExecutableUnix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ReplaceExecutable("linux", target, []byte("new-binary")); err != nil {
+	if _, err := ReplaceExecutable("linux", target, []byte("new-binary")); err != nil {
 		t.Fatal(err)
 	}
 	assertFileContent(t, target, "new-binary")
@@ -316,7 +322,7 @@ func TestReplaceExecutableWindowsRollbackFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { writeFile, rename = origWrite, origRename })
 
-	err := ReplaceExecutable("windows", target, []byte("new-binary"))
+	_, err := ReplaceExecutable("windows", target, []byte("new-binary"))
 	assertCode(t, err, CodeReplaceFailed)
 	if !strings.Contains(err.Error(), target+".old") {
 		t.Errorf("error does not name the surviving backup %s.old: %v", target, err)
@@ -332,8 +338,184 @@ func TestReplaceExecutableWindowsRollbackFailure(t *testing.T) {
 // install exists (a mistyped --from must not drop a stray executable).
 func TestReplaceExecutableMissingTarget(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "godot-ai-cli.exe")
-	err := ReplaceExecutable("windows", target, []byte("new-binary"))
+	_, err := ReplaceExecutable("windows", target, []byte("new-binary"))
 	assertCode(t, err, CodeReplaceFailed)
+}
+
+// holdImageHelperEnv 是辅助进程的开关：测试二进制看到它就只睡住不退。
+const holdImageHelperEnv = "GODOT_AI_CLI_TEST_HOLD_IMAGE"
+
+// TestHelperHoldImage 是辅助进程入口：被 holdImageProcess 从一份复制出来的
+// 映像启动，只负责让那份映像一直被某个存活进程映射着。不作为辅助进程运行时
+// 它是个空测试。
+func TestHelperHoldImage(t *testing.T) {
+	if os.Getenv(holdImageHelperEnv) != "1" {
+		return
+	}
+	time.Sleep(2 * time.Minute)
+}
+
+// holdImageProcess 把当前测试二进制复制到 imagePath 并启动一个从它运行的辅助
+// 进程，复现「<exe>.old 仍是某个存活进程的映像」这一现场（需求 R-7 的原始
+// 故障）。注册的 cleanup 会先杀掉辅助进程并等它退出，随后 t.TempDir 才能删掉
+// 临时目录（cleanup 是后进先出）。
+func holdImageProcess(t *testing.T, imagePath string) *os.Process {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imagePath, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(imagePath, "-test.run=^TestHelperHoldImage$")
+	cmd.Env = append(os.Environ(), holdImageHelperEnv+"=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	return cmd.Process
+}
+
+// TestReplaceExecutableWindowsLockedBackup：上一次升级留下的 <exe>.old 仍是某个
+// 存活进程的映像时，Windows 允许改名、禁止删除。删不掉必须降级为「改名挪开」
+// 并继续替换（需求 R-7 a）：升级照常完成，只多一条 warnings，绝不整体失败。
+func TestReplaceExecutableWindowsLockedBackup(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("「运行中的映像删不掉」是 Windows 专属语义")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "godot-ai-cli.exe")
+	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	locked := target + ".old"
+	holdImageProcess(t, locked)
+
+	warnings, err := ReplaceExecutable("windows", target, []byte("new-binary"))
+	if err != nil {
+		t.Fatalf("a locked stale backup must not fail the replace: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("locked stale backup produced no warnings")
+	}
+	if !strings.Contains(warnings[0], locked) || !strings.Contains(warnings[0], "renamed it to") {
+		t.Errorf("warning does not explain the rename fallback: %q", warnings[0])
+	}
+	assertFileContent(t, target, "new-binary")
+	// 原路径让位：<exe>.old 现在是刚被换下来的那份二进制。
+	assertFileContent(t, target+".old", "old-binary")
+	// 被锁的那份映像（辅助进程复制出的测试二进制）被挪到唯一名下活着。
+	renamed, err := filepath.Glob(locked + ".*")
+	if err != nil || len(renamed) != 1 {
+		t.Fatalf("renamed leftover = %v (%v), want exactly one", renamed, err)
+	}
+	if info, err := os.Stat(renamed[0]); err != nil || info.Size() < 4096 {
+		t.Errorf("renamed leftover %s is not the moved-aside image: %v", renamed[0], err)
+	}
+	if data, err := os.ReadFile(renamed[0]); err != nil || string(data) == "old-binary" {
+		t.Errorf("renamed leftover holds the wrong bytes (%v)", err)
+	}
+}
+
+// TestReplaceExecutableWindowsLockedBackupFailureData：连「改名挪开」都失败时
+// 才是真失败，此时 UPDATE_REPLACE_FAILED 的 data 必须具备 path / locked_by /
+// next_steps，且 locked_by 能真的指认持有该映像的进程（pid/exe/cmdline），
+// next_steps 给出可执行的下一步（需求 R-7 b）。
+func TestReplaceExecutableWindowsLockedBackupFailureData(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("locked_by 的进程映像扫描是 Windows 专属能力")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "godot-ai-cli.exe")
+	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	locked := target + ".old"
+	helper := holdImageProcess(t, locked)
+
+	// 注入：只让「把被锁的 .old 改名挪开」这一步失败，其余改名照常。
+	origRename := rename
+	rename = func(oldpath, newpath string) error {
+		if oldpath == locked && strings.HasPrefix(newpath, locked+".") {
+			return errors.New("injected rename failure")
+		}
+		return origRename(oldpath, newpath)
+	}
+	t.Cleanup(func() { rename = origRename })
+
+	_, err := ReplaceExecutable("windows", target, []byte("new-binary"))
+	assertCode(t, err, CodeReplaceFailed)
+	var uerr *Error
+	if !errors.As(err, &uerr) {
+		t.Fatalf("error %v is not an *update.Error", err)
+	}
+	if got, _ := uerr.Data["path"].(string); got != locked {
+		t.Errorf("data.path = %v, want the locked backup %s", uerr.Data["path"], locked)
+	}
+	lockedBy, ok := uerr.Data["locked_by"].([]map[string]any)
+	if !ok || len(lockedBy) == 0 {
+		t.Fatalf("data.locked_by = %#v, want the process holding %s", uerr.Data["locked_by"], locked)
+	}
+	if pid, _ := lockedBy[0]["pid"].(int); pid != helper.Pid {
+		t.Errorf("locked_by[0].pid = %v, want %d", lockedBy[0]["pid"], helper.Pid)
+	}
+	if exe, _ := lockedBy[0]["exe"].(string); !strings.EqualFold(exe, locked) {
+		t.Errorf("locked_by[0].exe = %q, want %s", exe, locked)
+	}
+	// 命令行是可选字段，但同一用户的进程应当读得到（PEB 读取的实测断言）。
+	if cmdline, _ := lockedBy[0]["cmdline"].(string); !strings.Contains(cmdline, "TestHelperHoldImage") {
+		t.Errorf("locked_by[0].cmdline = %q, want the helper's -test.run argument", cmdline)
+	}
+	steps, _ := uerr.Data["next_steps"].([]string)
+	joined := strings.Join(steps, " | ")
+	if !strings.Contains(joined, "godot-ai-cli stop") || !strings.Contains(joined, "Rename-Item") {
+		t.Errorf("data.next_steps lack the stop/rename guidance: %v", steps)
+	}
+	// 真失败时安装目录一个字节都不动。
+	assertFileContent(t, target, "old-binary")
+}
+
+// TestReplaceFailedNextStepsPerPlatform：F-7——next_steps 必须按平台给可执行的
+// 命令：Windows 保持 Rename-Item 措辞，其它平台给 kill/mv，绝不在 Unix 上报
+// 一套在那里跑不了的 Windows 命令。用平台参数化入口覆盖两个分支，不依赖宿主。
+func TestReplaceFailedNextStepsPerPlatform(t *testing.T) {
+	winPath := `C:\apps\godot-ai-cli\godot-ai-cli.exe`
+	win := strings.Join(replaceFailedNextStepsFor("windows", winPath), " | ")
+	if !strings.Contains(win, "Rename-Item "+winPath+" "+winPath+".bak") {
+		t.Errorf("windows steps lack the Rename-Item fallback: %v", win)
+	}
+	if strings.Contains(win, "mv ") || strings.Contains(win, "kill ") {
+		t.Errorf("windows steps carry Unix wording: %v", win)
+	}
+
+	for _, goos := range []string{"linux", "darwin"} {
+		const unixPath = "/usr/local/bin/godot-ai-cli"
+		steps := replaceFailedNextStepsFor(goos, unixPath)
+		joined := strings.Join(steps, " | ")
+		if strings.Contains(joined, "Rename-Item") {
+			t.Errorf("%s steps still carry the Windows rename wording: %v", goos, steps)
+		}
+		if !strings.Contains(joined, "godot-ai-cli stop") || !strings.Contains(joined, "kill <pid>") {
+			t.Errorf("%s steps lack the stop/kill guidance: %v", goos, steps)
+		}
+		if !strings.Contains(joined, "mv "+unixPath+" "+unixPath+".bak") {
+			t.Errorf("%s steps lack the mv fallback: %v", goos, steps)
+		}
+	}
+
+	// 生产入口仍然跟随宿主平台。
+	if got, want := strings.Join(replaceFailedNextSteps("/tmp/x"), " | "),
+		strings.Join(replaceFailedNextStepsFor(runtime.GOOS, "/tmp/x"), " | "); got != want {
+		t.Errorf("host steps = %q, want the %s variant %q", got, runtime.GOOS, want)
+	}
 }
 
 // TestCleanupStaleBackup removes <exe>.old and keeps the binary.
@@ -354,6 +536,18 @@ func TestCleanupStaleBackup(t *testing.T) {
 
 	// No leftover: silently a no-op.
 	cleanupStaleBackup(exe)
+
+	// 需求 R-7 (a) 的改名产物（<exe>.old.<epoch>）由同一次启动清理一并收掉，
+	// 否则每次「被锁的升级」都会在安装目录里永久留一份。
+	renamed := exe + ".old.1758883920"
+	if err := os.WriteFile(renamed, []byte("renamed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cleanupStaleBackup(exe)
+	if _, err := os.Stat(renamed); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("renamed leftover %s still present: %v", renamed, err)
+	}
+	assertFileContent(t, exe, "bin")
 }
 
 // TestRunUpToDate: same version → the already-up-to-date payload.

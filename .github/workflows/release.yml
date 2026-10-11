@@ -127,6 +127,21 @@ jobs:
           cd dist
           sha256sum godot-ai-cli-*.zip > "godot-ai-cli-${VERSION}-checksums.txt"
 
+      # R-8a：SKILL.md 里的两处 ops 计数不再手工维护。唯一真源是**本次发布所带
+      # 二进制**的 coverage 行（`godot-ai-cli -v` -> `plugin command coverage: N ops`，
+      # 即 len(ops.All())）；references/commands.md 的标题带同一个数字，因为两者都
+      # 渲染自同一张 op 表。先断言（SKILL.md 漂移就让流水线失败），再用这个二进制
+      # 渲染，随包 zip 就永远不会与它旁边的二进制打架。本地跑法共用同一脚本：
+      # bash script/skill-ops-count.sh --check --bin ./godot-ai-cli.exe --dir ../godot-ai-skill
+      - name: Sync the skill ops count from the release binary (R-8a)
+        run: |
+          set -euo pipefail
+          mkdir -p skillbin
+          unzip -q -o "dist/godot-ai-cli-${VERSION}-linux-amd64.zip" -d skillbin
+          chmod +x skillbin/godot-ai-cli
+          bash script/skill-ops-count.sh --check  --bin skillbin/godot-ai-cli --dir skill
+          bash script/skill-ops-count.sh --render --bin skillbin/godot-ai-cli --dir skill
+
       # The agent skill ships alongside the binaries: SKILL.md, scripts/,
       # references/ — everything under skill/ except OS junk.
       - name: Package the agent skill
@@ -135,6 +150,17 @@ jobs:
           test -f skill/SKILL.md
           cd skill
           zip -r "../dist/godot-ai-skill.zip" . -x "*.DS_Store" -x "*Thumbs.db" -x "*desktop.ini"
+
+      # R-8b：解包即将发布的产物，断言它必须自洽的三处计数——SKILL.md 前言
+      # （`~N editor ops`）、SKILL.md 的 Need/Read 表格行（`the N ops`）与
+      # references/commands.md 的标题行——都要等于**同一个**二进制的 coverage。
+      # 任何一处不一致都在发布会前让流水线失败。
+      - name: Assert the packaged skill counts the shipped ops (R-8b)
+        run: |
+          set -euo pipefail
+          rm -rf skill-unpacked
+          unzip -q "dist/godot-ai-skill.zip" -d skill-unpacked
+          bash script/skill-ops-count.sh --check --bin skillbin/godot-ai-cli --dir skill-unpacked
 
       - name: Upload dry-run artifacts
         if: needs.validate.outputs.is_tag == 'false'

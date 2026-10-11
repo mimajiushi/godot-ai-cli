@@ -54,7 +54,7 @@ const MAIN_LOOP_STALL_MSEC := 1000
 ## an honestly stale-flagged image immediately instead of a 6s wait.
 const RENDER_STALL_MSEC := 1500
 
-## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：截图回包里的坐标系
+## godot-ai-cli fork patch（需求 screenshot-canvas-vs-image-coords 3.1）：截图回包里的坐标系
 ## 提示语。--region/--assert 吃的是图像像素（截图像素），游戏里算出来的画布
 ## 坐标要乘 canvas_scale 才是截图上的像素——两个独立 agent 都在这上面取过错点。
 const SCREENSHOT_COORD_NOTE_GAME := "region/assert use image pixels; multiply canvas coordinates by canvas_scale (canvas_size * canvas_scale = captured image pixels)."
@@ -161,8 +161,13 @@ func _process(_delta: float) -> void:
 	## through the debugger packet path in a single tick. Surplus stays in
 	## `_pending_outbound` and bleeds out across subsequent frames.
 	if not _logger_attached or _logger == null:
+		_pending_outbound.clear()
 		return
 	if not EngineDebugger.is_active():
+		## No remote can consume these lines. Drop current and already-drained
+		## batches so a detached/headless run cannot retain logs indefinitely (#1123).
+		_logger.clear()
+		_pending_outbound.clear()
 		return
 	if _pending_outbound.is_empty():
 		if not _logger.has_pending():
@@ -358,7 +363,7 @@ func _capture_and_reply(
 	var frames_drawn := Engine.get_frames_drawn()
 	var stale := frames_drawn <= frames_at_request
 
-	## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：在游戏进程内按
+	## godot-ai-cli fork patch（需求 screenshot-canvas-vs-image-coords 3.1）：在游戏进程内按
 	## viewport 的画布尺寸与窗口实际像素尺寸算 stretch 比例，随截图一起回给
 	## 编辑器（第 9 个字段），CLI 的 --coords canvas 就靠它换算。
 	var coord_meta := canvas_space_meta(viewport)
@@ -386,6 +391,7 @@ func _capture_and_reply(
 			encoded.original_height,
 			frames_drawn,
 			stale,
+			# godot-ai-cli fork patch（截图坐标系）：第 9 个字段是 fork 私有扩展，把 canvas 尺寸/缩放与图片像素尺寸一并回传编辑器；老编辑器按「多余字段忽略」处理。
 			{
 				"canvas_size": coord_meta.canvas_size,
 				"image_size": coord_meta.image_size,
@@ -624,7 +630,7 @@ func _control_disabled(control: Control) -> bool:
 	return false
 
 
-## Control 是否"在场景里可见"。
+## godot-ai-cli fork patch: Control 是否"在场景里可见"。
 ##
 ## 祖先遍历必须**止于当前场景根**（回归 vF-3）：编辑器上下文里被编辑场景挂在编辑器
 ## 窗口之下，父链上会出现隐藏的编辑器 UI（实测父链末端是 visible=false 的
@@ -857,7 +863,7 @@ func _game_get_mouse() -> Dictionary:
 	}
 
 
-## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：纯函数——由画布逻辑
+## godot-ai-cli fork patch（需求 screenshot-canvas-vs-image-coords 3.1）：纯函数——由画布逻辑
 ## 尺寸与图像(窗口)像素尺寸算 stretch 比例；画布尺寸退化（<=0）时返回 (1,1)，
 ## 绝不凭空造比例。一手实测：canvas 1152x648 / window 1920x1080 → 1.666667。
 static func canvas_scale_of(canvas_size: Vector2, image_size: Vector2) -> Vector2:
@@ -866,7 +872,7 @@ static func canvas_scale_of(canvas_size: Vector2, image_size: Vector2) -> Vector
 	return Vector2(image_size.x / canvas_size.x, image_size.y / canvas_size.y)
 
 
-## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.1）：截图坐标系元数据。
+## godot-ai-cli fork patch（需求 screenshot-canvas-vs-image-coords 3.1）：截图坐标系元数据。
 ## canvas_size = 画布逻辑尺寸（viewport.get_visible_rect().size）；image_size =
 ## 窗口实际像素尺寸（screen_transform 的缩放作用于画布尺寸）；canvas_scale =
 ## image_size / canvas_size（图像像素 = 画布坐标 × canvas_scale）。字段都是普通
@@ -885,14 +891,14 @@ static func canvas_space_meta(viewport: Viewport) -> Dictionary:
 	}
 
 
-## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.3）：纯函数——画布矩形按
+## godot-ai-cli fork patch（需求 screenshot-canvas-vs-image-coords 3.3）：纯函数——画布矩形按
 ## scale 换算成图像像素矩形（与 CLI --coords canvas 的换算同一条规则，CLI 侧再
 ## 向下取整）。
 static func canvas_rect_to_image_rect(canvas_rect: Rect2, scale: Vector2) -> Rect2:
 	return Rect2(canvas_rect.position * scale, canvas_rect.size * scale)
 
 
-## fork 补丁（需求 screenshot-canvas-vs-image-coords 3.3）：game node-screen-rect
+## godot-ai-cli fork patch（需求 screenshot-canvas-vs-image-coords 3.3）：game node-screen-rect
 ## ——把节点的画布包围盒同时给成"画布坐标"与"截图像素"两套，调用方不必自己乘
 ## canvas_scale（也不必先算角色在哪、再去截图上取色时对不上坐标）。
 func _game_node_screen_rect(params: Dictionary) -> Dictionary:
@@ -1003,6 +1009,7 @@ func _game_input_state(params: Dictionary) -> Dictionary:
 	return {"actions": states}
 
 
+## godot-ai-cli fork patch: ui_activate —— 上游无此 op，fork 新增（R-4②）。
 ## --- ui_activate：在运行中的游戏里激活一个 Button（R-4②）---
 ##
 ## `input_action` 走 Input.action_press，只改动作状态、不产生 InputEvent，Control/
@@ -1480,7 +1487,7 @@ func _handle_eval(data: Array) -> void:
 	_eval_token_counter += 1
 	var token := str(_eval_token_counter)
 	var run_fn := "_mcp_run_%s" % token
-	var script_source := _build_eval_script_source(code, run_fn)
+	var script_source := _build_eval_script_source(run_fn, code)
 
 	## Snapshot the logger's script-error seq BEFORE running so we only attribute
 	## errors raised by this eval. In a debug build a parse error aborts reload()
@@ -1728,7 +1735,27 @@ func _handle_eval_check(data: Array) -> void:
 	_try_report_eval_runtime_error(request_id)
 
 
-func _indent_eval_code(code: String) -> String:
+## `execute()` always returns, so it carries a return type. The inner function
+## holds caller code that need not return on every path; a declared return type
+## there makes Godot reject it with "Not all code paths return a value". It
+## stays untyped and suppresses `untyped_declaration` on its own declaration
+## instead (#1119). The annotation shares the `func` line so the line numbers
+## reported for caller code do not move.
+## godot-ai-cli fork patch: 包装脚本的两处 fork 增强——用户代码先过
+## _rewrite_dollar_refs（$NodeName → __sn("NodeName")），再在末尾追加
+## _SN_HELPER_SOURCE（__sn 辅助方法定义）；两者都不改变用户代码行号。
+static func _build_eval_script_source(run_fn: String, code: String) -> String:
+	return (
+		"extends Node\n"
+		+ "func execute() -> Variant:\n"
+		+ "\treturn await %s()\n\n" % run_fn
+		+ "@warning_ignore(\"untyped_declaration\") func %s():\n" % run_fn
+		+ _indent_eval_code(_rewrite_dollar_refs(code))
+		+ "\n" + _SN_HELPER_SOURCE
+	)
+
+
+static func _indent_eval_code(code: String) -> String:
 	var lines: PackedStringArray = code.split("\n")
 	var out := ""
 	for line in lines:
@@ -1753,20 +1780,6 @@ const _SN_HELPER_SOURCE := (
 	+ "\t\treturn scene.get_node(path)\n"
 	+ "\treturn get_node_or_null(path)\n"
 )
-
-
-## godot-ai-cli fork patch: 组装 eval 包装脚本。用户代码先过
-## _rewrite_dollar_refs（$NodeName → __sn("NodeName")），再缩进注入
-## _mcp_run_<token>；__sn 追加在末尾。
-func _build_eval_script_source(code: String, run_fn: String) -> String:
-	return (
-		"extends Node\n"
-		+ "func execute():\n"
-		+ "\treturn await %s()\n\n" % run_fn
-		+ "func %s():\n" % run_fn
-		+ _indent_eval_code(_rewrite_dollar_refs(code))
-		+ "\n" + _SN_HELPER_SOURCE
-	)
 
 
 ## godot-ai-cli fork patch: 把 eval 用户代码里的 $NodeName 引用改写为

@@ -114,7 +114,10 @@ func themeOps() []OpSpec {
 				ps("path", "path", true, "", "Scene path of the Control node"),
 				ps("slot", "slot", true, "", "Theme stylebox slot, e.g. panel/normal/pressed"),
 				pj("patch", "patch", true, `StyleBoxFlat property patch, e.g. {"bg_color":..,"corner_radius_top_left":..} (unknown keys rejected)`),
+				pb("fresh", "fresh", false, "false", "Start from a blank StyleBoxFlat instead of the slot's current stylebox"),
 			},
+			ResponseNote: `{"path","slot","stylebox_class","overrode_existing","fresh","undoable"}`,
+			DocNote:      "Without `--fresh` the node's resolved stylebox for the slot is the BASE and the patch is applied on top of it: the base comes from the default theme (or the node's own inherited theme), so visual parameters the patch does not mention — notably `corner_radius_*` and `content_margin_*` on a ProgressBar — are inherited silently. Pass `--fresh` to start from an empty `StyleBoxFlat` instead, which is what pixel-art UI needs (a 48x7 bar must not inherit a 6 px corner radius); `--fresh` does not consult the theme at all. An unknown/typo'd slot is NOT an error on either path: with `--fresh` the override is built from blank, and without it `Control.get_theme_stylebox()` never returns null either — it falls back to ThemeDB's engine fallback stylebox, so the override ends up a copy of that fallback (check `has_theme_stylebox()` yourself if you need to know whether a slot is really themed). Existing behavior without the flag is unchanged. `overrode_existing` reports whether the node already had an override for the slot (it is about the node, not about the theme base).",
 		},
 	}
 }

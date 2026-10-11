@@ -684,6 +684,12 @@ static func _is_instance_of_class(resource: Resource, expected_class: String) ->
 ## patch leaves the node's override untouched. The action is committed to the
 ## Control's scene history, so the editor's scene undo reverts it (a method
 ## bound to this handler object would land in GLOBAL_HISTORY instead).
+##
+## godot-ai-cli fork patch（需求 R-2）：`fresh: true` 时不再 duplicate 默认/继承
+## 主题里那一份，而是从空白 StyleBoxFlat（全参数归零）起手。原语义的继承是静默
+## 的——patch 没提到的 corner_radius_*/content_margin_* 全部来自默认主题，像素风
+## UI（48x7 血条）就是这样被 6px 圆角吃掉的；--fresh 让"我要的这一份"完全由
+## patch 决定，且不再依赖 slot 能解析出样式盒。
 func stylebox_override(params: Dictionary) -> Dictionary:
 	var node_path: String = params.get("path", "")
 	if node_path.is_empty():
@@ -694,6 +700,7 @@ func stylebox_override(params: Dictionary) -> Dictionary:
 	var patch: Variant = params.get("patch", {})
 	if typeof(patch) != TYPE_DICTIONARY:
 		return ErrorCodes.make(ErrorCodes.WRONG_TYPE, "'patch' must be a dict of StyleBoxFlat properties")
+	var fresh: bool = params.get("fresh", false)
 	var unknown_keys := _unknown_flat_keys(patch)
 	if not unknown_keys.is_empty():
 		return ErrorCodes.make(ErrorCodes.INVALID_PARAMS,
@@ -708,26 +715,46 @@ func stylebox_override(params: Dictionary) -> Dictionary:
 			"Node %s is not a Control (got %s)" % [node_path, node.get_class()])
 	var control := node as Control
 
-	var base: StyleBox = control.get_theme_stylebox(slot)
-	if base == null:
-		return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND,
-			"No stylebox resolves for slot '%s' on %s" % [slot, node.get_class()])
-	var patched: StyleBox = base.duplicate()
-	if not patched is StyleBoxFlat:
-		return ErrorCodes.make(ErrorCodes.WRONG_TYPE,
-			"Slot '%s' resolves to %s; stylebox_override patches StyleBoxFlat slots only"
-			% [slot, patched.get_class()])
-	var applied := _apply_flat_props(patched as StyleBoxFlat, patch)
+	var patched: StyleBoxFlat = null
+	if fresh:
+		# 需求 R-2：空白起手——完全不查主题（也因此不对"slot 是否解析得出样式盒"设门槛）。
+		patched = StyleBoxFlat.new()
+	else:
+		var base: StyleBox = control.get_theme_stylebox(slot)
+		## 注（4.7 实机探针）：解析不到该 slot 时 get_theme_stylebox **不返回 null**，而是
+		## 回落到 ThemeDB 默认主题的 fallback stylebox（一个空 StyleBoxFlat，与
+		## ThemeDB.get_default_theme().get_stylebox(名字, 类) 同一实例）。所以下面这条
+		## null 分支在当前引擎上是防御性代码：slot 拼错时得到的是那份空样式盒的副本，
+		## 而不是错误——要按"这个 slot 到底有没有被主题定义"判错，得用 has_theme_stylebox()。
+		if base == null:
+			return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND,
+				"No stylebox resolves for slot '%s' on %s" % [slot, node.get_class()])
+		var duplicated: StyleBox = base.duplicate()
+		if not duplicated is StyleBoxFlat:
+			return ErrorCodes.make(ErrorCodes.WRONG_TYPE,
+				"Slot '%s' resolves to %s; stylebox_override patches StyleBoxFlat slots only"
+				% [slot, duplicated.get_class()])
+		patched = duplicated as StyleBoxFlat
+	var applied := _apply_flat_props(patched, patch)
 	if applied.has("error"):
 		return applied
 
 	var had_override: bool = control.has_theme_stylebox_override(slot)
+	## 撤销要还原"被替换掉的那一份"：读**节点自己的**覆盖只有 `theme_override_styles/<slot>`
+	## 这一个可移植通道——Control 的 C++ get_theme_stylebox_override() 从来没有绑到
+	## GDScript（Godot 4.7 实机 has_method 为 false，调用报 Nonexistent function；
+	## control.cpp 只绑了 add/has/remove_theme_stylebox_override 与 get/has_theme_stylebox），
+	## 而该属性通道由 Control::_get 直接读 data.theme_style_override：未设置（或已移除）
+	## 返回 null，设置后返回同一个实例。非 fresh 分支手里的 base 也是同一份值
+	## （get_theme_stylebox 命中 theme_style_override 缓存），但 fresh 分支没有 base，
+	## 统一走属性通道省掉一条分支。
+	var previous_override: StyleBox = control.get("theme_override_styles/" + slot) if had_override else null
 	var scene_root: Node = resolved.scene_root
 	_undo_redo.create_action("MCP: Stylebox override %s on %s" % [slot, node.name],
 		UndoRedo.MERGE_DISABLE, scene_root)
 	_undo_redo.add_do_method(self, "_apply_node_stylebox", control, slot, patched)
 	if had_override:
-		_undo_redo.add_undo_method(self, "_apply_node_stylebox", control, slot, base)
+		_undo_redo.add_undo_method(self, "_apply_node_stylebox", control, slot, previous_override)
 	else:
 		_undo_redo.add_undo_method(self, "_remove_node_stylebox", control, slot)
 	_undo_redo.commit_action()
@@ -738,6 +765,7 @@ func stylebox_override(params: Dictionary) -> Dictionary:
 			"slot": slot,
 			"stylebox_class": patched.get_class(),
 			"overrode_existing": had_override,
+			"fresh": fresh,
 			"undoable": true,
 		}
 	}

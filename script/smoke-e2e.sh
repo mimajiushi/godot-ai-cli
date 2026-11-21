@@ -20,12 +20,12 @@ HTTP="${HTTP_PORT:-18104}"
 WS="${WS_PORT:-19604}"
 PROJECT="${DEMO_PROJECT:-../demo}"
 SETTINGS="${EDITOR_SETTINGS:-$APPDATA/Godot/editor_settings-4.7.tres}"
-# 全量基线钉值 = ../demo/tests 车道实测值（v4.3.0 套件吸收 + 补收 test_screenshot_encode
-# + 刷新漏刷套件 test_animation 的 +13），与 demo/tests/README.md 的 baseline 表同源：
-# 88 套件 / 2877 条。旧值 56/1902 是 v4.1.0 全量镜像之前的陈旧钉值（同一个 ../demo 工程），
-# 套件吸收/刷新后必须按实测上调，否则本阶段误报截断。
-EXPECTED_SUITES=88
-EXPECTED_TOTAL=2877
+# 全量基线钉值 = ../demo/tests 的 t23 隔离车道 pristine 实测（upstream v4.4.2 /
+# fork plugin 4.4.3），静态重数与 full.json 一致：102 套件 / 3186 条，
+# failed=0、skipped=71、assertions=20263；与 demo/tests/README.md 的 baseline 表同源。
+# 旧 88/2877 与 t11 的 102/3183 均为历史值，套件吸收后必须按最新实测更新。
+EXPECTED_SUITES=102
+EXPECTED_TOTAL=3186
 
 PASS=0; FAIL=0
 

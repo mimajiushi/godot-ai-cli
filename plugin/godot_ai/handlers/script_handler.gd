@@ -261,7 +261,7 @@ func read_script(params: Dictionary) -> Dictionary:
 ## calls bind lexically — see test_script.gd. filesystem_handler shares
 ## this by instantiating a bare ScriptHandler (#714).
 func _attach_gdscript_diagnostics(data: Dictionary, path: String, content: String) -> void:
-	var validation := _validate_gdscript_source(content)
+	var validation := _validate_gdscript_source(content, path)
 	var diagnostics: Array = []
 	var diagnostics_detail := "none"
 	var diagnostics_status := "checked"
@@ -375,7 +375,7 @@ static func _refresh_loaded_gdscript(data: Dictionary, path: String, content: St
 static func _gdscript_parse_failure_confirmed(path: String, content: String, data: Dictionary) -> bool:
 	if String(data.get("diagnostics_detail", "")) == "log_capture":
 		return true
-	if _validate_gdscript_source(content).get("ok", true):
+	if _validate_gdscript_source(content, path).get("ok", true):
 		return false
 	return not _capture_gdscript_load_diagnostics_once(path).get("diagnostics", []).is_empty()
 
@@ -392,15 +392,21 @@ static func _downgrade_gdscript_diagnostics(data: Dictionary) -> void:
 	data["diagnostics_detail"] = "reload_jitter"
 
 
-static func _validate_gdscript_source(content: String) -> Dictionary:
+static func _validate_gdscript_source(content: String, path: String) -> Dictionary:
+	var already_loaded := ResourceLoader.has_cached(path)
 	var script := GDScript.new()
+	## Give analysis its real path without taking over a live ResourceCache entry.
+	script.set_path_cache(path)
 	script.source_code = content
-	## Keep validation off the live cached resource: assigning resource_path to
-	## this ephemeral Script can collide with loaded instances. reload() still
-	## performs normal GDScript analysis, including static initializer work, so
-	## this check is intentionally scoped to `.gd` writes where the editor would
-	## compile the file on scan anyway.
 	var err := script.reload()
+	if already_loaded:
+		## Leave the live script's cache entry and identity untouched.
+		script.set_path_cache("")
+	else:
+		## Unlike set_path_cache(), set_path also detaches the validation entry
+		## from GDScriptCache's disk-path key. Otherwise a second cold write
+		## validates new bytes while the first normal load still finds old code.
+		script.resource_path = ""
 	return {
 		"ok": err == OK,
 		"error_code": err,
@@ -559,7 +565,7 @@ func attach_script(params: Dictionary) -> Dictionary:
 			+ "(CSharpScript is unavailable). Run a .NET-enabled Godot build, or attach a .gd script.",
 		)
 
-	var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path")
+	var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path", "", true)
 	if _resolved.has("error"):
 		return _resolved
 	var node: Node = _resolved.node
@@ -614,7 +620,7 @@ func detach_script(params: Dictionary) -> Dictionary:
 	if node_path.is_empty():
 		return ErrorCodes.make(ErrorCodes.MISSING_REQUIRED_PARAM, "Missing required param: path")
 
-	var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path")
+	var _resolved := McpNodeValidator.resolve_or_error(node_path, "node_path", "", true)
 	if _resolved.has("error"):
 		return _resolved
 	var node: Node = _resolved.node

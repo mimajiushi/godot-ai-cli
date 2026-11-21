@@ -88,7 +88,7 @@ static func is_port_in_use_via_scrape(port: int, trace: Callable = Callable()) -
 			return true
 	var output: Array = []
 	if OS.get_name() == "Windows":
-		return windows_port_occupancy(port, windows_listener_snapshot(trace)) != PortOccupancy.FREE
+		return windows_port_occupancy(port, windows_listener_snapshot_for_port(port, trace)) != PortOccupancy.FREE
 	_trace(trace, "lsof")
 	var exit_code := OS.execute("lsof", ["-ti:%d" % port, "-sTCP:LISTEN"], output, true)
 	if exit_code == 0 and output.size() > 0 and not output[0].strip_edges().is_empty():
@@ -106,22 +106,40 @@ static func is_port_in_use_via_scrape(port: int, trace: Callable = Callable()) -
 ## One snapshot per selection operation avoids a subprocess for every candidate.
 ## Unknown observations never prove a port free. This is not ownership evidence.
 static func windows_listener_snapshot(trace: Callable = Callable()) -> Dictionary:
+	return windows_listener_snapshot_for_port(0, trace)
+
+
+## occupancy 与 find-pids 共用的目标端口查询；传入 snapshot 时复用既有 netstat 证据。
+static func windows_listener_snapshot_for_port(port: int, trace: Callable = Callable(), snapshot: Dictionary = {}) -> Dictionary:
+	var fresh := snapshot.is_empty()
 	var output: Array = []
-	_trace(trace, "netstat")
-	var code := OS.execute("netstat", ["-ano"], output, true)
-	var snapshot := windows_snapshot_from_netstat(code, output)
-	if snapshot.known:
+	if fresh:
+		_trace(trace, "netstat")
+		var code := OS.execute("netstat", ["-ano"], output, true)
+		snapshot = windows_snapshot_from_netstat(code, output)
+	if not snapshot.known:
+		## 调用方提供的失败证据保持 UNKNOWN，不重复全局查询；新 netstat 失败仍走原 fallback。
+		return _windows_listener_snapshot_via_powershell(trace) if fresh else snapshot
+	# godot-ai-cli fork patch: netstat known 但目标缺席时，bind 失败不能按 FREE/空 PID 返回；
+	# 仅此时走 PowerShell。目标已出现（含 wildcard）或确实可 bind 时保持快速路径，避免重复绑定。
+	if port <= 0 or snapshot.listeners.has(port) or can_bind_local_port(port):
 		return snapshot
+	return _windows_listener_snapshot_via_powershell(trace)
+
+
+## 原 PowerShell 查询独立成 helper，供新 netstat 与 bind-gated 两条路径复用。
+static func _windows_listener_snapshot_via_powershell(trace: Callable) -> Dictionary:
 	_trace(trace, "powershell")
-	output.clear()
+	var output: Array = []
 	var script := "$ErrorActionPreference='Stop'; try { $listeners = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Listen' } | Select-Object LocalPort,OwningProcess); ConvertTo-Json -Compress -Depth 3 -InputObject @{ listeners = $listeners }; exit 0 } catch { exit 1 }"
-	code = execute_windows_powershell(script, output)
+	var code := execute_windows_powershell(script, output)
 	return windows_snapshot_from_powershell(code, output)
 
 
-static func windows_port_occupancy(port: int, snapshot: Dictionary = {}) -> PortOccupancy:
-	if snapshot.is_empty():
-		snapshot = windows_listener_snapshot()
+static func windows_port_occupancy(port: int, snapshot: Dictionary = {}, bind_gate := false) -> PortOccupancy:
+	## 端口选择传入共享 snapshot 时保持纯判定；lifecycle 才显式请求 bind-gated 复核。
+	if snapshot.is_empty() or bind_gate:
+		snapshot = windows_listener_snapshot_for_port(port, Callable(), snapshot)
 	if not snapshot.known:
 		return PortOccupancy.UNKNOWN
 	return PortOccupancy.OCCUPIED if snapshot.listeners.has(port) else PortOccupancy.FREE
@@ -203,8 +221,7 @@ static func find_pid_on_port(port: int, trace: Callable = Callable()) -> int:
 ## scraper actually ran without the hook.
 static func find_all_pids_on_port(port: int, trace: Callable = Callable(), snapshot: Dictionary = {}) -> Array[int]:
 	if OS.get_name() == "Windows":
-		if snapshot.is_empty():
-			snapshot = windows_listener_snapshot(trace)
+		snapshot = windows_listener_snapshot_for_port(port, trace, snapshot)
 		var pids: Array[int] = []
 		if snapshot.known:
 			pids.assign(snapshot.listeners.get(port, []))
@@ -404,6 +421,11 @@ static func pid_alive(pid: int, snapshot: Variant = null) -> bool:
 ## Linux captures the same bounded ancestry using procfs; macOS keeps ps.
 ## The process enumeration stays inside PowerShell; only the bounded target
 ## ancestry crosses back into Godot, without logging command-line metadata.
+## Windows keeps a dead parent's PID in ParentProcessId, and that PID can be
+## reused by a later process, even one of our own descendants, which turns the
+## walk into a cycle. A "parent" created after its child is such a reused PID,
+## not an ancestor, so the chain ends there (parent_pid 0). This only ever
+## shortens the ancestry; it can never add a lineage or brand match.
 static func capture_process_snapshot(pid: int, diagnostics: Variant = null) -> Variant:
 	if OS.get_name() == "Linux":
 		return LinuxProc.process_snapshot(pid)
@@ -425,18 +447,23 @@ static func capture_process_snapshot(pid: int, diagnostics: Variant = null) -> V
 
 static func _windows_process_snapshot_script(pid: int) -> String:
 	return (
-		"$rows = @(); $current = %d; $seen = @{}; $capture_failed = $false; "
+		"$rows = @(); $current = %d; $seen = @{}; $capture_failed = $false; $child_created = $null; "
 		+ "$processes = @{}; try { Get-CimInstance Win32_Process -ErrorAction Stop | "
 		+ "ForEach-Object { $processes[[int]$_.ProcessId] = $_ } } catch {}; "
 		+ "for ($depth = 0; $depth -lt 16 -and $current -gt 1; $depth++) { "
 		+ "if ($seen.ContainsKey($current)) { break }; $seen[$current] = $true; "
 		+ "$p = $processes[$current]; "
 		+ "if ($null -eq $p) { "
-		+ "try { $identity = [string](Get-Process -Id $current -ErrorAction Stop).StartTime.ToFileTimeUtc(); "
+		+ "try { $started = (Get-Process -Id $current -ErrorAction Stop).StartTime; "
+		+ "if ($child_created -is [datetime] -and $started -gt $child_created) { break }; "
+		+ "$identity = [string]$started.ToFileTimeUtc(); "
 		+ "$rows += @{pid=$current;parent_pid=0;identity=$identity;commandline=''} } catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { $capture_failed = $true } }; break }; "
-		+ "$rows += @{pid=[int]$p.ProcessId;parent_pid=[int]$p.ParentProcessId; "
+		+ "$parent_pid = [int]$p.ParentProcessId; $parent = $processes[$parent_pid]; "
+		+ "if ($null -ne $parent -and $parent.CreationDate -is [datetime] -and $p.CreationDate -is [datetime] "
+		+ "-and $parent.CreationDate -gt $p.CreationDate) { $parent_pid = 0 }; "
+		+ "$rows += @{pid=[int]$p.ProcessId;parent_pid=$parent_pid; "
 		+ "identity=([string]$p.CreationDate + '|' + [string]$p.CommandLine);commandline=[string]$p.CommandLine}; "
-		+ "$current = [int]$p.ParentProcessId }; "
+		+ "$child_created = $p.CreationDate; $current = $parent_pid }; "
 		+ "if ($capture_failed) { 'null' } else { ConvertTo-Json -InputObject @($rows) -Compress -Depth 3 }"
 	) % pid
 

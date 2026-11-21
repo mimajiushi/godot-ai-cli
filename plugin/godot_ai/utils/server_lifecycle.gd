@@ -876,7 +876,7 @@ func _effect_probe(payload: Dictionary) -> Dictionary:
 		return incompatible
 	var occupied: bool
 	if OS.get_name() == "Windows":
-		var occupancy := PortResolver.windows_port_occupancy(port, listeners)
+		var occupancy := PortResolver.windows_port_occupancy(port, listeners, true)
 		if occupancy == PortResolver.PortOccupancy.UNKNOWN:
 			return _blocked_probe_result("port_occupancy_unknown", port, live)
 		occupied = occupancy == PortResolver.PortOccupancy.OCCUPIED
@@ -894,11 +894,14 @@ func _effect_probe(payload: Dictionary) -> Dictionary:
 	## WebSocket port (a server moved off the HTTP port, or another editor)
 	## would kill the launch at preflight; say so now and name the setting.
 	if expected_ws_port > 0:
-		var ws_occupied := (
-			PortResolver.windows_port_occupancy(expected_ws_port, listeners) == PortResolver.PortOccupancy.OCCUPIED
-			if OS.get_name() == "Windows" else PortResolver.is_port_in_use(expected_ws_port)
-		)
-		if ws_occupied:
+		if OS.get_name() == "Windows":
+			var ws_occupancy := PortResolver.windows_port_occupancy(expected_ws_port, listeners, true)
+			# godot-ai-cli fork patch: WS fallback 查询失败同样不得当成空闲端口。
+			if ws_occupancy == PortResolver.PortOccupancy.UNKNOWN:
+				return _blocked_probe_result("port_occupancy_unknown", expected_ws_port, {})
+			if ws_occupancy == PortResolver.PortOccupancy.OCCUPIED:
+				return ws_port_blocked_result(expected_ws_port)
+		elif PortResolver.is_port_in_use(expected_ws_port):
 			return ws_port_blocked_result(expected_ws_port)
 	return {
 		"outcome": "free",

@@ -1,7 +1,7 @@
-# Fork patches vs upstream v4.3.0
+# Fork patches vs upstream v4.4.2
 
 `plugin/godot_ai/` is a fork of [hi-godot/godot-ai](https://github.com/hi-godot/godot-ai)
-**v4.3.0** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
+**v4.4.2** (MIT, "Godot AI contributors" — see `UPSTREAM-LICENSE.txt`). This
 is the complete list of divergences. The behavioral patches are
 marked in the GDScript source with a `godot-ai-cli fork patch` comment —
 `grep -rn "godot-ai-cli fork patch" plugin/godot_ai` audits them — and gated
@@ -15,8 +15,9 @@ rewording, so neither shows up in that grep.
 > rebase**: which patches were re-applied onto the new upstream architecture,
 > which upstream deletions made v3-era patches obsolete, and the upgrade
 > consequence for projects still on a 3.2.x plugin. **§21/§22 are the two
-> beta.1-era requirement batches and §23 is the v4.3.0 upstream sync** (the
-> current base, and the entry that supersedes every earlier version number).
+> beta.1-era requirement batches, §23 is the v4.3.0 upstream sync, §24 is the
+> v4.4.1 upstream sync, and §25 is the v4.4.2 upstream sync plus repair batch**
+> (the current base, and the entry that supersedes every earlier version number).
 
 ## 1. `telemetry.gd` — rewritten as no-ops
 
@@ -310,7 +311,7 @@ Upstream-side follow-ups landed outside the vendored tree:
 ## Syncing with upstream
 
 1. Diff `plugin/godot_ai/` against the upstream tag (current base:
-   **v4.3.0** — see §23 for the sync that moved it there); every hunk that is
+   **v4.4.2** — see §25 for the sync that moved it there); every hunk that is
    not behind a `godot-ai-cli fork patch` marker is upstream drift to review.
 2. Re-apply upstream changes **around** the marked patches; never remove a
    `ForkConfig` gate — extend `fork_config.gd` instead.
@@ -1336,3 +1337,265 @@ stale *current-version* pointer:
   suites; the counts beside it are live values owned by the suite refresh.
 - `godot-ai-skill/` — zero occurrences of `4.3.0`, `4.3.1` or `4.3.2`, so no edit
   was needed there.
+
+## 24. Upstream v4.4.1 sync (unreleased worktree)
+
+`plugin.cfg` 4.3.2 → **4.4.2**. This entry supersedes §23's current-version
+pointers without rewriting its history. The merge axes are `base` = upstream
+**v4.3.0** (`b82b5c519b1b17228f70d8effce1626f391bd1dd`), `ours` = fork HEAD
+`45406aa7ed5deed98754351e203c856d0d0babbe`, and `theirs` = upstream
+**v4.4.1** (`643c64f3edf984a9668b3043f4d20ebb2bbec6b6`). The final upstream
+compare contains 91 commits and 218 files; the plugin subset is 61 paths:
+**A=17, B=31, new=12, C=1, deleted=0**. No commit, tag, push or release is part
+of this worktree.
+
+### 24.1 A/B/C — exact merge classification
+
+- **A (17) — fork and upstream both changed; three-way merged:**
+  `client_configurator.gd`; `debugger/mcp_debugger_plugin.gd`;
+  `handlers/{editor_handler,material_handler,node_handler,project_handler,resource_handler,scene_handler,script_handler,theme_handler,tileset_handler}.gd`;
+  `mcp_dock.gd`; `plugin.gd`; `runtime/game_helper.gd`;
+  `testing/test_runner.gd`; `utils/{client_job_owner,resource_io}.gd`.
+- **B (31) — ours still matched upstream v4.3.0 byte-for-byte, so the v4.4.1
+  file was mirrored:** `clients/{_base,_json_strategy,_registry,pi}.gd`;
+  `handlers/{_node_validator,animation_handler,animation_values,audio_handler,autoload_handler,camera_handler,control_draw_recipe_handler,csg_handler,curve_handler,environment_handler,filesystem_handler,filesystem_mutation,gridmap_handler,material_presets,navigation_handler,particle_handler,physics_shape_handler,physics_shape_refresh,signal_handler,texture_handler,tilemap_handler,ui_handler}.gd`;
+  `runtime/validation_logger.gd`;
+  `utils/{path_validator,screenshot_encode,update_activation_runner,uv_resolution_policy}.gd`.
+  B is a per-file classification, not permission to ignore dependencies:
+  `_registry.gd` needs the new Qoder descriptors, `filesystem_handler.gd` needs
+  the staged helpers in `resource_io.gd`, and `uv_resolution_policy.gd` needs
+  the new `plugin.cfg` cutoff.
+- **New (12) — six upstream `.gd` files plus their six `.uid` sidecars:**
+  `clients/{qoder,qoder_cn}.gd`, `handlers/{animation_tree_handler,audio_bus_handler}.gd`,
+  and `utils/{client_repair_ownership,resource_builders}.gd`. There were no
+  same-path fork files to displace.
+- **C (1) — `plugin.cfg`:** fork-owned version 4.4.2 plus upstream
+  `dependency_cutoff="2026-11-03T00:46:44Z"`.
+- The ten fork-only files (`handlers/spriteframes_handler.gd` and
+  `utils/{cli_daemon,fork_config,port_pins,version_compat}.gd`, with their
+  sidecars) stayed byte-identical. Upstream deleted or renamed nothing, so the
+  installer's known no-deletion limitation is not triggered by this delta.
+
+### 24.2 Nine conflicts across seven files
+
+Ten A files merged without a conflict. The other seven contained nine conflict
+hunks; each resolution preserves both sides rather than selecting a whole file:
+
+- `material_handler.gd`: kept the fork's inline `shader_path` behavior while
+  taking upstream's non-editable-instance write refusal.
+- `resource_handler.gd`: upstream now refreshes property metadata between
+  setters; that loop subsumes the fork's missing-key re-query without dropping
+  nested-constructor or overwrite protections.
+- `scene_handler.gd`: kept fork `force_reload`/disk-mtime behavior and added
+  upstream `SceneTabs` plus non-undoable, explicit-discard `close_scene`.
+- `script_handler.gd`: both registered-script validation calls pass the real
+  source path, while the fork's diagnostics and reload handling remain.
+- `tileset_handler.gd`: exactly one `_connection` field and one `_init`; the
+  fork physics-write guard and upstream atlas builder share that connection.
+- `plugin.gd`: both fork `reset_property` and upstream
+  `set_editable_children` are registered, with no duplicate lazy command.
+- `game_helper.gd`: upstream held-mouse `buttons` state is fused with the
+  fork's coordinate/eval/input patches; both mouse paths still report
+  `affects_mouse_position:false` where synthetic motion does not move the OS
+  cursor.
+
+The merged tree has zero conflict markers, zero duplicate command
+registrations, 206 wire commands, and 35 actual `register_lazy_handler` calls
+(36 text occurrences including the parser-test comment). The 11 fork-only ops remain
+registered once each. Four new ForkConfig markers keep upstream automatic
+client repair's UI, setting key, worker and `_process` driver disabled in the
+fork; the upstream descriptors and repair code remain present and compilable.
+
+### 24.3 Go CLI surface and behavior landed with the plugin
+
+All **31 new upstream plugin commands** have one typed CLI op each. The binary
+now reports **217 ops**, with `InternalOnly=3` and all 11 fork-only CLI ops
+retained. The new surface covers scene close, editable children, import
+settings, resource patching/SpriteFrames, AnimationTree/libraries, audio buses
+and TileSet atlas creation. `game input-mouse` adds `buttons`; cinematic
+screenshots add paired `width`/`height`, `save_to` and `overwrite`;
+`filesystem import-set` and `reimport` have 120-second wait budgets. A timeout
+does not cancel native Godot import work.
+
+The Go readiness gate mirrors the single upstream exception: only
+`run_project` may pass a successfully re-probed live `playing` state to reach
+its already-running no-op. Failed probes, `importing`, and every other playing
+write still fail closed; playing errors can carry fresh `game_status`. The
+authenticated transport remains protocol v2. No connection, capability,
+handshake or error-code-constant migration was introduced by this sync.
+
+### 24.4 Why 4.4.2, and the required editor migration
+
+The fork continues §23.5's rule of landing one patch above the absorbed
+upstream tag: **fork plugin 4.4.2 contains upstream v4.4.1 plus fork patches**.
+It must not be described as byte-identical upstream 4.4.1. The cutoff key is
+upstream metadata and stays verbatim even though the normal fork runtime is
+the Go daemon rather than uv/Python.
+
+Moving an existing project from 4.3.x to 4.4.2 crosses the major.minor
+handshake boundary. Install the bundled plugin, then fully restart the editor;
+patch-level `plugin_stale` tolerance does not make a running 4.3 plugin
+compatible with a 4.4 daemon. A running editor keeps its old in-memory scripts
+until that restart even after the on-disk files are replaced.
+
+Upstream's 4.3.0→4.3.1 self-update workaround for projects that treat untyped
+declarations as errors is not a fork migration step: the fork has no in-editor
+self-updater. The typed-loop runner fix itself is nevertheless included.
+
+### 24.5 Tests absorbed during the v4.4.1 stage
+
+The workspace-only `demo/tests` absorbed all 48 upstream additions and 35
+refresh/merge files. Static counting at that stage gave **102 suites / 3183
+tests**. The subsequent t11 isolated run measured the same discovery, with 14
+failures, 71 skips and 20143 assertions; those failures drove the repair batch,
+not a weakened test baseline.
+
+Fork-specific coverage remained intentional: dispatcher 35, no duplicated
+editor rename, handoff coverage from both histories, and five conditional
+client-repair skips (four worker plus one UI). The t23 run later verified the
+repaired v4.4.2 tree with **102 suites / 3186 tests and zero failures**; §25.4
+holds the final headless and windowed evidence.
+
+### 24.6 Known divergences and deliberately unsynced Python surface
+
+- **Linux/Flatpak remains registered, not fixed.** §23.6 and RS-068 still
+  apply: the plugin can use host `HOST_XDG_CONFIG_HOME` while the Go daemon
+  reads sandbox `XDG_CONFIG_HOME`. This sync does not claim to close that gap.
+- **The historical marker-coverage gap remains.** §23.7 and RS-069 are still
+  the ownership audit for files outside this merge; this round did not reword
+  untouched history merely to improve marker counts.
+- **Upstream Python/server/release machinery was not merged.** `pyproject.toml`,
+  `src/godot_ai/**`, upstream workflows, dependency-cutoff scripts, release
+  qualification and Python package pins do not become fork runtime
+  dependencies. The fork still ships the Go daemon and removes telemetry.
+  Upstream GDScript suites were ported to the workspace demo instead of
+  importing the Python test runner.
+- **Generator wording resolved and reviewed:** t16 updated the op-table source
+  and mechanically regenerated both catalogs; t18 reviewed the result. The
+  generated prose now says `--full-res` / `max_resolution=0` removes only the
+  requested longest-edge cap, while inline PNGs can still be downscaled to the
+  MCP/SSE byte budget. Use cinematic `save_to` for the full-size file.
+
+### 24.7 Version and release-boundary audit
+
+At the end of that stage, active pointers named upstream **v4.4.1** and fork plugin **4.4.2**. Historical
+sections keep their original 4.1/4.2/4.3 numbers. `RELEASE_NOTES.md` was not
+changed and no release is authorized by this sync. Installed skill copies are
+not replaced; only the source skill and its repository snapshot are updated.
+The remaining release gate is the isolated real-editor replay, followed by a
+measured baseline update and independent review—not a static file count alone.
+
+## 25. Upstream v4.4.2 sync and repair batch (unreleased worktree)
+
+`plugin.cfg` 4.4.2 → **4.4.3**. The upstream axes are **v4.4.1**
+(`643c64f3edf984a9668b3043f4d20ebb2bbec6b6`) → **v4.4.2**
+(`423954f4314e250fa2602525d461debc91b1a173`). The release compare has 16
+commits and 22 modified files, with no additions, deletions or renames. Only
+six files are in the plugin; there are **no new ops**, wire-protocol changes,
+error-code changes or Go dependency changes.
+
+### 25.1 A/B/C — the six plugin files
+
+- **A (3) — three-way merged around fork patches:**
+  `client_configurator.gd`, `mcp_dock.gd`, and `utils/port_resolver.gd`.
+  The dock's ForkConfig early exits still precede the new uv UI decisions;
+  client repair and the external-daemon path remain gated.
+- **B (2) — mirrored exactly from upstream v4.4.2:**
+  `clients/_json_strategy.gd` (commented OpenCode JSONC tiers are readable but
+  never rewritten when that would drop comments) and
+  `utils/uv_resolution_policy.gd` (explicit interpreter range, uv version
+  parser/minimum, and previous-launch policy migration).
+- **C (1) — `plugin.cfg`:** fork-owned **4.4.3**, upstream
+  `dependency_cutoff="2026-11-16T18:00:00Z"`, and new
+  `python_request=">=3.11,<3.15"`. The one-patch-above rule avoids claiming
+  that this tree is byte-identical to upstream 4.4.2.
+
+The normal fork runtime is still the Go daemon. The Python interpreter range,
+uv 0.9.25 minimum warning, FastMCP/Pydantic/websockets pins and release
+qualification changes do not become new Go runtime dependencies. Dormant
+upstream launch/client code remains compilable without enabling the fork's
+closed client UI or workers.
+
+### 25.2 #1249 ancestry fix plus the Windows listener repair
+
+Upstream #1249 changes `_windows_process_snapshot_script`: a CIM parent created
+later than its child is treated as a reused PID and the parent link is cut; the
+same rule applies when CIM lacks the row and Get-Process supplies StartTime.
+This only shortens ancestry and cannot add a brand match. A same-age cycle still
+fails as `lineage_cycle`.
+
+That fix does **not** address t24's listener evidence. The separate t29 repair
+keeps netstat as the first query, but when a known snapshot omits the target it
+uses `can_bind_local_port`: a successful bind proves the fast free path, while a
+failed bind invokes the shared Get-NetTCPConnection fallback. Visible listeners
+(including wildcard rows) return before binding; supplied UNKNOWN snapshots stay
+UNKNOWN and do not trigger another global query. Lifecycle probes alone request
+the bind-gated path, so port selection over a shared snapshot does not spawn a
+PowerShell query per candidate. The two independent fixes are both present in
+`port_resolver.gd`; neither was used to overwrite the other.
+
+### 25.3 Approved fixes retained in the final tree
+
+- **Node ownership:** `writable_error` now applies the Editable Children refusal
+  only when an owner has a non-empty `scene_file_path`, i.e. a real PackedScene
+  instance. Ordinary local owner chains remain writable; ancestor walking and
+  `structure_error` are unchanged. Existing node-reference cases and the real
+  instance suite are the two sides of the regression boundary.
+- **Readiness probe shape:** the internal `get_editor_state` probe sends an
+  explicit empty `map[string]any{}`, not nil/`params:null`. The only playing
+  exception remains `run_project` after a successful live playing probe. Strict
+  bridge and daemon mocks now reject nil params, closing the former false-green
+  seam; failed probes and other playing writes still fail closed.
+- **Handoff test synchronization:** the fork retry test invokes the production
+  `_reprobe_after_update` callback directly instead of awaiting real timers. It
+  still checks episode consumption, a fresh PROBE, amber/red presentation, and
+  that a stale episode after stop cannot resurrect the run. Production timer
+  wiring was not removed.
+- **Full-res wording:** §24.6 records the completed t16/t18 fix. `max_resolution=0`
+  removes only the requested longest-edge cap; inline PNGs remain subject to the
+  MCP/SSE byte budget, and cinematic `save_to` preserves the full-size file.
+
+### 25.4 Test absorption and evidence boundary
+
+The v4.4.2 test increment has no new suite, UID or fixture path. Four files were
+mirrored (the two attach fixtures, `test_client_attach_config.gd`, and
+`test_uv_resolution_policy.gd`); `test_plugin_lifecycle.gd` was three-way merged
+so the new `python:""` previous-policy expectation did not overwrite the fork's
+synchronous handoff test.
+
+Static counting and the t23 pristine headless run both measured **102 suites /
+3186 tests**: client-attach 56→57 and uv-policy 9→11. The full run passed 3115,
+failed **0**, skipped 71, reported 20263 assertions and 35587 ms, and had no
+load errors. The five conditional client-repair skips (four worker + one UI)
+are included in those 71 skips. RS-070…RS-080 now carry the measured replay
+results rather than unrun placeholders.
+
+The same t23 evidence separates headless repair checks from windowed proof:
+node 230/230 and instance 20/20, handoff three stable runs, the four Windows
+listener cases three times each, and v4.4.2 ancestry/uv/attach all passed;
+windowed readiness no-op, ordinary-write refusal, real PNG dimensions,
+projection and held-mouse behavior also passed. Evidence root:
+`.replay-lanes/lane-1/out/t23-final-v442/`. The old t11 14 failures are resolved
+in that scope, not merely hidden by skips.
+
+The smoke baseline was updated to 102/3186 after that run. The post-update t34
+smoke then passed with exit 0 and **PASS=11 / FAIL=0**. Its full run measured
+102/3186, 3116 passed and 70 skipped in 34858 ms, with no failures/load errors
+and byte-identical EditorSettings. The one-skip difference from t23 pristine
+(70 vs 71) is environment drift, not a new fixed skip baseline. Evidence:
+`.replay-lanes/lane-1/out/t34-smoke-baseline/`.
+
+### 25.5 Version/migration boundary and excluded main work
+
+Active pointers are upstream **v4.4.2** and fork plugin **4.4.3**; §24 remains
+the v4.4.1/4.4.2 history. This is still the 4.4 major.minor line, so patch drift
+is accepted and marked `plugin_stale`, but replacing files does not reload the
+running editor's scripts. Run `plugin install --project <dir>` and fully restart
+the editor to load the new plugin. No new Python/uv installation requirement is
+imposed on the ordinary Go-daemon path.
+
+Main's #1260 (re-adopting a running game from the activity beacon after a plugin
+reload) is not in the v4.4.2 release compare and is deliberately excluded from
+this batch. Release preparation now includes the beta.3 `RELEASE_NOTES.md` body
+and the measured demo/smoke baseline. No commit, tag, push, release or
+installed-skill replacement is part of this worktree.

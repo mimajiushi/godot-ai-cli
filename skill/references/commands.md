@@ -1,6 +1,6 @@
 # godot-ai-cli op catalog
 
-Generated from `godot-ai-cli commands --format md` (186 ops). Regenerate against a newer binary with:
+Generated from `godot-ai-cli commands --format md` (217 ops). Regenerate against a newer binary with:
 
 ```bash
 godot-ai-cli commands --format md
@@ -22,7 +22,7 @@ Conventions applying to every op:
 - Every op also accepts `--session <id>` (pin to one connected editor when several are attached) and `--params '<json>'` (base wire params; explicit flags override colliding keys).
 - Optional flags left at their zero value are omitted from the wire params.
 - `[write]` ops are gated on editor writability: while the editor is importing or playing they fail with `EDITOR_NOT_READY` (see references/troubleshooting.md).
-- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem move` 30s, `filesystem remove` 30s, `filesystem rename` 30s, `filesystem scan` 30s, `navigation bake` 30s, `resource physics-shape-generate` 30s, `batch execute` 30s.
+- Timeouts are the daemon-side per-op budget. Long ops: `editor record` 75s, `editor screenshot` 30s, `test run` 300s, `game input-sequence` 30s, `filesystem import-set` 120s, `filesystem move` 30s, `filesystem reimport` 120s, `filesystem remove` 30s, `filesystem rename` 30s, `filesystem scan` 30s, `navigation bake` 30s, `resource physics-shape-generate` 30s, `batch execute` 30s.
 - Daemon-level flags (`--http-port`) are accepted by every op command. Port resolution: explicit `--http-port` > port recorded by the last `launch`/`serve` (`last-daemon.json` in the user cache dir) > default 8000, with the default retried when the recorded port is unreachable. So after a custom-port launch you can omit `--http-port` entirely.
 - CLI-side extras not in the wire params: `editor eval` also accepts `--code-file`, `--code-stdin`, `--code-b64`; `editor record` also accepts `--out-dir`, `--out`, `--format`, `--duration`, `--fps`, `--full-res`; `editor screenshot` also accepts `--out`, `--assert`, `--tolerance`, `--full-res`, `--region`, `--coords`, `--baseline`, `--diff-threshold`, `--diff-out`; `node set-property` also accepts `--node-ref`, `--value-file`; `script create` also accepts `--content-file`; `script patch` also accepts `--old-file`, `--new-file`; `filesystem write-text` also accepts `--content-file`; `resource create` also accepts `--properties-file`; `batch execute` also accepts `--file`. Each is documented on its op entry below and in `<domain> <op> -h`.
 - Boolean flags take no space-separated value: write `--pressed` / `--pressed=false`, never `--pressed false` (the two-token form is auto-corrected when unambiguous, but any other stray positional fails with a steering error).
@@ -47,17 +47,17 @@ Quoting: prefer `--code-file` (or `--code-stdin`) whenever the snippet contains 
 
 ### `editor record` — Capture a frame-aligned burst of the running game (one readback per game frame)
 `game_command` · 75s · --frames int, --max-resolution int (default "640")
-CLI-side flags (not wire params): `--out-dir` string — save each frame as PNG into this directory (frames omitted from stdout); `--out` string — with --format gif: write the animated GIF to this file; `--format` string (default "png") — png (per-frame files) | gif (animated); `--duration` float (default "0") — capture this many seconds (frame count = duration x --fps); `--fps` int (default "0") — frame rate used with --duration; `--full-res` bool (default "false") — capture frames at full source resolution (sends max_resolution=0)
-Response: {"captured","frames","frame_deltas_ms","width","height"}; "frames" holds base64 PNGs in order. CLI-side flags: --out-dir (save frame_0001.png… locally, frames omitted from stdout, adds "files"), --format gif --out <file.gif> (adds "saved"/"bytes"), --duration/--fps (frame count = duration×fps), --full-res (no per-frame downscale cap).
+CLI-side flags (not wire params): `--out-dir` string — save each frame as PNG into this directory (frames omitted from stdout); `--out` string — with --format gif: write the animated GIF to this file; `--format` string (default "png") — png (per-frame files) | gif (animated); `--duration` float (default "0") — capture this many seconds (frame count = duration x --fps); `--fps` int (default "0") — frame rate used with --duration; `--full-res` bool (default "false") — remove the requested per-frame longest-edge pixel cap (sends max_resolution=0); each inline PNG may still be downscaled to fit the MCP/SSE byte budget
+Response: {"captured","frames","frame_deltas_ms","width","height"}; "frames" holds base64 PNGs in order. CLI-side flags: --out-dir (save frame_0001.png… locally, frames omitted from stdout, adds "files"), --format gif --out <file.gif> (adds "saved"/"bytes"), --duration/--fps (frame count = duration×fps). --full-res sends max_resolution=0 to remove the requested per-frame longest-edge cap; each inline PNG may still be downscaled to fit the MCP/SSE byte budget.
 Captures one readback per game frame — use it to verify per-frame animation content, particles, or projectiles in one call instead of N eval→screenshot round trips. Fails fast with an actionable error when the game's main loop is stalled. Examples: `editor record --frames 60 --out-dir shots/burst1` · `editor record --duration 2 --fps 30 --format gif --out run.gif`.
 
 ### `editor reload-plugin` — Reload the godot_ai plugin and wait for reconnect
 `reload_plugin` · 8s · no flags
 
 ### `editor screenshot` — Capture the editor viewport (3D/2D), a cinematic Camera3D render, or the game framebuffer
-`take_screenshot` · 30s · --source string (default "viewport"), --max-resolution int (default "640"), --include-image bool (default "true"), --view-target string, --coverage bool (default "false"), --elevation float, --azimuth float, --fov float, --user-prompt string
-CLI-side flags (not wire params): `--out` string — save the captured image to this file and omit image_base64 from the output; `--assert` string[] — expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch; `--tolerance` int (default "0") — per-channel tolerance for --assert; `--full-res` bool (default "false") — capture at full source resolution (sends max_resolution=0, no downscale cap; the default cap is 640); `--region` string — crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image); `--coords` string (default "image") — coordinate space of --region/--assert: image (source-image pixels, default; --assert then refers to the cropped image) | canvas (absolute game canvas coordinates - multiplied by the response's canvas_scale). --coords canvas forces the whole frame (sends max_resolution=0, so --max-resolution is ignored) and keeps the crop at source resolution so image_region/scale map exactly onto the returned pixels; it echoes coord_space/canvas_region/image_region/scale; `--baseline` string — compare the final image (after --region/--max-resolution) with this baseline PNG; a size mismatch or diff_ratio > --diff-threshold fails with BASELINE_DIFF_FAILED carrying diff_ratio and sample points; `--diff-threshold` float (default "0") — maximum tolerated diff_ratio (0..1) for --baseline; 0 = any differing pixel fails; `--diff-out` string — with --baseline: write a diff-annotated PNG (differing pixels marked #FF00FF) to this file, even when the comparison fails
-Response: {"format","width","height","frames_drawn","canvas_size","canvas_scale","note","image_base64"}; image_base64 is a data URI ("data:image/png;base64,..."). canvas_scale is the canvas → captured-image factor (image pixel = canvas coordinate × canvas_scale; [1,1] for editor viewport sources, the window stretch for --source game), so --region/--assert stay in image pixels unless --coords canvas converts them. The CLI-side flags --out (save to file, adds "saved"/"bytes"), --assert '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") and --baseline (local diff against a known frame, adds "diff_ratio"; fails with BASELINE_DIFF_FAILED) consume the image locally and omit image_base64 from the output. --full-res captures at the source resolution (no downscale cap).
+`take_screenshot` · 30s · --source string (default "viewport"), --max-resolution int (default "640"), --include-image bool (default "true"), --view-target string, --coverage bool (default "false"), --elevation float, --azimuth float, --fov float, --user-prompt string, --width int, --height int, --save-to string, --overwrite bool (default "false")
+CLI-side flags (not wire params): `--out` string — save the captured image to this file and omit image_base64 from the output; `--assert` string[] — expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch; `--tolerance` int (default "0") — per-channel tolerance for --assert; `--full-res` bool (default "false") — remove the requested longest-edge pixel cap (sends max_resolution=0; default 640); inline PNG may still be downscaled to fit the MCP/SSE byte budget; `--region` string — crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image); `--coords` string (default "image") — coordinate space of --region/--assert: image (source-image pixels, default; --assert then refers to the cropped image) | canvas (absolute game canvas coordinates - multiplied by the response's canvas_scale). --coords canvas forces the whole frame (sends max_resolution=0, so --max-resolution is ignored) and keeps the crop at source resolution so image_region/scale map exactly onto the returned pixels; it echoes coord_space/canvas_region/image_region/scale; `--baseline` string — compare the final image (after --region/--max-resolution) with this baseline PNG; a size mismatch or diff_ratio > --diff-threshold fails with BASELINE_DIFF_FAILED carrying diff_ratio and sample points; `--diff-threshold` float (default "0") — maximum tolerated diff_ratio (0..1) for --baseline; 0 = any differing pixel fails; `--diff-out` string — with --baseline: write a diff-annotated PNG (differing pixels marked #FF00FF) to this file, even when the comparison fails
+Response: {"format","width","height","frames_drawn","canvas_size","canvas_scale","note","image_base64"}; image_base64 is a data URI ("data:image/png;base64,..."). canvas_scale is the canvas → captured-image factor (image pixel = canvas coordinate × canvas_scale; [1,1] for editor viewport sources, the window stretch for --source game), so --region/--assert stay in image pixels unless --coords canvas converts them. The CLI-side flags --out (save to file, adds "saved"/"bytes"), --assert '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") and --baseline (local diff against a known frame, adds "diff_ratio"; fails with BASELINE_DIFF_FAILED) consume the image locally and omit image_base64 from the output. --full-res sends max_resolution=0 to remove the requested longest-edge pixel cap; the inline PNG may still be downscaled to fit the MCP/SSE byte budget. For source=cinematic, --save-to writes the full render to a res:// PNG before preview scaling.
 `--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first. Pixel-art games need `--full-res` to eyeball frames: the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera.
 
 ### `editor selection-get` — List the currently selected editor nodes
@@ -69,7 +69,10 @@ Response: {"format","width","height","frames_drawn","canvas_size","canvas_scale"
 ### `editor state` — Show editor version, project, current scene, readiness, and play state
 `get_editor_state` · 8s · no flags
 
-## scene (6 ops)
+## scene (7 ops)
+
+### `scene close` — Close an open scene tab without silently discarding unsaved changes
+`close_scene` · 8s · **[write]** · --path string (required), --discard-changes bool (default "false")
 
 ### `scene create` — Create a new scene file with a given root node type
 `create_scene` · 8s · **[write]** · --path string (required), --root-type string (default "Node3D"), --root-name string
@@ -92,7 +95,7 @@ Saving a scene is not a single-file write: the editor re-serializes the scene AN
 ### `scene save-as` — Save the current scene to a new path
 `save_scene_as` · 8s · **[write]** · --path string (required)
 
-## node (14 ops)
+## node (15 ops)
 
 ### `node add-to-group` — Add a node to a group
 `add_to_group` · 8s · **[write]** · --path string (required), --group string (required), --scene-file string
@@ -134,6 +137,9 @@ Saving a scene is not a single-file write: the editor re-serializes the scene AN
 `reset_property` · 8s · **[write]** · --path string (required), --property string (required), --scene-file string
 Response: {"path","property","value","old_value","is_default","removed_override","default_source","pinned","undoable"} — value is the restored (default) value, is_default says it now equals the default the packer compares against, removed_override says a stored override existed before the call, default_source names where that default came from ("inheritance_stack"/"instance_stack"/"script"/"class"), and pinned is true when the property is inspector-pinned (a pinned property is written to the .tscn even at its default, so the override line survives).
 Companion of `node set-property` for undoing an override instead of changing one: it writes the value Godot's scene packer treats as the default, so the next `scene save` drops the property's line from the .tscn and the node falls back to the script/class default (`@export var level_duration := 60` → an override written as `level_duration = 8` disappears instead of becoming `level_duration = 60`). The default is resolved with the SAME rule the packer uses (PropertyUtils::get_property_default_value): the value stored by the scene's inheritance stack (an edited scene A that extends B takes B's stored value), then by the instancing stack (a node inside an instanced sub-scene takes that sub-scene's stored value — neither is the script's number), else the topmost script's property default (Script.get_property_default_value), else the native class default; the response's `default_source` says which one was used (`inheritance_stack`/`instance_stack`/`script`/`class`). Hard-verifiable: `node reset-property --path . --property level_duration` then `scene save` then grep the .tscn for `level_duration` → no match, and the response reports `is_default:true`,`removed_override:true`. Three caveats, all visible in real behavior: a property the inspector pinned (`_edit_pinned_properties_`) is stored even at its default (reported as `pinned:true`); a property whose usage lacks PROPERTY_USAGE_STORAGE (e.g. `owner`) has no serialized override to drop and is refused with INVALID_PARAMS instead of corrupting the scene; and an Array/Dictionary whose value equals the default but holds a local-to-scene sub-resource is still written by the packer (`SceneState::pack` saves those on purpose), so for that shape the override line legitimately survives a reset.
+
+### `node set-editable-children` — Enable or disable Editable Children on an instanced scene root
+`set_editable_children` · 8s · **[write]** · --path string (required), --editable bool (required), --scene-file string
 
 ### `node set-property` — Set one property on a node
 `set_property` · 8s · **[write]** · --path string (required), --property string (required), --value json (required), --scene-file string
@@ -202,7 +208,7 @@ Response: {"mode","scene","autosave","was_already_running","written_paths":[...]
 `run_tests` · 300s · --suite string, --test-name string, --exclude-test-name string, --verbose bool (default "false"), --require-idle-session bool (default "false")
 Response: Fields: passed / failed / skipped / total / assertions (Σ per-test assertion_count, no --verbose needed) / duration_ms / suite_count / suites_run / edited_scene / game_status (always present: active + status + readiness; a live game makes the no-game-precondition suites fail deterministically). Optional: scene_warning / play_state_warning (failed>0 with a live game) / failures (failed>0) / load_errors / results (only --verbose). Empty-value fields are omitted — absent means none.
 
-## animation (16 ops)
+## animation (32 ops)
 
 ### `animation add-method-track` — Add a method-call track to an animation
 `animation_add_method_track` · 8s · **[write]** · --player-path string (required), --animation-name string (required), --target-node-path string (required), --keyframes json (required)
@@ -221,6 +227,15 @@ Response: Fields: passed / failed / skipped / total / assertions (Σ per-test as
 
 ### `animation get` — Read one animation's tracks and settings
 `animation_get` · 8s · --player-path string (required), --animation-name string (required)
+
+### `animation library-add` — Attach a saved AnimationLibrary to an AnimationMixer
+`animation_library_add` · 8s · **[write]** · --player-path string (required), --resource-path string (required), --library-name string
+
+### `animation library-list` — List an AnimationMixer's libraries, resource paths, and clips
+`animation_library_list` · 8s · --player-path string (required)
+
+### `animation library-remove` — Detach an AnimationLibrary from an AnimationMixer
+`animation_library_remove` · 8s · **[write]** · --player-path string (required), --library-name string
 
 ### `animation list` — List an AnimationPlayer's animations
 `animation_list` · 8s · --player-path string (required)
@@ -248,6 +263,45 @@ Response: Fields: passed / failed / skipped / total / assertions (Σ per-test as
 
 ### `animation stop` — Stop an AnimationPlayer
 `animation_stop` · 8s · --player-path string (required)
+
+### `animation tree-connect` — Connect a blend-tree input port
+`animation_tree_connect` · 8s · **[write]** · --tree-path string (required), --input-node string (required), --input-index int (required), --output-node string (required), --graph-path string
+
+### `animation tree-create` — Create an inactive AnimationTree linked to an AnimationPlayer
+`animation_tree_create` · 8s · **[write]** · --parent-path string (required), --player-path string (required), --name string (default "AnimationTree"), --root-type string (default "state_machine")
+
+### `animation tree-disconnect` — Disconnect a blend-tree input port
+`animation_tree_disconnect` · 8s · **[write]** · --tree-path string (required), --input-node string (required), --input-index int (required), --graph-path string
+
+### `animation tree-get` — Read an AnimationTree graph, its resources, and parameters
+`animation_tree_get` · 8s · --tree-path string (required), --graph-path string
+
+### `animation tree-node-add` — Add a native node to an AnimationTree graph
+`animation_tree_node_add` · 8s · **[write]** · --tree-path string (required), --name string (required), --node-type string (default "AnimationNodeAnimation"), --properties json, --position json, --graph-path string
+
+### `animation tree-node-remove` — Remove an AnimationTree graph node and its edges
+`animation_tree_node_remove` · 8s · **[write]** · --tree-path string (required), --name string (required), --graph-path string
+
+### `animation tree-node-set` — Set editable properties on the selected AnimationTree graph node
+`animation_tree_node_set` · 8s · **[write]** · --tree-path string (required), --properties json (required), --graph-path string
+
+### `animation tree-point-add` — Add a named point to a 1D or 2D blend space
+`animation_tree_point_add` · 8s · **[write]** · --tree-path string (required), --name string (required), --position json (required), --node-type string (default "AnimationNodeAnimation"), --properties json, --at-index int (default "-1"), --graph-path string
+
+### `animation tree-point-remove` — Remove a blend-space point
+`animation_tree_point_remove` · 8s · **[write]** · --tree-path string (required), --name string (required), --graph-path string
+
+### `animation tree-point-set` — Move a blend-space point
+`animation_tree_point_set` · 8s · **[write]** · --tree-path string (required), --name string (required), --position json (required), --graph-path string
+
+### `animation tree-transition-add` — Add a state-machine transition
+`animation_tree_transition_add` · 8s · **[write]** · --tree-path string (required), --from-state string (required), --to-state string (required), --graph-path string, --properties json
+
+### `animation tree-transition-remove` — Remove a state-machine transition
+`animation_tree_transition_remove` · 8s · **[write]** · --tree-path string (required), --from-state string (required), --to-state string (required), --graph-path string
+
+### `animation tree-transition-set` — Set properties on a state-machine transition
+`animation_tree_transition_set` · 8s · **[write]** · --tree-path string (required), --from-state string (required), --to-state string (required), --graph-path string, --properties json
 
 ### `animation validate` — Validate an animation's tracks against the scene
 `animation_validate` · 8s · --player-path string (required), --animation-name string (required)
@@ -281,7 +335,31 @@ Response: {"class","type","properties","shader_parameters","shader_parameter_val
 `material_set_shader_param` · 8s · **[write]** · --path string, --node-path string, --slot string (default "override"), --param string (required), --value json (required)
 Response: {"path","node_path","property","slot","param","value","previous_value","undoable"}
 
-## audio (6 ops)
+## audio (14 ops)
+
+### `audio bus-add` — Add a uniquely named audio bus
+`audio_bus_add` · 8s · **[write]** · --name string (required), --at-position int (default "-1"), --send string (default "Master")
+
+### `audio bus-effect-add` — Insert a concrete native AudioEffect into a bus
+`audio_bus_effect_add` · 8s · **[write]** · --bus string (required), --effect-class string (required), --properties json, --at-position int (default "-1"), --enabled bool (default "true")
+
+### `audio bus-effect-remove` — Remove an effect from an audio bus
+`audio_bus_effect_remove` · 8s · **[write]** · --bus string (required), --index int (required)
+
+### `audio bus-effect-set` — Edit a native audio effect or its enabled state
+`audio_bus_effect_set` · 8s · **[write]** · --bus string (required), --index int (required), --properties json, --enabled bool
+
+### `audio bus-layout-save` — Export a snapshot of the current audio bus layout
+`audio_bus_layout_save` · 8s · **[write]** · --path string (default "res://default_bus_layout.tres"), --overwrite bool (default "false")
+
+### `audio bus-list` — List audio buses, routing, and effect state
+`audio_bus_list` · 8s · no flags
+
+### `audio bus-remove` — Remove an unreferenced non-Master audio bus
+`audio_bus_remove` · 8s · **[write]** · --name string (required)
+
+### `audio bus-set` — Set audio bus volume, routing, mute, solo, or effect bypass
+`audio_bus_set` · 8s · **[write]** · --name string (required), --volume-db float, --send string, --mute bool, --solo bool, --bypass-effects bool
 
 ### `audio list` — List audio streams under res://
 `audio_list` · 8s · --root string (default "res://"), --include-duration bool (default "true")
@@ -417,7 +495,7 @@ Only reaches `Input.is_action_*` consumers (player movement, shooting, action he
 `game_command` · 15s · --key string (required), --pressed bool (default "true"), --echo bool (default "false")
 
 ### `game input-mouse` — Send a mouse event to the running game
-`game_command` · 15s · --event string (required), --position json, --button string (default "left"), --pressed bool (default "true")
+`game_command` · 15s · --event string (required), --position json, --button string (default "left"), --pressed bool (default "true"), --buttons json
 Response: Synthetic events do NOT enter the viewport mouse state — the payload carries "affects_mouse_position": false and get_global_mouse_position() is unchanged. To actually move the aim use game input-warp; read back with game get-mouse.
 
 ### `game input-sequence` — Drive a frame-timed action timeline in the running game
@@ -451,7 +529,14 @@ The UI counterpart of `game input-action`: it does not synthesize an event, it e
 ### `autoload remove` — Remove an autoload
 `remove_autoload` · 8s · **[write]** · --name string (required)
 
-## filesystem (8 ops)
+## filesystem (10 ops)
+
+### `filesystem import-get` — Read an imported asset's settings, writable options, and revision
+`import_get` · 8s · --path string (required)
+
+### `filesystem import-set` — Patch scalar import options and optionally reimport the asset
+`import_set` · 120s · **[write]** · --path string (required), --options json (required), --reimport bool (default "true"), --expected-revision string
+The 120-second timeout bounds only the client wait; it cannot cancel a native import already in progress. Inspect the current settings and import status before retrying an interrupted write.
 
 ### `filesystem move` — Move a file or directory tree within the project (uid-preserving, reference-checked)
 `move_file` · 30s · **[write]** · --path string (required), --new-path string (required)
@@ -461,7 +546,8 @@ Response: deferred reply; requires a direct command (batch_execute cannot await 
 `read_file` · 8s · --path string (required)
 
 ### `filesystem reimport` — Reimport assets (textures, models, audio — NOT scripts)
-`reimport` · 8s · **[write]** · --paths json (required)
+`reimport` · 120s · **[write]** · --paths json (required)
+The 120-second timeout bounds only the client wait; it cannot cancel a native import already in progress. Inspect current import status before retrying an interrupted write.
 
 ### `filesystem remove` — Remove a file or directory (OS trash by default; reference-checked)
 `remove_file` · 30s · **[write]** · --path string (required), --permanent bool (default "false"), --force bool (default "false")
@@ -571,7 +657,7 @@ Without `--fresh` the node's resolved stylebox for the slot is the BASE and the 
 ### `ui set-text` — Set the text of a Label/Button/RichTextLabel
 `set_text` · 8s · **[write]** · --path string (required), --text string (required)
 
-## resource (18 ops)
+## resource (20 ops)
 
 ### `resource assign` — Assign a resource to a node's property
 `assign_resource` · 8s · **[write]** · --path string (required), --property string (required), --resource-path string (required)
@@ -579,6 +665,9 @@ Without `--fresh` the node's resolved stylebox for the slot is the BASE and the 
 ### `resource create` — Create a resource, optionally saved and/or assigned
 `create_resource` · 8s · **[write]** · --type string (required), --properties json, --path string, --property string, --resource-path string, --overwrite bool (default "false")
 CLI-side flags (not wire params): `--properties-file` string — read the "properties" JSON object from this UTF-8 file (a leading BOM is tolerated) instead of --properties; an explicit --properties flag still wins
+
+### `resource create-sprite-frames` — Build and save a SpriteFrames resource from animations and texture frames
+`create_sprite_frames` · 8s · **[write]** · --resource-path string (required), --animations json (required), --overwrite bool (default "false")
 
 ### `resource curve-set-points` — Set the points of a Curve resource
 `curve_set_points` · 8s · **[write]** · --points json (required), --path string, --property string, --resource-path string
@@ -609,6 +698,9 @@ CLI-side flags (not wire params): `--properties-file` string — read the "prope
 
 ### `resource search` — Search resources by type and path prefix
 `search_resources` · 8s · --type string, --path string, --offset int (default "0"), --limit int (default "100")
+
+### `resource set-properties` — Patch an existing native .tres/.res resource without resetting omitted values
+`set_resource_properties` · 8s · **[write]** · --path string (required), --properties json (required)
 
 ### `resource set-property` — Set one property on the Resource held by a node's property slot
 `resource_set_property` · 8s · **[write]** · --node-path string (required), --property string (required), --resource-property string (required), --value json (required), --slot string (default "override")
@@ -651,11 +743,14 @@ Response: {"swapped","frame_counts"}
 ### `tilemap set-cells-rect` — Fill a rectangle of cells with one tile
 `tilemap_set_cells_rect` · 8s · **[write]** · --path string (required), --source-id int (required), --atlas-col int (required), --atlas-row int (required), --rect-x int (required), --rect-y int (required), --rect-w int (required), --rect-h int (required)
 
-## tileset (4 ops)
+## tileset (5 ops)
 
 ### `tileset add-physics-layer` — Add a physics layer to a TileSet
 `tileset_add_physics_layer` · 8s · **[write]** · --resource string (required), --collision-layer int (default "1"), --collision-mask int (default "1")
 Response: {"physics_layers_count"}
+
+### `tileset create-atlas` — Build and save a TileSet containing one native atlas source
+`tileset_create_atlas` · 8s · **[write]** · --resource-path string (required), --texture-path string (required), --tile-size json (required), --tiles json (required), --source-id int (default "0"), --margins json, --separation json, --overwrite bool (default "false")
 
 ### `tileset get-atlas-image` — Read a TileSet atlas image
 `tileset_get_atlas_image` · 8s · --tileset-path string (required), --source-id int (required), --max-size int (default "0")

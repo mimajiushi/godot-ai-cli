@@ -47,6 +47,14 @@ extras of `editor screenshot`.
 | `BASELINE_DIFF_FAILED` | The final image differs from `--baseline`: either the sizes disagree (`data.baseline_size` / `data.image_size`) or `data.diff_ratio` exceeds `--diff-threshold` (`data.diff_pixels` / `data.total_pixels` / `data.samples` name the first differing pixels; `data.diff_out` is the annotated PNG when `--diff-out` was given) | Inspect `data.samples` and the `--diff-out` image to tell a real visual regression from rendering noise; raise `--diff-threshold` only for noise, and re-shoot the baseline after an intentional change. |
 | `COORD_SPACE_UNAVAILABLE` | `--coords canvas` was requested but the reply carries no `canvas_scale` — the connected editor plugin predates canvas/image coordinate metadata | Use `--coords image` (source pixels), or install the current plugin (`plugin install --project <dir>` + reopen the editor); the scale is never guessed, so coordinates can never silently pick the wrong pixels. |
 
+Inline screenshots are bounded by both `max_resolution` and the plugin's PNG/MCP
+byte budget. Even `--full-res` / `--max-resolution 0` removes only the requested
+pixel cap; a large inline PNG can still be downscaled, with actual `width` /
+`height` in the response. For a full-size cinematic PNG use `--source cinematic
+--width N --height N --save-to res://... --include-image=false`; existing files
+require `--overwrite`. `--save-to` is the plugin-side write path, while `--out`
+is the CLI's separate local post-processing/output path.
+
 ## Local workspace codes
 
 Emitted by the commands that need neither a daemon nor an editor (`filesystem snapshot` / `filesystem changed`, `tilemap dump` / `tilemap render` / `tilemap find-by-color`).
@@ -99,7 +107,7 @@ deliberate gaps remain, and the CLI does not paper over them:
 | sub_code | State | retryable | Recovery |
 |---|---|---|---|
 | `EDITOR_IMPORTING` | Asset import in flight | true | The daemon already held the write up to ~8s re-probing; retry once after a short wait. |
-| `EDITOR_PLAYING` | Game is running in the editor | false | `project stop`, then retry the write. |
+| `EDITOR_PLAYING` | Game is running in the editor | false | `project stop`, then retry the write. Repeating `project run` is the sole exception: after a successful live `playing` probe it reaches the already-running no-op. `error.data.game_status`, when present, describes the fresh run state. |
 | `EDITOR_NO_SCENE` | No scene is being edited | — | `scene open --path res://...` first. |
 | `EDITOR_GAME_NOT_RUNNING` | Game-domain op with no running game | — | `project run` first. |
 | `EDITOR_VIEWPORT_EMPTY` | Capture came back empty — headless or not-yet-drawn viewport | false | Headless renders nothing; relaunch windowed. Do not retry-loop. |
@@ -115,7 +123,7 @@ deliberate gaps remain, and the CLI does not paper over them:
 | `PLUGIN_DISCONNECTED` | Editor session dropped mid-command (`data.retryable: true`) | Retry once; then `status` / relaunch. |
 | `TRANSPORT_TIMEOUT` | No plugin reply inside the op budget | Retry once; if persistent, `editor reload-plugin`, then check `logs read --source plugin`. |
 | `DEFERRED_TIMEOUT` | A long plugin-side operation exceeded its deferred budget | Same handling as TRANSPORT_TIMEOUT. |
-| `INVALID_PARAMS` and family: `MISSING_REQUIRED_PARAM`, `WRONG_TYPE`, `VALUE_OUT_OF_RANGE`, `NODE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `PROPERTY_NOT_ON_CLASS` | Input problems — the first three are fixable input errors, the last three are structural lookups. One extra `NODE_NOT_FOUND` branch: `node set-property` with a `{"$node":"<path>"}` value (or `--node-ref`) fails this way when the node REFERENCE does not resolve — the path is relative to the TARGET node (`--path`), so `../Sprite2D` on `/Root/Player` means `/Root/Sprite2D` | Fix the flags; `api get-class --class-name X` lists real properties; `node find` / `filesystem search` locate real paths; `scene get-hierarchy` shows the tree a `$node` reference resolves against. |
+| `INVALID_PARAMS` and family: `MISSING_REQUIRED_PARAM`, `WRONG_TYPE`, `VALUE_OUT_OF_RANGE`, `NODE_NOT_FOUND`, `RESOURCE_NOT_FOUND`, `PROPERTY_NOT_ON_CLASS` | Input problems — the first three are fixable input errors, the last three are structural lookups. One extra `NODE_NOT_FOUND` branch: `node set-property` with a `{"$node":"<path>"}` value (or `--node-ref`) fails this way when the node REFERENCE does not resolve — the path is relative to the TARGET node (`--path`), so `../Sprite2D` on `/Root/Player` means `/Root/Sprite2D`. An `INVALID_PARAMS` about an instance descendant means the edit would not survive saving | Fix the flags; `api get-class --class-name X` lists real properties; `node find` / `filesystem search` locate real paths; `scene get-hierarchy` shows the tree a `$node` reference resolves against. For an instance override use `node set-editable-children --path /Root/Instance --editable`, then retry; structural edits to instance-owned nodes belong in the source scene. |
 | `EDITED_SCENE_MISMATCH` | `--scene-file` guard tripped: another scene is being edited | `scene open` the intended scene or drop the guard. |
 | `UNKNOWN_COMMAND` | Plugin command name not registered — when the op IS in `commands --json`, the running editor's plugin is usually stale (see the plugin-version section below) | Check spelling against `commands --json` (`plugin_command` field); on a `plugin_stale` session, `plugin install --project <dir>` and restart the editor. |
 | `TEST_RUN_TIMEOUT` | Test run hit its abort ceiling; partial summary in `data` | `test results-get` returns the partial results. |
@@ -131,6 +139,12 @@ deliberate gaps remain, and the CLI does not paper over them:
 | `PLUGIN_VERSION_UNSUPPORTED` | `plugin install --version X` asked for a version this CLI does not embed | The CLI vendors exactly one plugin build; `data.bundled_version` names it. Drop the flag (or use the CLI release that bundles X). |
 | `PLUGIN_PLAN_FAILED` | The read-only plugin preview could not read the project (`launch --dry-run`, `plugin status`) | Check `project.godot` readability and filesystem permissions. |
 | `SHUTDOWN_FAILED` | `stop` could not complete daemon shutdown | Teardown continued best-effort; check remaining processes manually. |
+
+`filesystem import-set` and `filesystem reimport` allow a 120-second client wait,
+but that timeout cannot cancel a native Godot import already in progress. After
+an interrupted call, inspect current settings/import status before retrying;
+for `import-set`, use `import-get` to obtain a fresh `revision` and pass it as
+`--expected-revision` rather than repeating a stale write.
 
 ## Plugin version compatibility (`plugin_stale`)
 

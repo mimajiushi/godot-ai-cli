@@ -182,7 +182,7 @@ loopback-only. The topology, wire envelope and gating rules are documented in
 
 ## Command surface
 
-148 editor operations across 26 domains (scene, node, script, signal, UI,
+217 editor operations across 29 domains (scene, node, script, signal, UI,
 theme, animation, material, resource, tilemap, particles, camera, audio, input,
 game, tests, screenshots and more). Ask the binary for the live catalog:
 
@@ -244,13 +244,19 @@ script/build-release.sh` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Relationship to hi-godot/godot-ai
 
-The editor plugin under `plugin/godot_ai/` is a fork of upstream v4.2.3 with
+The editor plugin under `plugin/godot_ai/` is a fork of upstream v4.4.2 with
 telemetry removed and the Python server spawn disabled (the Go daemon replaces
 the Python backend entirely and implements the v4 authenticated transport —
 capability-record discovery plus an HMAC proof handshake — itself). Every
 divergence is marked `godot-ai-cli fork patch` in the GDScript source and
 enumerated in [docs/fork-patches.md](docs/fork-patches.md). Upstream license:
 MIT, "Godot AI contributors". See `UPSTREAM-LICENSE.txt`.
+
+The bundled fork plugin is version **4.4.3** (upstream v4.4.2 plus fork
+patches). Upgrading a project from a 4.3.x plugin crosses the major.minor
+compatibility boundary: run `plugin install --project <dir>` and fully restart
+the editor before connecting to the 4.4 daemon. Replacing files without that
+restart leaves the editor running its old in-memory plugin.
 
 ## License
 

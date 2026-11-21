@@ -118,8 +118,12 @@ semantics:
   probe timeout) because the cache may be stale from a lost event.
 - Only a live-confirmed `importing` holds the write for a bounded window
   (probe every 500 ms, cap 8 s) before failing with a retryable
-  `EDITOR_NOT_READY` (`sub_code: EDITOR_IMPORTING`); a live `playing` fails
-  non-retryable (`sub_code: EDITOR_PLAYING`) with a hint to stop the game.
+  `EDITOR_NOT_READY` (`sub_code: EDITOR_IMPORTING`). A live `playing` normally
+  fails non-retryable (`sub_code: EDITOR_PLAYING`) with a hint to stop the game
+  and, when available, fresh `game_status` in `error.data`.
+- `run_project` is the sole playing-state exception: after a successful live
+  probe confirms `playing`, it reaches the plugin's idempotent already-running
+  path. A failed probe, `importing`, or any other write still fails closed.
 
 ## Port pinning (per project) and the legacy EditorSettings backup/restore
 

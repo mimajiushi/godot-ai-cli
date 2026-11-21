@@ -156,7 +156,7 @@ WebSocket 桥转发给编辑器内的插件。全部通信仅限本机回环。�
 
 ## 命令面
 
-26 个域共 148 个编辑器操作（scene、node、script、signal、ui、theme、animation、
+29 个域共 217 个编辑器操作（scene、node、script、signal、ui、theme、animation、
 material、resource、tilemap、particle、camera、audio、input、game、test、
 截图等）。直接问二进制要实时清单：
 
@@ -209,12 +209,17 @@ script/build-release.sh`（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
 ## 与 hi-godot/godot-ai 的关系
 
-`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v4.2.3，移除了遥测并禁用了
+`plugin/godot_ai/` 下的编辑器插件 fork 自上游 v4.4.2，移除了遥测并禁用了
 Python server 拉起逻辑（Go daemon 完全取代 Python 后端，并自行实现了 v4 的
 认证传输——capability 记录发现 + HMAC 证明握手）。每一处分叉都在 GDScript
 源码中以 `godot-ai-cli fork patch` 标注，并在
 [docs/fork-patches.md](docs/fork-patches.md) 中逐条列出。上游许可证：MIT，
 "Godot AI contributors"。见 `UPSTREAM-LICENSE.txt`。
+
+当前内置 fork 插件版本为 **4.4.3**（上游 v4.4.2 加 fork 补丁）。工程从
+4.3.x 插件升级时会跨越 major.minor 兼容边界：请先执行
+`plugin install --project <dir>`，再完整重启编辑器，然后才能连接 4.4 daemon。
+只替换磁盘文件而不重启，编辑器内存里仍会运行旧插件。
 
 ## 许可证
 

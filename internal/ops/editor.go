@@ -35,11 +35,14 @@ func editorOps() []OpSpec {
   '#RRGGBB@x,y' (pixel check, --tolerance, adds "passed"/"samples") and
   --baseline (local diff against a known frame, adds "diff_ratio"; fails with
   BASELINE_DIFF_FAILED) consume the image locally and omit image_base64 from the
-  output. --full-res captures at the source resolution (no downscale cap).`,
+  output. --full-res sends max_resolution=0 to remove the requested longest-edge
+  pixel cap; the inline PNG may still be downscaled to fit the MCP/SSE byte budget.
+  For source=cinematic, --save-to writes the full render to a res:// PNG before
+  preview scaling.`,
 			DocNote: "`--source game` without a running game fails CLI-side with `GAME_NOT_RUNNING` — start it via `project run` first. Pixel-art games need `--full-res` to eyeball frames: the 640 default shrinks a 32px sprite to ~21 screen pixels under a 2x camera.",
 			Params: []ParamSpec{
 				ps("source", "source", false, "viewport", "viewport | viewport_2d | cinematic | game"),
-				pi("max-resolution", "max_resolution", false, "640", "Longest-edge pixel cap for the capture (0 = no cap; the CLI-side --full-res flag sends 0)"),
+				pi("max-resolution", "max_resolution", false, "640", "Requested longest-edge pixel cap (0 = no requested cap; inline PNG may still be downscaled to fit the MCP/SSE byte budget; --full-res sends 0)"),
 				pb("include-image", "include_image", false, "true", "Embed the image data in the response"),
 				ps("view-target", "view_target", false, "", "Camera3D node path for source=cinematic"),
 				pb("coverage", "coverage", false, "false", "Include scene-coverage analysis for cinematic shots"),
@@ -47,12 +50,16 @@ func editorOps() []OpSpec {
 				pf("azimuth", "azimuth", false, "", "Cinematic camera azimuth in degrees"),
 				pf("fov", "fov", false, "", "Cinematic camera field of view in degrees"),
 				ps("user-prompt", "user_prompt", false, "", "Prompt passed to vision routing when enabled"),
+				pi("width", "width", false, "", "Cinematic render width, 1..4096; supply together with --height"),
+				pi("height", "height", false, "", "Cinematic render height, 1..4096; supply together with --width"),
+				ps("save-to", "save_to", false, "", "Cinematic only: save the full render to this res:// PNG path"),
+				pb("overwrite", "overwrite", false, "false", "Replace an existing --save-to PNG"),
 			},
 			CLIFlags: []CLIFlagSpec{
 				cls("out", "", "save the captured image to this file and omit image_base64 from the output"),
 				clsa("assert", "expected pixel as '#RRGGBB@x,y' (repeatable); fails with PIXEL_ASSERT_FAILED on mismatch"),
 				cli("tolerance", "0", "per-channel tolerance for --assert"),
-				clb("full-res", "false", "capture at full source resolution (sends max_resolution=0, no downscale cap; the default cap is 640)"),
+				clb("full-res", "false", "remove the requested longest-edge pixel cap (sends max_resolution=0; default 640); inline PNG may still be downscaled to fit the MCP/SSE byte budget"),
 				cls("region", "", `crop the capture to "x,y,w,h" in source-image pixels (crops first, then --max-resolution applies; --assert coordinates refer to the cropped image)`),
 				cls("coords", "image", "coordinate space of --region/--assert: image (source-image pixels, default; --assert then refers to the cropped image) | canvas (absolute game canvas coordinates - multiplied by the response's canvas_scale). --coords canvas forces the whole frame (sends max_resolution=0, so --max-resolution is ignored) and keeps the crop at source resolution so image_region/scale map exactly onto the returned pixels; it echoes coord_space/canvas_region/image_region/scale"),
 				cls("baseline", "", "compare the final image (after --region/--max-resolution) with this baseline PNG; a size mismatch or diff_ratio > --diff-threshold fails with BASELINE_DIFF_FAILED carrying diff_ratio and sample points"),
@@ -85,12 +92,13 @@ func editorOps() []OpSpec {
 			ResponseNote: `{"captured","frames","frame_deltas_ms","width","height"}; "frames" holds
   base64 PNGs in order. CLI-side flags: --out-dir (save frame_0001.png… locally,
   frames omitted from stdout, adds "files"), --format gif --out <file.gif> (adds
-  "saved"/"bytes"), --duration/--fps (frame count = duration×fps), --full-res
-  (no per-frame downscale cap).`,
+  "saved"/"bytes"), --duration/--fps (frame count = duration×fps). --full-res
+  sends max_resolution=0 to remove the requested per-frame longest-edge cap;
+  each inline PNG may still be downscaled to fit the MCP/SSE byte budget.`,
 			DocNote: "Captures one readback per game frame — use it to verify per-frame animation content, particles, or projectiles in one call instead of N eval→screenshot round trips. Fails fast with an actionable error when the game's main loop is stalled. Examples: `editor record --frames 60 --out-dir shots/burst1` · `editor record --duration 2 --fps 30 --format gif --out run.gif`.",
 			Params: []ParamSpec{
 				pi("frames", "frames", false, "", "Capture this many consecutive game frames"),
-				pi("max-resolution", "max_resolution", false, "640", "Longest-edge pixel cap per frame (0 = no cap; the CLI-side --full-res flag sends 0)"),
+				pi("max-resolution", "max_resolution", false, "640", "Requested longest-edge pixel cap per frame (0 = no requested cap; each inline PNG may still be downscaled to fit the MCP/SSE byte budget; --full-res sends 0)"),
 			},
 			CLIFlags: []CLIFlagSpec{
 				cls("out-dir", "", "save each frame as PNG into this directory (frames omitted from stdout)"),
@@ -98,7 +106,7 @@ func editorOps() []OpSpec {
 				cls("format", "png", "png (per-frame files) | gif (animated)"),
 				clf("duration", "0", "capture this many seconds (frame count = duration x --fps)"),
 				cli("fps", "0", "frame rate used with --duration"),
-				clb("full-res", "false", "capture frames at full source resolution (sends max_resolution=0)"),
+				clb("full-res", "false", "remove the requested per-frame longest-edge pixel cap (sends max_resolution=0); each inline PNG may still be downscaled to fit the MCP/SSE byte budget"),
 			},
 		},
 		{

@@ -178,6 +178,179 @@ func animationOps() []OpSpec {
 				pb("overwrite", "overwrite", false, "false", "Replace an existing animation of the same name"),
 			},
 		},
+		{
+			Domain: "animation", Name: "tree-create", PluginCommand: "animation_tree_create",
+			Summary: "Create an inactive AnimationTree linked to an AnimationPlayer",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("parent-path", "parent_path", true, "", "Parent node path for the new AnimationTree"),
+				ps("player-path", "player_path", true, "", "AnimationPlayer node path to link"),
+				ps("name", "name", false, "AnimationTree", "New AnimationTree node name"),
+				ps("root-type", "root_type", false, "state_machine", "state_machine | blend_tree | blend_space_1d | blend_space_2d"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-get", PluginCommand: "animation_tree_get",
+			Summary: "Read an AnimationTree graph, its resources, and parameters",
+			Timeout: DefaultTimeout,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("graph-path", "graph_path", false, "", "Nested graph resource path (empty selects tree_root)"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-node-add", PluginCommand: "animation_tree_node_add",
+			Summary: "Add a native node to an AnimationTree graph",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("name", "name", true, "", "Unique graph node name"),
+				ps("node-type", "node_type", false, "AnimationNodeAnimation", "Concrete native AnimationNode class"),
+				pj("properties", "properties", false, "JSON object of editable node properties"),
+				pj("position", "position", false, `JSON {"x":..,"y":..} graph position`),
+				ps("graph-path", "graph_path", false, "", "Nested graph resource path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-node-remove", PluginCommand: "animation_tree_node_remove",
+			Summary: "Remove an AnimationTree graph node and its edges",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("name", "name", true, "", "Graph node name"),
+				ps("graph-path", "graph_path", false, "", "Nested graph resource path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-node-set", PluginCommand: "animation_tree_node_set",
+			Summary: "Set editable properties on the selected AnimationTree graph node",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				pj("properties", "properties", true, "JSON object of editable node properties"),
+				ps("graph-path", "graph_path", false, "", "Nested graph resource path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-connect", PluginCommand: "animation_tree_connect",
+			Summary: "Connect a blend-tree input port",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("input-node", "input_node", true, "", "Input node name"),
+				pi("input-index", "input_index", true, "", "Zero-based input port index"),
+				ps("output-node", "output_node", true, "", "Upstream output node name"),
+				ps("graph-path", "graph_path", false, "", "Nested blend-tree path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-disconnect", PluginCommand: "animation_tree_disconnect",
+			Summary: "Disconnect a blend-tree input port",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("input-node", "input_node", true, "", "Input node name"),
+				pi("input-index", "input_index", true, "", "Zero-based input port index"),
+				ps("graph-path", "graph_path", false, "", "Nested blend-tree path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-point-add", PluginCommand: "animation_tree_point_add",
+			Summary: "Add a named point to a 1D or 2D blend space",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("name", "name", true, "", "Unique blend point name"),
+				pj("position", "position", true, "JSON number for 1D or {\"x\":..,\"y\":..} object for 2D"),
+				ps("node-type", "node_type", false, "AnimationNodeAnimation", "Concrete native AnimationRootNode class"),
+				pj("properties", "properties", false, "JSON object of editable point-node properties"),
+				pi("at-index", "at_index", false, "-1", "Insertion index (-1 appends)"),
+				ps("graph-path", "graph_path", false, "", "Nested blend-space path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-point-remove", PluginCommand: "animation_tree_point_remove",
+			Summary: "Remove a blend-space point",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("name", "name", true, "", "Blend point name"),
+				ps("graph-path", "graph_path", false, "", "Nested blend-space path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-point-set", PluginCommand: "animation_tree_point_set",
+			Summary: "Move a blend-space point",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("name", "name", true, "", "Blend point name"),
+				pj("position", "position", true, "JSON number for 1D or {\"x\":..,\"y\":..} object for 2D"),
+				ps("graph-path", "graph_path", false, "", "Nested blend-space path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-transition-add", PluginCommand: "animation_tree_transition_add",
+			Summary: "Add a state-machine transition",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("from-state", "from_state", true, "", "Source state name"),
+				ps("to-state", "to_state", true, "", "Destination state name"),
+				ps("graph-path", "graph_path", false, "", "Nested state-machine path"),
+				pj("properties", "properties", false, "JSON object of transition properties"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-transition-remove", PluginCommand: "animation_tree_transition_remove",
+			Summary: "Remove a state-machine transition",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("from-state", "from_state", true, "", "Source state name"),
+				ps("to-state", "to_state", true, "", "Destination state name"),
+				ps("graph-path", "graph_path", false, "", "Nested state-machine path"),
+			},
+		},
+		{
+			Domain: "animation", Name: "tree-transition-set", PluginCommand: "animation_tree_transition_set",
+			Summary: "Set properties on a state-machine transition",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("tree-path", "tree_path", true, "", "AnimationTree node path"),
+				ps("from-state", "from_state", true, "", "Source state name"),
+				ps("to-state", "to_state", true, "", "Destination state name"),
+				ps("graph-path", "graph_path", false, "", "Nested state-machine path"),
+				pj("properties", "properties", false, "JSON object of transition properties"),
+			},
+		},
+		{
+			Domain: "animation", Name: "library-add", PluginCommand: "animation_library_add",
+			Summary: "Attach a saved AnimationLibrary to an AnimationMixer",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("player-path", "player_path", true, "", "AnimationPlayer or AnimationTree node path"),
+				ps("resource-path", "resource_path", true, "", "res:// path of the AnimationLibrary"),
+				ps("library-name", "library_name", false, "", "Library name (empty selects the default library)"),
+			},
+		},
+		{
+			Domain: "animation", Name: "library-remove", PluginCommand: "animation_library_remove",
+			Summary: "Detach an AnimationLibrary from an AnimationMixer",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("player-path", "player_path", true, "", "AnimationPlayer or AnimationTree node path"),
+				ps("library-name", "library_name", false, "", "Library name (empty selects the default library)"),
+			},
+		},
+		{
+			Domain: "animation", Name: "library-list", PluginCommand: "animation_library_list",
+			Summary: "List an AnimationMixer's libraries, resource paths, and clips",
+			Timeout: DefaultTimeout,
+			Params: []ParamSpec{
+				ps("player-path", "player_path", true, "", "AnimationPlayer or AnimationTree node path"),
+			},
+		},
 	}
 }
 

@@ -54,6 +54,21 @@ func tilemapOps() []OpSpec {
 func tilesetOps() []OpSpec {
 	return []OpSpec{
 		{
+			Domain: "tileset", Name: "create-atlas", PluginCommand: "tileset_create_atlas",
+			Summary: "Build and save a TileSet containing one native atlas source",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("resource-path", "resource_path", true, "", "res:// .tres or .res output path"),
+				ps("texture-path", "texture_path", true, "", "res:// path of the atlas Texture2D"),
+				pj("tile-size", "tile_size", true, `JSON {"x":..,"y":..} tile size in pixels`),
+				pj("tiles", "tiles", true, `JSON array of {"coords":{"x":..,"y":..},"size":{"x":..,"y":..}}`),
+				pi("source-id", "source_id", false, "0", "Nonnegative atlas source id"),
+				pj("margins", "margins", false, `JSON {"x":..,"y":..} atlas margins (default: zero)`),
+				pj("separation", "separation", false, `JSON {"x":..,"y":..} tile separation (default: zero)`),
+				pb("overwrite", "overwrite", false, "false", "Replace the entire existing TileSet while retaining its UID"),
+			},
+		},
+		{
 			Domain: "tileset", Name: "get-atlas-tiles", PluginCommand: "tileset_get_atlas_tiles",
 			Summary: "List the tiles of a TileSet atlas source",
 			Timeout: DefaultTimeout,

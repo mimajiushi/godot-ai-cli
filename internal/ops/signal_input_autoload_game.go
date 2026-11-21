@@ -196,6 +196,7 @@ func gameOps() []OpSpec {
 				pj("position", "position", false, `JSON {"x":..,"y":..} position`),
 				ps("button", "button", false, "left", "left | right | middle | wheel_up | wheel_down"),
 				pb("pressed", "pressed", false, "true", "true = press, false = release"),
+				pj("buttons", "buttons", false, `Motion only: JSON array overriding held buttons for this event, e.g. ["left","right"]`),
 			},
 		},
 		{

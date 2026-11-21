@@ -40,11 +40,64 @@ type assertSample struct {
 	OK       bool   `json:"ok"`
 }
 
+// validateScreenshotOutputParams 在发请求前钉住 cinematic 尺寸与落盘参数的组合约束；
+// 同时检查 --params/--params-file 来源，不能只依赖 Cobra 的 typed flags。
+func validateScreenshotOutputParams(params map[string]any) error {
+	_, hasWidth := params["width"]
+	_, hasHeight := params["height"]
+	if hasWidth != hasHeight {
+		return fmt.Errorf("cinematic --width and --height must be supplied together")
+	}
+	saveTo := ""
+	if raw, exists := params["save_to"]; exists {
+		var ok bool
+		saveTo, ok = raw.(string)
+		if !ok {
+			return fmt.Errorf("--save-to must be a res:// PNG path string")
+		}
+	}
+	overwrite := false
+	if raw, exists := params["overwrite"]; exists {
+		var ok bool
+		overwrite, ok = raw.(bool)
+		if !ok {
+			return fmt.Errorf("--overwrite must be a boolean")
+		}
+	}
+	source, _ := params["source"].(string)
+	if (hasWidth || saveTo != "") && source != "cinematic" {
+		return fmt.Errorf("--width, --height and --save-to require --source cinematic")
+	}
+	if overwrite && saveTo == "" {
+		return fmt.Errorf("--overwrite requires --save-to")
+	}
+	if hasWidth {
+		for _, key := range []string{"width", "height"} {
+			var value float64
+			switch v := params[key].(type) {
+			case int:
+				value = float64(v)
+			case float64:
+				value = v
+			default:
+				return fmt.Errorf("--%s must be a whole number from 1 to 4096", key)
+			}
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 1 || value > 4096 || math.Trunc(value) != value {
+				return fmt.Errorf("--%s must be a whole number from 1 to 4096", key)
+			}
+		}
+	}
+	return nil
+}
+
 // runScreenshot is the RunE of `editor screenshot`: collectParams plus the
 // CLI-side extras the plain op path does not have.
 func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 	params, err := collectParams(cmd, op)
 	if err != nil {
+		return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
+	}
+	if err := validateScreenshotOutputParams(params); err != nil {
 		return jsonError(cmd, "INVALID_PARAMS", err.Error(), nil)
 	}
 
@@ -124,7 +177,12 @@ func runScreenshot(cmd *cobra.Command, op ops.OpSpec) error {
 		// A non-ok editor state: let take_screenshot report its own error.
 	}
 
-	resp, err := executeOpRaw(cmd, op.PluginCommand, params, op.Timeout, op.Write)
+	// 上游只有 save_to 落盘时才要求写门禁；普通截图仍保持只读。
+	write := op.Write
+	if saveTo, _ := params["save_to"].(string); saveTo != "" {
+		write = true
+	}
+	resp, err := executeOpRaw(cmd, op.PluginCommand, params, op.Timeout, write)
 	if err != nil {
 		return err
 	}

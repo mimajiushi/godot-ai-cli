@@ -54,6 +54,15 @@ func sceneOps() []OpSpec {
 				ps("path", "path", true, "", "res:// target path"),
 			},
 		},
+		{
+			Domain: "scene", Name: "close", PluginCommand: "close_scene",
+			Summary: "Close an open scene tab without silently discarding unsaved changes",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "res:// or uid:// path of the open scene tab"),
+				pb("discard-changes", "discard_changes", false, "false", "Discard unsaved changes in the tab"),
+			},
+		},
 	}
 }
 
@@ -189,6 +198,16 @@ func nodeOps() []OpSpec {
 			Params: []ParamSpec{
 				ps("path", "path", true, "", "Scene path of the node"),
 				pi("index", "index", true, "", "Target sibling index"),
+				ps("scene-file", "scene_file", false, "", "Guard: only apply when this scene is being edited"),
+			},
+		},
+		{
+			Domain: "node", Name: "set-editable-children", PluginCommand: "set_editable_children",
+			Summary: "Enable or disable Editable Children on an instanced scene root",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "Scene path of the instanced scene root"),
+				pb("editable", "editable", true, "", "Whether children of the instance are editable"),
 				ps("scene-file", "scene_file", false, "", "Guard: only apply when this scene is being edited"),
 			},
 		},

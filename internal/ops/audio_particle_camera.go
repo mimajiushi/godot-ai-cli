@@ -60,6 +60,83 @@ func audioOps() []OpSpec {
 				pb("include-duration", "include_duration", false, "true", "Probe each stream's duration"),
 			},
 		},
+		{
+			Domain: "audio", Name: "bus-list", PluginCommand: "audio_bus_list",
+			Summary: "List audio buses, routing, and effect state",
+			Timeout: DefaultTimeout,
+		},
+		{
+			Domain: "audio", Name: "bus-add", PluginCommand: "audio_bus_add",
+			Summary: "Add a uniquely named audio bus",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("name", "name", true, "", "New bus name"),
+				pi("at-position", "at_position", false, "-1", "Insertion index (-1 appends; 0 is reserved for Master)"),
+				ps("send", "send", false, "Master", "Existing earlier bus to send to"),
+			},
+		},
+		{
+			Domain: "audio", Name: "bus-remove", PluginCommand: "audio_bus_remove",
+			Summary: "Remove an unreferenced non-Master audio bus",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("name", "name", true, "", "Bus name"),
+			},
+		},
+		{
+			Domain: "audio", Name: "bus-set", PluginCommand: "audio_bus_set",
+			Summary: "Set audio bus volume, routing, mute, solo, or effect bypass",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("name", "name", true, "", "Bus name"),
+				pf("volume-db", "volume_db", false, "", "Bus volume in dB"),
+				ps("send", "send", false, "", "Existing earlier bus to send to"),
+				pb("mute", "mute", false, "", "Mute the bus"),
+				pb("solo", "solo", false, "", "Solo the bus"),
+				pb("bypass-effects", "bypass_effects", false, "", "Bypass all effects on the bus"),
+			},
+		},
+		{
+			Domain: "audio", Name: "bus-effect-add", PluginCommand: "audio_bus_effect_add",
+			Summary: "Insert a concrete native AudioEffect into a bus",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("bus", "bus", true, "", "Target bus name"),
+				ps("effect-class", "effect_class", true, "", "Concrete native AudioEffect class"),
+				pj("properties", "properties", false, "JSON object of editable effect properties"),
+				pi("at-position", "at_position", false, "-1", "Effect insertion index (-1 appends)"),
+				pb("enabled", "enabled", false, "true", "Enable the inserted effect"),
+			},
+		},
+		{
+			Domain: "audio", Name: "bus-effect-set", PluginCommand: "audio_bus_effect_set",
+			Summary: "Edit a native audio effect or its enabled state",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("bus", "bus", true, "", "Target bus name"),
+				pi("index", "index", true, "", "Zero-based effect index"),
+				pj("properties", "properties", false, "JSON object of editable effect properties"),
+				pb("enabled", "enabled", false, "", "Enable or disable the effect"),
+			},
+		},
+		{
+			Domain: "audio", Name: "bus-effect-remove", PluginCommand: "audio_bus_effect_remove",
+			Summary: "Remove an effect from an audio bus",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("bus", "bus", true, "", "Target bus name"),
+				pi("index", "index", true, "", "Zero-based effect index"),
+			},
+		},
+		{
+			Domain: "audio", Name: "bus-layout-save", PluginCommand: "audio_bus_layout_save",
+			Summary: "Export a snapshot of the current audio bus layout",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", false, "res://default_bus_layout.tres", "res:// .tres or .res output path"),
+				pb("overwrite", "overwrite", false, "false", "Replace an existing layout file"),
+			},
+		},
 	}
 }
 

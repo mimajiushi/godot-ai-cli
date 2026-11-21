@@ -506,7 +506,8 @@ func (d *Daemon) handleExecute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if req.Write {
-		if cmdErr := d.bridge.RequireWritable(ctx, req.SessionID); cmdErr != nil {
+		// run_project 的 already-running no-op 是上游唯一允许穿过 playing 的写命令。
+		if cmdErr := d.bridge.RequireWritable(ctx, req.SessionID, req.Command == "run_project"); cmdErr != nil {
 			writeJSON(w, http.StatusOK, cmdErr.ToJSON())
 			return
 		}

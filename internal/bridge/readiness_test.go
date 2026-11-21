@@ -29,7 +29,7 @@ func TestRequireWritableReadyFastPath(t *testing.T) {
 	s := startGateServer(t)
 	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, nil)
 
-	if cmdErr := s.RequireWritable(context.Background(), ""); cmdErr != nil {
+	if cmdErr := s.RequireWritable(context.Background(), "", false); cmdErr != nil {
 		t.Fatalf("RequireWritable: %v", cmdErr)
 	}
 	// Fast path: the cache says writable, so no probe may hit the wire.
@@ -44,7 +44,7 @@ func TestRequireWritableNoSceneFastPath(t *testing.T) {
 
 	// Upstream lets no_scene through: individual handlers reject when no
 	// scene is open.
-	if cmdErr := s.RequireWritable(context.Background(), ""); cmdErr != nil {
+	if cmdErr := s.RequireWritable(context.Background(), "", false); cmdErr != nil {
 		t.Fatalf("RequireWritable: %v", cmdErr)
 	}
 	if got := p.Count("get_editor_state"); got != 0 {
@@ -55,7 +55,7 @@ func TestRequireWritableNoSceneFastPath(t *testing.T) {
 func TestRequireWritableNoSession(t *testing.T) {
 	s := startGateServer(t)
 	// No editor connected: the gate is a no-op, SendCommand fails on its own.
-	if cmdErr := s.RequireWritable(context.Background(), ""); cmdErr != nil {
+	if cmdErr := s.RequireWritable(context.Background(), "", false); cmdErr != nil {
 		t.Fatalf("RequireWritable without session: %v", cmdErr)
 	}
 }
@@ -74,7 +74,7 @@ func TestRequireWritableImportingClearsDuringHold(t *testing.T) {
 		return &mockplugin.Response{Data: map[string]any{"readiness": readiness}}
 	})
 
-	if cmdErr := s.RequireWritable(context.Background(), ""); cmdErr != nil {
+	if cmdErr := s.RequireWritable(context.Background(), "", false); cmdErr != nil {
 		t.Fatalf("RequireWritable: %v", cmdErr)
 	}
 	if got := probes.Load(); got < 3 {
@@ -92,7 +92,7 @@ func TestRequireWritablePersistentImporting(t *testing.T) {
 		return &mockplugin.Response{Data: map[string]any{"readiness": "importing"}}
 	})
 
-	cmdErr := s.RequireWritable(context.Background(), "")
+	cmdErr := s.RequireWritable(context.Background(), "", false)
 	if cmdErr == nil {
 		t.Fatal("expected EDITOR_NOT_READY")
 	}
@@ -122,11 +122,14 @@ func TestRequireWritablePlayingFailsFast(t *testing.T) {
 	s := startGateServer(t)
 	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
 	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
-		return &mockplugin.Response{Data: map[string]any{"readiness": "playing"}}
+		return &mockplugin.Response{Data: map[string]any{
+			"readiness":   "playing",
+			"game_status": map[string]any{"status": "live", "run_token": 7},
+		}}
 	})
 
 	start := time.Now()
-	cmdErr := s.RequireWritable(context.Background(), "")
+	cmdErr := s.RequireWritable(context.Background(), "", false)
 	if cmdErr == nil {
 		t.Fatal("expected EDITOR_NOT_READY")
 	}
@@ -138,6 +141,10 @@ func TestRequireWritablePlayingFailsFast(t *testing.T) {
 	}
 	if cmdErr.Data["retryable"] != false {
 		t.Errorf("retryable = %v, want false (waiting never clears playing)", cmdErr.Data["retryable"])
+	}
+	gameStatus, ok := cmdErr.Data["game_status"].(map[string]any)
+	if !ok || gameStatus["status"] != "live" || gameStatus["run_token"] != float64(7) {
+		t.Errorf("新鲜 game_status 丢失或错误：%v", cmdErr.Data["game_status"])
 	}
 	// Only importing holds: playing rejects after the single probe.
 	if got := p.Count("get_editor_state"); got != 1 {
@@ -157,7 +164,7 @@ func TestRequireWritableStaleCacheHealedByProbe(t *testing.T) {
 		return &mockplugin.Response{Data: map[string]any{"readiness": "ready"}}
 	})
 
-	if cmdErr := s.RequireWritable(context.Background(), ""); cmdErr != nil {
+	if cmdErr := s.RequireWritable(context.Background(), "", false); cmdErr != nil {
 		t.Fatalf("RequireWritable: %v (stale cache should have been healed)", cmdErr)
 	}
 	if got := s.ActiveSession().Readiness(); got != "ready" {
@@ -173,11 +180,68 @@ func TestRequireWritableProbeFailureEnforcesCache(t *testing.T) {
 	mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
 	// No responder: the probe times out.
 
-	cmdErr := s.RequireWritable(context.Background(), "")
+	cmdErr := s.RequireWritable(context.Background(), "", false)
 	if cmdErr == nil {
 		t.Fatal("expected EDITOR_NOT_READY from cached playing state")
 	}
 	if cmdErr.Code != "EDITOR_NOT_READY" || cmdErr.Data["sub_code"] != "EDITOR_PLAYING" {
 		t.Errorf("err = %v", cmdErr)
+	}
+}
+
+// TestRequireWritableProjectRunPlayingNoop 只有实时 probe 明确返回 playing
+// 才允许 project_run 抵达插件的 already-running no-op 分支；responder 按真实
+// 插件契约拒绝 params:null，防止内部 probe 再次发送 nil 而不是空 Dictionary。
+func TestRequireWritableProjectRunPlayingNoop(t *testing.T) {
+	s := startGateServer(t)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
+	p.SetResponder(func(_ string, params map[string]any) *mockplugin.Response {
+		if params == nil {
+			return &mockplugin.Response{Status: "error", Error: map[string]any{
+				"code": "INVALID_PARAMS", "message": "params must be a Dictionary", "data": map[string]any{},
+			}}
+		}
+		return &mockplugin.Response{Data: map[string]any{
+			"readiness": "playing", "game_status": map[string]any{"status": "live"},
+		}}
+	})
+	if cmdErr := s.RequireWritable(context.Background(), "", true); cmdErr != nil {
+		t.Fatalf("实时确认 playing 的 project_run 被误拒：%v", cmdErr)
+	}
+	if got := p.Count("get_editor_state"); got != 1 {
+		t.Errorf("probe 次数 = %d，want 1", got)
+	}
+	for _, received := range p.Received() {
+		if received.Command == "get_editor_state" && (received.Params == nil || len(received.Params) != 0) {
+			t.Errorf("probe params = %#v，want 非 nil 空 map", received.Params)
+		}
+	}
+}
+
+// TestRequireWritableProjectRunProbeFailure 失败 probe 不得凭缓存 playing
+// 放行 project_run；没有新鲜状态时也不能伪造 game_status。
+func TestRequireWritableProjectRunProbeFailure(t *testing.T) {
+	s := startGateServer(t)
+	mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "playing"})
+	cmdErr := s.RequireWritable(context.Background(), "", true)
+	if cmdErr == nil || cmdErr.Code != "EDITOR_NOT_READY" || cmdErr.Data["sub_code"] != "EDITOR_PLAYING" {
+		t.Fatalf("失败 probe 的 project_run 未被拒绝：%v", cmdErr)
+	}
+	if _, exists := cmdErr.Data["game_status"]; exists {
+		t.Errorf("失败 probe 不应携带 game_status：%v", cmdErr.Data["game_status"])
+	}
+}
+
+// TestRequireWritableProjectRunImportingStillBlocked project_run 的例外不覆盖
+// importing；即使打开 allowPlayingNoop 也必须在有界等待后拒绝持续导入。
+func TestRequireWritableProjectRunImportingStillBlocked(t *testing.T) {
+	s := startGateServer(t)
+	p := mockplugin.Dial(t, s.Addr(), s.WSCapability, map[string]any{"readiness": "importing"})
+	p.SetResponder(func(string, map[string]any) *mockplugin.Response {
+		return &mockplugin.Response{Data: map[string]any{"readiness": "importing"}}
+	})
+	cmdErr := s.RequireWritable(context.Background(), "", true)
+	if cmdErr == nil || cmdErr.Code != "EDITOR_NOT_READY" || cmdErr.Data["sub_code"] != "EDITOR_IMPORTING" {
+		t.Fatalf("持续 importing 的 project_run 未被拒绝：%v", cmdErr)
 	}
 }

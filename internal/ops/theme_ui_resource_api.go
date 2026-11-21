@@ -267,6 +267,25 @@ func resourceOps() []OpSpec {
 			},
 		},
 		{
+			Domain: "resource", Name: "create-sprite-frames", PluginCommand: "create_sprite_frames",
+			Summary: "Build and save a SpriteFrames resource from animations and texture frames",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("resource-path", "resource_path", true, "", "res:// .tres or .res output path"),
+				pj("animations", "animations", true, `JSON array of {"name","fps","loop_mode","frames":[...]}`),
+				pb("overwrite", "overwrite", false, "false", "Replace the entire existing resource while retaining its UID"),
+			},
+		},
+		{
+			Domain: "resource", Name: "set-properties", PluginCommand: "set_resource_properties",
+			Summary: "Patch an existing native .tres/.res resource without resetting omitted values",
+			Timeout: DefaultTimeout, Write: true,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "res:// path of an existing non-imported .tres or .res resource"),
+				pj("properties", "properties", true, "JSON object of resource properties to change"),
+			},
+		},
+		{
 			Domain: "resource", Name: "curve-set-points", PluginCommand: "curve_set_points",
 			Summary: "Set the points of a Curve resource",
 			Timeout: DefaultTimeout, Write: true,

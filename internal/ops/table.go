@@ -22,6 +22,9 @@ const (
 	ScreenshotTimeout = 30 * time.Second
 	// ScanTimeout mirrors the scan_filesystem deferred budget.
 	ScanTimeout = 30 * time.Second
+	// ImportTimeout 对应上游同步 native import 的 120 秒等待预算；
+	// 超时只停止等待，不会取消已经开始的导入。
+	ImportTimeout = 120 * time.Second
 	// GameTimeout mirrors GAME_COMMAND_TIMEOUT_SEC (game_eval and
 	// game_command share it).
 	GameTimeout = 15 * time.Second

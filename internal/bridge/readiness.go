@@ -84,7 +84,7 @@ var knownReadiness = map[string]bool{
 //
 // If no session exists this is a no-op; the downstream SendCommand fails
 // on its own.
-func (s *Server) RequireWritable(ctx context.Context, sessionID string) *CommandError {
+func (s *Server) RequireWritable(ctx context.Context, sessionID string, allowPlayingNoop bool) *CommandError {
 	sess := s.resolveSession(sessionID)
 	if sess == nil {
 		return nil
@@ -93,7 +93,8 @@ func (s *Server) RequireWritable(ctx context.Context, sessionID string) *Command
 		return nil // cache says writable — fast path, no probe
 	}
 
-	if s.probeReadiness(ctx, sess) && sess.Readiness() == "importing" {
+	probe, probeOK := s.probeReadiness(ctx, sess)
+	if probeOK && sess.Readiness() == "importing" {
 		// Live-confirmed import in flight — hold instead of bouncing the
 		// write back for the caller to blind-retry. A failed initial probe
 		// skips the hold entirely: waiting cannot fix a dead link.
@@ -112,7 +113,8 @@ func (s *Server) RequireWritable(ctx context.Context, sessionID string) *Command
 				}
 			case <-timer.C:
 			}
-			if !s.probeReadiness(ctx, sess) {
+			probe, probeOK = s.probeReadiness(ctx, sess)
+			if !probeOK {
 				break
 			}
 			if sess.Readiness() != "importing" {
@@ -121,44 +123,53 @@ func (s *Server) RequireWritable(ctx context.Context, sessionID string) *Command
 		}
 	}
 
-	return enforceBlockingState(sess)
+	// 仅 project_run 获得窄例外：必须由最近一次成功实时 probe 明确确认 playing，
+	// 缓存中的 playing 或失败 probe 都不能放行；importing 仍走上面的有界等待与拒绝。
+	if allowPlayingNoop && probe != nil && probe["readiness"] == "playing" && sess.Readiness() == "playing" {
+		return nil
+	}
+	return enforceBlockingState(sess, probe)
 }
 
-// probeReadiness performs one get_editor_state round trip and heals the
-// session's cached readiness from the reply's data.readiness field. It
-// returns false when the probe itself failed (timeout, disconnect, plugin
-// error) — the caller then enforces against the cached value rather than
-// escalating the failure mode.
-func (s *Server) probeReadiness(ctx context.Context, sess *Session) bool {
-	data, cmdErr := s.SendCommand(ctx, sess.ID, "get_editor_state", nil, s.probeTimeout())
+// probeReadiness 执行一次 get_editor_state 并用 data.readiness 修复会话缓存。
+// 返回的完整 data 供 playing 例外与新鲜 game_status 使用；probe 本身失败时
+// 返回 (nil, false)，调用方继续按缓存状态拒绝，而不是把错误升级成连接错误。
+func (s *Server) probeReadiness(ctx context.Context, sess *Session) (map[string]any, bool) {
+	// 空参数也必须显式为 Dictionary；nil 会编码成 null 并被插件以 INVALID_PARAMS 拒绝。
+	data, cmdErr := s.SendCommand(ctx, sess.ID, "get_editor_state", map[string]any{}, s.probeTimeout())
 	if cmdErr != nil {
-		return false
+		return nil, false
 	}
 	if value, ok := data["readiness"].(string); ok {
 		s.syncReadiness(sess.ID, value)
 	}
-	return true
+	return data, true
 }
 
-// enforceBlockingState rejects writes against a blocking readiness state,
-// mirroring upstream _enforce_blocking_state: data carries sub_code first,
-// then editor_state / retryable / hint so callers can distinguish a
-// transient "importing" window (retry with backoff) from a terminal
-// "playing" state (stop the game first).
-func enforceBlockingState(sess *Session) *CommandError {
+// enforceBlockingState 按上游规则拒绝阻塞状态下的写入：data 保留
+// sub_code/editor_state/retryable/hint，playing 时还携带本次成功 probe
+// 返回的 game_status，便于调用方区分真实运行现场与过期缓存。
+func enforceBlockingState(sess *Session, probe map[string]any) *CommandError {
 	info, blocking := blockingReadiness[sess.Readiness()]
 	if !blocking {
 		return nil
 	}
+	data := map[string]any{
+		"sub_code":     info.subCode,
+		"editor_state": sess.Readiness(),
+		"retryable":    info.retryable,
+		"hint":         info.hint,
+	}
+	// playing 拒绝携带本次 probe 的现场状态；绝不复用旧缓存或失败 probe 的空值。
+	if sess.Readiness() == "playing" {
+		if gameStatus, ok := probe["game_status"].(map[string]any); ok {
+			data["game_status"] = gameStatus
+		}
+	}
 	return &CommandError{
 		Code:    "EDITOR_NOT_READY",
 		Message: info.message,
-		Data: map[string]any{
-			"sub_code":     info.subCode,
-			"editor_state": sess.Readiness(),
-			"retryable":    info.retryable,
-			"hint":         info.hint,
-		},
+		Data:    data,
 	}
 }
 

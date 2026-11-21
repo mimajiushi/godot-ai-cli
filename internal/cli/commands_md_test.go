@@ -68,7 +68,7 @@ func TestCommandsMarkdownDomainFilter(t *testing.T) {
 	if strings.Contains(out, "## node (") {
 		t.Error("node section leaked into a scene-only catalog")
 	}
-	if !strings.Contains(out, "(6 ops)") {
+	if !strings.Contains(out, fmt.Sprintf("(%d ops)", len(ops.ByDomain()["scene"]))) {
 		t.Errorf("header count should reflect the filtered list:\n%s",
 			strings.SplitN(out, "\n", 4)[2])
 	}
@@ -165,6 +165,27 @@ func TestOpCommandsRegisterCLIFlags(t *testing.T) {
 				t.Errorf("%s %s: CLI flag --%s declared but not registered",
 					op.Domain, op.Name, f.Flag)
 			}
+		}
+	}
+}
+
+// TestCommandsMarkdownFullResByteBudget 钉住机械生成目录中的真实预算语义，
+// 防止 op-table 修正后旧绝对措辞仍残留在交付文档里。
+func TestCommandsMarkdownFullResByteBudget(t *testing.T) {
+	out := runCommands(t, "--format", "md")
+	for _, want := range []string{
+		"max_resolution=0",
+		"inline PNG may still be downscaled to fit the MCP/SSE byte budget",
+		"--save-to writes the full render",
+		"per-frame longest-edge cap",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("生成目录缺少 %q", want)
+		}
+	}
+	for _, stale := range []string{"no downscale cap", "no per-frame downscale cap", "full source resolution"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("生成目录仍含误导性绝对措辞 %q", stale)
 		}
 	}
 }

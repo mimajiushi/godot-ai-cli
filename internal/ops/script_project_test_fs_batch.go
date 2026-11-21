@@ -190,9 +190,30 @@ func filesystemOps() []OpSpec {
 			DocNote: "The file-content channel (需求 R-1): a multi-line, non-ASCII payload survives here untouched, where `--content` on Windows PowerShell 5.1 loses ASCII double quotes and depends on the console code page — `godot-ai-cli filesystem write-text --path res://scene/ui/hud.gd --content-file %TEMP%\\hud.gd`. Precedence and errors match `script create`: exactly one of `--content`/`--content-file`, file channel over a `content` key in `--params`/`--params-file`, only a leading BOM stripped, CRLF preserved. The response adds `source_bytes` and `source_sha256` (hex) for the content actually sent.",
 		},
 		{
+			Domain: "filesystem", Name: "import-get", PluginCommand: "import_get",
+			Summary: "Read an imported asset's settings, writable options, and revision",
+			Timeout: DefaultTimeout,
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "res:// path of an already-imported asset"),
+			},
+		},
+		{
+			Domain: "filesystem", Name: "import-set", PluginCommand: "import_set",
+			Summary: "Patch scalar import options and optionally reimport the asset",
+			Timeout: ImportTimeout, Write: true,
+			DocNote: "The 120-second timeout bounds only the client wait; it cannot cancel a native import already in progress. Inspect the current settings and import status before retrying an interrupted write.",
+			Params: []ParamSpec{
+				ps("path", "path", true, "", "res:// path of an already-imported asset"),
+				pj("options", "options", true, "JSON object of stored scalar import options to change"),
+				pb("reimport", "reimport", false, "true", "Run native reimport after committing the settings"),
+				ps("expected-revision", "expected_revision", false, "", "Revision from import-get; reject a stale edit when it no longer matches"),
+			},
+		},
+		{
 			Domain: "filesystem", Name: "reimport", PluginCommand: "reimport",
 			Summary: "Reimport assets (textures, models, audio — NOT scripts)",
-			Timeout: DefaultTimeout, Write: true,
+			Timeout: ImportTimeout, Write: true,
+			DocNote: "The 120-second timeout bounds only the client wait; it cannot cancel a native import already in progress. Inspect current import status before retrying an interrupted write.",
 			Params: []ParamSpec{
 				pj("paths", "paths", true, `JSON array of res:// paths`),
 			},

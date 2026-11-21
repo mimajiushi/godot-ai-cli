@@ -538,6 +538,51 @@ func TestExecuteWriteGateRejectsPlaying(t *testing.T) {
 	}
 }
 
+// TestExecuteProjectRunAllowsLivePlayingNoop 验证 daemon 将 run_project
+// 的窄例外接到 bridge：实时 playing 后请求抵达插件并返回 already-running 结果。
+// mock 对所有命令执行真实插件的 params 类型校验，覆盖内部 probe 的 nil 回归。
+func TestExecuteProjectRunAllowsLivePlayingNoop(t *testing.T) {
+	d := startDaemon(t)
+	p := mockplugin.Dial(t, fmt.Sprintf("127.0.0.1:%d", d.WSPort()), d.Bridge().WSCapability, map[string]any{
+		"readiness": "playing",
+	})
+	p.SetResponder(func(command string, params map[string]any) *mockplugin.Response {
+		if params == nil {
+			return &mockplugin.Response{Status: "error", Error: map[string]any{
+				"code": "INVALID_PARAMS", "message": "params must be a Dictionary", "data": map[string]any{},
+			}}
+		}
+		switch command {
+		case "get_editor_state":
+			return &mockplugin.Response{Data: map[string]any{
+				"readiness": "playing", "game_status": map[string]any{"status": "live"},
+			}}
+		case "run_project":
+			return &mockplugin.Response{Data: map[string]any{
+				"was_already_running": true, "reason": "Project was already running; no action taken",
+			}}
+		default:
+			return nil
+		}
+	})
+
+	code, body := postJSON(t, baseURL(d)+"/godot-ai/cli/execute", map[string]any{
+		"command": "run_project",
+		"params":  map[string]any{},
+		"write":   true,
+	})
+	if code != http.StatusOK || body["status"] != "ok" {
+		t.Fatalf("project run no-op 失败：%d %v", code, body)
+	}
+	data, _ := body["data"].(map[string]any)
+	if data["was_already_running"] != true {
+		t.Errorf("run_project data = %v，want was_already_running=true", data)
+	}
+	if got := p.Count("run_project"); got != 1 {
+		t.Errorf("run_project 到达插件 %d 次，want 1", got)
+	}
+}
+
 func TestActivateEndpoint(t *testing.T) {
 	d := startDaemon(t)
 	url := baseURL(d) + "/godot-ai/cli/activate"
